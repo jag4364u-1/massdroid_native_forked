@@ -22,7 +22,10 @@ import kotlinx.coroutines.launch
 import net.asksakis.massdroidv2.data.sendspin.LocalSpeakerVolumeBridge
 import net.asksakis.massdroidv2.data.sendspin.SendspinManager
 import net.asksakis.massdroidv2.data.websocket.ConnectionState
+import net.asksakis.massdroidv2.data.websocket.MaCommands
 import net.asksakis.massdroidv2.data.websocket.MaWebSocketClient
+import net.asksakis.massdroidv2.data.websocket.VolumeSetArgs
+import net.asksakis.massdroidv2.data.websocket.sendCommand
 import net.asksakis.massdroidv2.domain.model.SendspinAudioFormat
 import net.asksakis.massdroidv2.domain.repository.PlayerRepository
 import net.asksakis.massdroidv2.domain.repository.SettingsRepository
@@ -153,6 +156,11 @@ class SendspinCoordinator(
     private fun observeAudioFormatPreference() {
         val connectivityManager = context.getSystemService(ConnectivityManager::class.java)
         val wifiState = MutableStateFlow(isOnWifi(connectivityManager))
+        // Tracks the initial transport — the first onCapabilitiesChanged is the
+        // baseline (already-active network at registration), not a transition,
+        // so we skip handover handling for it. Subsequent toggles trigger the
+        // WS + connection-pool reset path.
+        var lastWifiSeen: Boolean? = null
 
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
@@ -161,6 +169,16 @@ class SendspinCoordinator(
                     Log.d(TAG, "Network changed: ${if (wifi) "WiFi" else "Mobile"}")
                     if (wifi) onWifiConnected("wifi-connected")
                 }
+                // Force fast WS reconnect + OkHttp pool eviction on transport
+                // flip. Without this, the dead WiFi socket keeps the WS alive
+                // for ~30-60s until the ping interval times out, and Coil keeps
+                // pulling stale connections from the pool (visible as missing
+                // album art after the switch).
+                if (lastWifiSeen != null && lastWifiSeen != wifi) {
+                    Log.d(TAG, "Transport flipped (wifi=$lastWifiSeen → $wifi), nudging WS + pool")
+                    wsClient.handleTransportChange()
+                }
+                lastWifiSeen = wifi
                 wifiState.value = wifi
                 sendspinManager.setCellularHint(!wifi)
             }
@@ -255,7 +273,28 @@ class SendspinCoordinator(
                 val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
                 val cur = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
                 val percent = if (max > 0) ((cur * 100f / max) + 0.5f).toInt() else 0
-                scope.launch { playerRepository.setVolume(sendspinPlayerId, percent) }
+                // Local STREAM_MUSIC is the canonical gain stage. Mark the push so
+                // the LocalSpeakerVolumeBridge suppresses the MA echo that will
+                // arrive shortly via PLAYER_UPDATED, and update the in-app slider
+                // optimistically so the UI doesn't lag behind the BT knob.
+                localVolumeBridge.recordLocalPush(percent)
+                playerRepository.applyVolumeOptimistic(sendspinPlayerId, percent)
+                // Fire-and-forget: don't block on the MA ack. The user perceives
+                // volume on STREAM_MUSIC which has already changed; MA only needs
+                // to mirror it for group fan-out and server-side state. Rapid
+                // turns of the BT knob may emit many updates per second; serial
+                // awaiting of acks would queue them and degrade responsiveness.
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        wsClient.sendCommand(
+                            MaCommands.Players.CMD_VOLUME_SET,
+                            VolumeSetArgs(playerId = sendspinPlayerId, volumeLevel = percent),
+                            awaitResponse = false
+                        )
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Volume push to MA failed: ${e.message}")
+                    }
+                }
             }
         }
         volumeObserver = observer

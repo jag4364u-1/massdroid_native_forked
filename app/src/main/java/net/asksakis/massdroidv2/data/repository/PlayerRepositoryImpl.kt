@@ -160,8 +160,14 @@ class PlayerRepositoryImpl @Inject constructor(
         scope.launch {
             wsClient.connectionState.collect { state ->
                 when (state) {
-                    is ConnectionState.Disconnected, is ConnectionState.Connecting -> {
-                        // Keep selectedPlayer and queueState for cached mini player display
+                    is ConnectionState.Disconnected,
+                    is ConnectionState.Connecting,
+                    is ConnectionState.Error -> {
+                        // Error covers the network-handover path: handleTransportChange()
+                        // cancels the WS which fires onFailure → Error state. Without
+                        // this branch, the position ticker keeps interpolating during
+                        // the reconnect window and creates a visible "jump back" when
+                        // the next QUEUE_TIME_UPDATED rebaselines after reconnect.
                         pendingRestoredPlayerId = selectedPlayerId
                         _players.value = emptyList()
                         resetPosition()

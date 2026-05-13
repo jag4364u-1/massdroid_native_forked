@@ -16,6 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -23,6 +24,7 @@ import kotlinx.coroutines.withContext
 import net.asksakis.massdroidv2.auto.AaMetrics
 import net.asksakis.massdroidv2.auto.AaProjectionObserver
 import net.asksakis.massdroidv2.data.sendspin.SendspinManager
+import net.asksakis.massdroidv2.data.websocket.ConnectionState
 import net.asksakis.massdroidv2.data.websocket.MaWebSocketClient
 import net.asksakis.massdroidv2.domain.model.MediaType
 import net.asksakis.massdroidv2.domain.model.PlaybackState
@@ -48,6 +50,7 @@ class AndroidAutoController(
     private val activePlayerId: () -> String?,
     private val sendVolumeCommand: (String, Int) -> Unit,
     private val onPlaybackStopped: (String) -> Unit,
+    private val trackedBrowsePaths: () -> Set<String>,
 ) {
     private var session: MediaLibraryService.MediaLibrarySession? = null
     private var remotePlayer: RemoteControlPlayer? = null
@@ -70,6 +73,7 @@ class AndroidAutoController(
         observePlayback()
         observePosition()
         observeQueueItems()
+        observeWsForBrowseInvalidation()
     }
 
     fun getSession(): MediaLibraryService.MediaLibrarySession? = session
@@ -116,6 +120,36 @@ class AndroidAutoController(
                 isAaProjecting.value = projecting
                 updateSendspinSelectionLock(if (projecting) "projection_started" else "projection_stopped")
             }
+        }
+    }
+
+    /**
+     * When the WS connection transitions to Connected, fire notifyChildrenChanged
+     * for every browse path the AA host has queried or subscribed to. This fixes
+     * the cold-start race: AA binds and queries onGetChildren before the WS has
+     * authed with MA, so musicRepository returns empty lists and AA caches them.
+     * Without this re-broadcast, the user sees empty tabs until force-stop.
+     *
+     * Pattern: map to Connected-or-not, distinctUntilChanged, filter for the
+     * positive edge only. Fires once per Disconnected/Error/Connecting → Connected
+     * transition, including the initial transition when AA may have arrived before
+     * the WS. Empty tracked-paths set is harmless (no notifies fired).
+     */
+    private fun observeWsForBrowseInvalidation() {
+        scope.launch {
+            wsClient.connectionState
+                .map { it is ConnectionState.Connected }
+                .distinctUntilChanged()
+                .filter { it }
+                .collect {
+                    val paths = trackedBrowsePaths()
+                    if (paths.isEmpty()) return@collect
+                    val s = session ?: return@collect
+                    Log.d(TAG, "WS connected, invalidating ${paths.size} AA browse paths")
+                    paths.forEach { parentId ->
+                        s.notifyChildrenChanged(parentId, Int.MAX_VALUE, null)
+                    }
+                }
         }
     }
 

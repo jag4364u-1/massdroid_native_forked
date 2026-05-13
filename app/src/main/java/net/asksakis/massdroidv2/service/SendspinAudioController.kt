@@ -733,11 +733,21 @@ class SendspinAudioController(
             .setOnAudioFocusChangeListener { focusChange ->
                 when (focusChange) {
                     AudioManager.AUDIOFOCUS_GAIN -> {
-                        Log.d(TAG, "Audio focus gained, isStreaming=$isStreaming isReady=$isReady")
+                        Log.d(TAG, "Audio focus gained, isStreaming=$isStreaming isReady=$isReady currentIsPlaying=$currentIsPlaying")
                         hasAudioFocus = true
+                        // Always undo a prior duck. Resume is gated on the canonical
+                        // playback intent (currentIsPlaying): noisy/route-loss and
+                        // permanent-loss paths set it to false, so the route-change
+                        // focus-shuffle that follows a BT disconnect will not silently
+                        // hand audio off to the phone speaker. Transient losses (phone
+                        // call, nav prompt) leave the intent true and resume normally.
+                        sendspinManager.restoreVolume()
+                        if (!currentIsPlaying) {
+                            Log.d(TAG, "Focus gained but intent is paused, staying paused")
+                            return@setOnAudioFocusChangeListener
+                        }
                         if (isStreaming) {
                             sendspinManager.resumeAudio()
-                            sendspinManager.restoreVolume()
                         } else if (isReady) {
                             // After phone call: server may have stopped streaming.
                             // Resume by sending play command.
@@ -750,8 +760,11 @@ class SendspinAudioController(
                     }
                     AudioManager.AUDIOFOCUS_LOSS -> {
                         Log.d(TAG, "Audio focus lost permanently")
-                
                         hasAudioFocus = false
+                        // Align intent with the permanent loss: another app has taken
+                        // over, the user is no longer "trying to play". Without this,
+                        // a later AUDIOFOCUS_GAIN would resume against the user's wish.
+                        currentIsPlaying = false
                         if (isStreaming) {
                             val id = sendspinPlayerId
                             if (id != null) {
@@ -759,6 +772,7 @@ class SendspinAudioController(
                             }
                         }
                         sendspinManager.pauseAudio()
+                        notifyStateChanged()
                     }
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                         Log.d(TAG, "Audio focus lost transiently")

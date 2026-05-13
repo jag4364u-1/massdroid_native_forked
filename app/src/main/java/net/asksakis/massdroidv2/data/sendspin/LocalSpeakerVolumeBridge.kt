@@ -30,13 +30,11 @@ class LocalSpeakerVolumeBridge(
 
     private var jobs: MutableList<Job> = mutableListOf()
 
-    @Volatile private var lastLocallyPushedPct: Int = -1
     @Volatile private var lastLocalPushAtMs: Long = 0L
     // First event after start() is a baseline snapshot (MA broadcasting the
     // stored value for our player). Applying it would yank STREAM_MUSIC to
     // whatever MA has cached — which at app startup typically isn't what the
-    // user expects. Use it to seed [lastLocallyPushedPct] so later genuine
-    // changes apply normally.
+    // user expects. Drop the first event silently and accept subsequent ones.
     @Volatile private var awaitingBaseline: Boolean = true
 
     /** Start observing. Idempotent. */
@@ -63,28 +61,31 @@ class LocalSpeakerVolumeBridge(
     }
 
     /**
-     * Call when the user drives volume locally (hw keys, slider) so we can
-     * suppress the server echo that will arrive shortly after.
+     * Call when the user drives volume locally (hw keys, BT AVRCP, app slider)
+     * so we can suppress the MA echoes that arrive shortly after. Multiple
+     * echoes from a rapid sequence are all suppressed by the time window —
+     * matching exact values does not work when echoes can arrive out of order.
      */
     fun recordLocalPush(pct: Int) {
-        lastLocallyPushedPct = pct.coerceIn(0, 100)
         lastLocalPushAtMs = System.currentTimeMillis()
+        Log.d(TAG, "recordLocalPush: $pct%")
     }
 
     private fun applyServerVolume(pct: Int) {
         val bounded = pct.coerceIn(0, 100)
         if (awaitingBaseline) {
             awaitingBaseline = false
-            lastLocallyPushedPct = bounded
-            lastLocalPushAtMs = System.currentTimeMillis()
             Log.d(TAG, "applyServerVolume: baseline $bounded% (no STREAM_MUSIC change)")
             return
         }
-        // Echo from our own hw-key mirror: skip to avoid bouncing STREAM_MUSIC.
-        if (bounded == lastLocallyPushedPct &&
-            System.currentTimeMillis() - lastLocalPushAtMs < ECHO_WINDOW_MS
-        ) {
-            Log.d(TAG, "applyServerVolume: ignoring echo at $bounded%")
+        // While we recently pushed a local change (hw keys / BT AVRCP / slider),
+        // STREAM_MUSIC is the source of truth. Any server-broadcasted volume in
+        // this window is by definition our own echo — possibly out-of-order with
+        // other in-flight echoes — so don't apply it. After the window closes,
+        // server-originated changes (e.g. group sync from another speaker) apply
+        // normally.
+        if (System.currentTimeMillis() - lastLocalPushAtMs < ECHO_WINDOW_MS) {
+            Log.d(TAG, "applyServerVolume: ignoring $bounded% during local-push window")
             return
         }
         val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)

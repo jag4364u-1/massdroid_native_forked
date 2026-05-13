@@ -92,6 +92,7 @@ class PlaybackService : MediaLibraryService() {
             activePlayerId = { activePlayerId() },
             sendVolumeCommand = { playerId, volume -> sendVolumeCommand(playerId, volume) },
             onPlaybackStopped = { reason -> proximityController.cancelNoRoomStopTimer(reason) },
+            trackedBrowsePaths = { androidAutoBrowseController.trackedParentIds() },
         )
         androidAutoController.start(androidAutoBrowseController.callback)
     }
@@ -294,6 +295,7 @@ class PlaybackService : MediaLibraryService() {
         val manager = getSystemService(NotificationManager::class.java)
         manager?.cancel(CONN_NOTIFICATION_ID)
         androidAutoController.stop()
+        androidAutoBrowseController.clearTrackedParentIds()
         scope.cancel()
         AaMetrics.stop()
         super.onDestroy()

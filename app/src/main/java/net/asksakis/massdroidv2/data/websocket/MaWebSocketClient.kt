@@ -260,6 +260,27 @@ class MaWebSocketClient(
         failAllPending("Disconnected")
     }
 
+    /**
+     * Called when the device's active network transport changes (WiFi ↔ cellular,
+     * roaming, captive portal exit, etc.). Evicts the OkHttp connection pool so
+     * subsequent image (Coil) and HTTP API requests pick up fresh connections on
+     * the new route — without this, the pool hands out idle keep-alive entries
+     * bound to the previous transport's dead local IP, visible as missing cover
+     * art after a network change.
+     *
+     * Deliberately does NOT cancel the live MA WebSocket. SendspinAudioController
+     * force-restarts Sendspin on every MA reconnect (see Collector 6) to recover
+     * from server reboots, which cuts audio playback. We rely on OkHttp's
+     * pingInterval to detect actually-dead sockets while letting connections
+     * that survive transport migration keep streaming seamlessly. evictAll()
+     * does not affect active WebSocket streams — only idle pool entries are
+     * closed.
+     */
+    fun handleTransportChange() {
+        Log.d(TAG, "Transport change: evicting connection pool")
+        okHttpClient.connectionPool.evictAll()
+    }
+
     private fun scheduleReconnect() {
         if (userDisconnected) return
         if (!hasConnectedSuccessfully) return // don't auto-retry initial connection failures

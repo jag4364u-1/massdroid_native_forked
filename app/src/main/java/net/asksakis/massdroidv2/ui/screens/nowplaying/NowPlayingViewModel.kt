@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
@@ -376,14 +377,28 @@ class NowPlayingViewModel @Inject constructor(
         }
         // Don't clear cache on disconnect/error: keep showing last track info
         // until a new track replaces it (via queueState or serverMetadata collectors)
-        // Flow-based sendspin status: only samples buffer when active, distinctUntilChanged
+        // Flow-based sendspin status: combines state flows with a 1Hz ticker so that
+        // dynamic metrics (buffer, latency, clock error, DAC drift) refresh in the UI
+        // while none of the state sources are changing. Without the ticker, the
+        // combine only emits on connection/sync/codec/network/id transitions, and
+        // the buffer reading stays frozen at whatever it was at the last transition
+        // — visible after WiFi↔mobile handover where the snapshot caught a drained
+        // buffer that has since refilled. distinctUntilChanged downstream still
+        // deduplicates ticks where nothing actually changed.
+        val sendspinUiTicker = flow {
+            while (true) {
+                emit(Unit)
+                delay(1_000)
+            }
+        }
         viewModelScope.launch {
             combine(
                 sendspinManager.connectionState,
                 sendspinManager.syncState,
                 sendspinManager.streamCodec,
                 sendspinManager.networkMode,
-                sendspinClientId
+                sendspinClientId,
+                sendspinUiTicker
             ) { values: Array<*> ->
                 val conn = values[0] as SendspinState
                 val sync = values[1] as SyncState
