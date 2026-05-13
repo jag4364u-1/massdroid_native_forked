@@ -24,6 +24,8 @@ import kotlinx.coroutines.withContext
 import net.asksakis.massdroidv2.auto.AaMetrics
 import net.asksakis.massdroidv2.auto.AaProjectionObserver
 import net.asksakis.massdroidv2.data.sendspin.SendspinManager
+import net.asksakis.massdroidv2.data.sendspin.SendspinState
+import net.asksakis.massdroidv2.data.sendspin.SyncState
 import net.asksakis.massdroidv2.data.websocket.ConnectionState
 import net.asksakis.massdroidv2.data.websocket.MaWebSocketClient
 import net.asksakis.massdroidv2.domain.model.MediaType
@@ -288,17 +290,43 @@ class AndroidAutoController(
                     a?.currentItem?.queueItemId == b?.currentItem?.queueItemId &&
                     a?.currentItem?.track?.uri == b?.currentItem?.track?.uri
             }
-            combine(playerRepository.selectedPlayer, structuralQueue) { player, queue ->
-                player to queue
-            }.collect { (player, queue) ->
-                if (player == null) return@collect
+            // Include Sendspin engine state in the combine so the AA snapshot
+            // re-emits whenever transport/sync flips (e.g. SYNCING during a
+            // seek/track-change, ERROR during a network blip). That drives
+            // STATE_BUFFERING in RemoteControlPlayer.getState() and stops AA
+            // from advancing the progress bar against silence.
+            combine(
+                playerRepository.selectedPlayer,
+                structuralQueue,
+                sendspinManager.connectionState,
+                sendspinManager.syncState
+            ) { player, queue, ssConn, ssSync ->
+                AutoStateInputs(player, queue, ssConn, ssSync)
+            }.collect { inputs ->
+                val player = inputs.player ?: return@collect
+                val queue = inputs.queue
                 if (player.state != PlaybackState.PLAYING) onPlaybackStopped("playback-stopped")
 
                 val currentTrack = queue?.currentItem?.track
                 val trackUri = currentTrack?.uri ?: player.currentMedia?.uri
                 val currentIndex = queue?.currentIndex ?: 0
+                val isSendspinSelected = player.playerId == sendspinPlayerId()
+                // For Sendspin: audio is actually flowing when the engine is
+                // STREAMING and the sync state is producing audio (either
+                // synchronized or coasting on holdover buffer). SYNCING,
+                // SYNC_ERROR_REBUFFERING, IDLE — no audible output.
+                // For remote MA players: we have no engine-level signal; trust
+                // the server's reported PLAYING state.
+                val audioFlowing = if (isSendspinSelected) {
+                    inputs.ssConn == SendspinState.STREAMING &&
+                        (inputs.ssSync == SyncState.SYNCHRONIZED ||
+                            inputs.ssSync == SyncState.HOLDOVER_PLAYING_FROM_BUFFER)
+                } else {
+                    player.state == PlaybackState.PLAYING
+                }
                 val snapshot = AutoPlaybackSnapshot(
                     isPlaying = player.state == PlaybackState.PLAYING,
+                    audioFlowing = audioFlowing,
                     queueItemId = queue?.currentItem?.queueItemId,
                     trackUri = trackUri,
                     title = currentTrack?.name ?: player.currentMedia?.title ?: "",
@@ -312,7 +340,7 @@ class AndroidAutoController(
                     artworkData = cachedArtworkData,
                     volumeLevel = effectiveVolume(player.volumeLevel),
                     isMuted = player.volumeMuted,
-                    isRemotePlayback = player.playerId != sendspinPlayerId(),
+                    isRemotePlayback = !isSendspinSelected,
                 )
                 val previous = lastPlaybackSnapshot
                 val trackChanged = previous.trackUri != null &&
@@ -404,6 +432,13 @@ class AndroidAutoController(
         scope.launch {
             playerRepository.playbackPosition.collect { position ->
                 if (position == null || !position.matches(lastPlaybackSnapshot)) return@collect
+                // Silent sync only. With STATE_BUFFERING reported from
+                // RemoteControlPlayer.getState() when audio is not actually
+                // flowing, AA's progress-bar interpolation pauses during
+                // seeks / track changes / sync transitions on its own. The
+                // next observePlayback emission (driven by the Sendspin
+                // syncState/connectionState combine) invalidates and AA picks
+                // up the new contentPosition together with the new state.
                 remotePlayer?.syncPosition((position.position * 1000).toLong())
             }
         }
@@ -557,4 +592,12 @@ class AndroidAutoController(
         private const val VOLUME_STEP = RemoteControlPlayer.VOLUME_SCALE
         private const val VOLUME_OVERRIDE_MS = 15_000L
     }
+
+    /** Holds the four flows combined into a single AA snapshot emission. */
+    private data class AutoStateInputs(
+        val player: net.asksakis.massdroidv2.domain.model.Player?,
+        val queue: net.asksakis.massdroidv2.domain.model.QueueState?,
+        val ssConn: SendspinState,
+        val ssSync: SyncState,
+    )
 }

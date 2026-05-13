@@ -251,6 +251,7 @@ class NowPlayingViewModel @Inject constructor(
     var cachedSendspinAudioFormat = "SMART"; private set
     private var cachedSendspinStaticDelayMs = 0
     private var lastSendspinStatusLogAtMs = 0L
+    private var lastLoggedSendspinStatusKey: String? = null
     private val _cachedTrackDisplay = MutableStateFlow<CachedTrackDisplay?>(null)
     val cachedTrackDisplay: StateFlow<CachedTrackDisplay?> = _cachedTrackDisplay.asStateFlow()
     private val _adjacentArtwork = MutableStateFlow(AdjacentArtworkUi(previousImageUrl = null, nextImageUrl = null))
@@ -407,6 +408,7 @@ class NowPlayingViewModel @Inject constructor(
                 val clientId = values[4] as String?
                 if (clientId == null) {
                     lastSendspinStatusLogAtMs = 0L
+                    lastLoggedSendspinStatusKey = null
                     return@combine null
                 }
                 SendspinStatusUi(
@@ -977,9 +979,20 @@ class NowPlayingViewModel @Inject constructor(
     }
 
     private fun maybeLogSendspinUiStatus(status: SendspinStatusUi) {
+        // Log on transitions of state-shaped fields (connection, sync, codec,
+        // mode, correction, syncMuted) immediately; otherwise heartbeat once
+        // every 30s. Before the 1Hz UI ticker existed, this was a 1s rate
+        // limit that almost never tripped during steady state. With the ticker
+        // calling this on every emit, the rate limit alone produced a log per
+        // second — useless noise. Keying on state fields keeps useful
+        // transitions verbose while idle playback stays quiet.
+        val key = "${status.connectionState}|${status.syncState}|${status.codec ?: ""}|" +
+            "${status.configuredFormat}|${status.correctionMode ?: ""}|${status.syncMuted}"
         val now = System.currentTimeMillis()
-        if (now - lastSendspinStatusLogAtMs < 1000L) return
+        val stateChanged = key != lastLoggedSendspinStatusKey
+        if (!stateChanged && now - lastSendspinStatusLogAtMs < 30_000L) return
         lastSendspinStatusLogAtMs = now
+        lastLoggedSendspinStatusKey = key
         Log.d(
             SENDSPIN_UI_DBG,
             "transport=${status.connectionState} playback=${status.syncState} codec=${status.codec ?: "unknown"} " +
