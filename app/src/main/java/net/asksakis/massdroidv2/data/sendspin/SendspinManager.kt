@@ -156,10 +156,15 @@ class SendspinManager(
      * orchestrator when MA has just reconnected: the existing Sendspin
      * session may have been invalidated server-side during the outage, so we
      * re-handshake without tearing down the manager's collectors.
+     *
+     * Also recovers from terminal ERROR (auth_error, credentials-exhaustion):
+     * the client side rearms its lifecycle as long as a credentials provider
+     * was registered, so a fresh MA session is enough to wake Sendspin back
+     * up. This is the primary mitigation for #43.
      */
     fun refresh() {
         if (!_enabled.value) {
-            Log.d(TAG, "refresh ignored: manager is not enabled")
+            Log.d(TAG, "refresh ignored: manager never started")
             return
         }
         Log.d(TAG, "refresh: forwarding to client")

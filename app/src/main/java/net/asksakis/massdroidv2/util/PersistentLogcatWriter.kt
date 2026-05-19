@@ -35,6 +35,7 @@ object PersistentLogcatWriter {
 
     @Volatile private var process: Process? = null
 
+    @Synchronized
     fun start(context: Context) {
         if (process != null) return
         val logsDir = File(context.getExternalFilesDir(null), "logs")

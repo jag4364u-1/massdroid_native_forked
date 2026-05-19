@@ -21,6 +21,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import okio.ByteString
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
 
 enum class SendspinState {
@@ -94,8 +95,8 @@ class SendspinClient(
 
     private var errorMessage: String? = null
     @Volatile private var shouldRun = false
-    @Volatile private var attempt = 0
-    @Volatile private var providerFailures = 0
+    private val attempt = AtomicInteger(0)
+    private val providerFailures = AtomicInteger(0)
     @Volatile private var connectionGeneration = 0
     private var droppedBinaryFrames = 0
     private var clientIdInternal: String = ""
@@ -110,36 +111,40 @@ class SendspinClient(
     fun start(clientId: String, credentialsProvider: suspend () -> Credentials?) {
         this.clientIdInternal = clientId
         this.credentialsProvider = credentialsProvider
-        if (shouldRun) {
-            Log.d(TAG, "start: already running, kicking immediate retry with fresh provider")
-            cancelReconnect()
-            attempt = 0
-            providerFailures = 0
-            scheduleConnect(delayMs = 0L)
-            return
-        }
+        cancelReconnect()
         shouldRun = true
-        attempt = 0
-        providerFailures = 0
+        attempt.set(0)
+        providerFailures.set(0)
         scheduleConnect(delayMs = 0L)
     }
 
     /**
      * Trigger an immediate fresh reconnect using the current credentials
-     * provider. No-op if not running. Called by the orchestrator when MA
-     * has reconnected and Sendspin should re-handshake.
+     * provider. This is the canonical recovery entry point used by the
+     * orchestrator after MA has reconnected.
+     *
+     * Recovery from terminal ERROR is intentional: a previous auth failure
+     * or credentials-exhaustion put us into shouldRun=false, but the caller
+     * is signalling that conditions have changed (fresh MA session = fresh
+     * token). As long as the credentials provider is still registered
+     * (start() was called at least once and stop() was not), refresh()
+     * re-arms the lifecycle and triggers an immediate retry. Without this,
+     * a single transient auth_error during car-BT use would leave the
+     * Sendspin player dead until app restart — the exact symptom of #43.
      */
     @Synchronized
     fun refresh() {
-        if (!shouldRun) {
-            Log.d(TAG, "refresh ignored: lifecycle not running")
+        val provider = credentialsProvider
+        if (provider == null) {
+            Log.d(TAG, "refresh ignored: never started")
             return
         }
-        Log.d(TAG, "refresh: forcing reconnect")
+        Log.d(TAG, "refresh: forcing reconnect (shouldRun was $shouldRun)")
         cancelReconnect()
         closeSocket(1000, "Refresh")
-        attempt = 0
-        providerFailures = 0
+        shouldRun = true
+        attempt.set(0)
+        providerFailures.set(0)
         scheduleConnect(delayMs = 0L)
     }
 
@@ -158,8 +163,8 @@ class SendspinClient(
         }
         webSocket = null
         _state.value = SendspinState.DISCONNECTED
-        attempt = 0
-        providerFailures = 0
+        attempt.set(0)
+        providerFailures.set(0)
         credentialsProvider = null
     }
 
@@ -184,52 +189,56 @@ class SendspinClient(
     private fun scheduleConnect(delayMs: Long) {
         if (!shouldRun) return
         cancelReconnect()
-        if (delayMs <= 0L) {
-            Log.d(TAG, "Connecting immediately (attempt=$attempt)")
-            launchConnect()
+        // Always launch through scope so the Job is tracked. Immediate
+        // (delayMs<=0) attempts still use launch + skip the delay so a
+        // subsequent cancelReconnect() can interrupt them — preventing two
+        // openWebSocket() coroutines from racing after back-to-back
+        // start()/refresh() calls.
+        val effectiveDelay = delayMs.coerceAtLeast(0L)
+        if (effectiveDelay == 0L) {
+            Log.d(TAG, "Connecting immediately (attempt=${attempt.get()})")
         } else {
-            Log.d(TAG, "Reconnect scheduled in ${delayMs}ms (attempt=$attempt)")
-            reconnectJob = scope.launch {
-                delay(delayMs)
-                if (shouldRun) launchConnect()
-            }
+            Log.d(TAG, "Reconnect scheduled in ${effectiveDelay}ms (attempt=${attempt.get()})")
+        }
+        reconnectJob = scope.launch {
+            if (effectiveDelay > 0L) delay(effectiveDelay)
+            if (!shouldRun) return@launch
+            runConnectAttempt()
         }
     }
 
-    private fun launchConnect() {
-        scope.launch {
-            val provider = credentialsProvider
-            if (provider == null) {
-                Log.w(TAG, "No credentials provider; abandoning lifecycle")
+    private suspend fun runConnectAttempt() {
+        val provider = credentialsProvider
+        if (provider == null) {
+            Log.w(TAG, "No credentials provider; abandoning lifecycle")
+            synchronized(this@SendspinClient) {
+                shouldRun = false
+                _state.value = SendspinState.ERROR
+            }
+            return
+        }
+        val creds = try {
+            provider()
+        } catch (t: Throwable) {
+            Log.w(TAG, "Credentials provider threw: ${t.message}")
+            null
+        }
+        if (creds == null || creds.serverUrl.isBlank() || creds.token.isBlank()) {
+            val failures = providerFailures.incrementAndGet()
+            if (failures >= MAX_PROVIDER_FAILURES) {
+                Log.w(TAG, "Credentials unavailable after $failures attempts; moving to ERROR")
                 synchronized(this@SendspinClient) {
                     shouldRun = false
                     _state.value = SendspinState.ERROR
                 }
-                return@launch
+                return
             }
-            val creds = try {
-                provider()
-            } catch (t: Throwable) {
-                Log.w(TAG, "Credentials provider threw: ${t.message}")
-                null
-            }
-            if (creds == null || creds.serverUrl.isBlank() || creds.token.isBlank()) {
-                providerFailures++
-                if (providerFailures >= MAX_PROVIDER_FAILURES) {
-                    Log.w(TAG, "Credentials unavailable after $providerFailures attempts; moving to ERROR")
-                    synchronized(this@SendspinClient) {
-                        shouldRun = false
-                        _state.value = SendspinState.ERROR
-                    }
-                    return@launch
-                }
-                Log.d(TAG, "Credentials unavailable, will retry (providerFailures=$providerFailures)")
-                scheduleConnect(nextBackoffMs())
-                return@launch
-            }
-            providerFailures = 0
-            openWebSocket(creds)
+            Log.d(TAG, "Credentials unavailable, will retry (providerFailures=$failures)")
+            scheduleConnect(nextBackoffMs())
+            return
         }
+        providerFailures.set(0)
+        openWebSocket(creds)
     }
 
     private fun openWebSocket(creds: Credentials) {
@@ -240,7 +249,7 @@ class SendspinClient(
         errorMessage = null
 
         val wsUrl = buildSendspinUrl(creds.serverUrl)
-        Log.d(TAG, "Connecting to $wsUrl (gen=$gen, attempt=$attempt)")
+        Log.d(TAG, "Connecting to $wsUrl (gen=$gen, attempt=${attempt.get()})")
 
         val request = Request.Builder().url(wsUrl).build()
         webSocket = httpClientProvider().newWebSocket(request, object : WebSocketListener() {
@@ -322,11 +331,11 @@ class SendspinClient(
     }
 
     private fun nextBackoffMs(): Long {
-        val idx = attempt.coerceAtMost(BACKOFF_MS.size - 1)
+        val current = attempt.getAndIncrement()
+        val idx = current.coerceAtMost(BACKOFF_MS.size - 1)
         val base = BACKOFF_MS[idx]
-        attempt++
         val jitter = (base * JITTER_FRACTION * Random.nextDouble()).toLong()
-        return (base + jitter).coerceAtMost(BACKOFF_MAX_MS + (BACKOFF_MAX_MS * JITTER_FRACTION).toLong())
+        return (base + jitter).coerceAtMost(BACKOFF_MAX_MS)
     }
 
     private fun buildSendspinUrl(serverUrl: String): String {
@@ -396,11 +405,11 @@ class SendspinClient(
             _state.value = newState
             when (newState) {
                 SendspinState.SYNCING, SendspinState.STREAMING -> {
-                    if (attempt != 0) {
-                        Log.d(TAG, "Connection healthy, resetting backoff (was attempt=$attempt)")
-                        attempt = 0
+                    val previous = attempt.getAndSet(0)
+                    if (previous != 0) {
+                        Log.d(TAG, "Connection healthy, resetting backoff (was attempt=$previous)")
                     }
-                    providerFailures = 0
+                    providerFailures.set(0)
                 }
                 SendspinState.ERROR -> {
                     Log.w(TAG, "Terminal ERROR pushed by manager, stopping lifecycle")
