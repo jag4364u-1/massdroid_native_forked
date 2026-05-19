@@ -98,7 +98,7 @@ class SendspinClient(
     private val attempt = AtomicInteger(0)
     private val providerFailures = AtomicInteger(0)
     @Volatile private var connectionGeneration = 0
-    private var droppedBinaryFrames = 0
+    private val droppedBinaryFrames = AtomicInteger(0)
     private var clientIdInternal: String = ""
     private var credentialsProvider: (suspend () -> Credentials?)? = null
 
@@ -242,7 +242,18 @@ class SendspinClient(
     }
 
     private fun openWebSocket(creds: Credentials) {
-        val gen = synchronized(this) { ++connectionGeneration }
+        // Re-check lifecycle under the monitor and bump the generation
+        // atomically with the socket-handle assignment. Without the recheck,
+        // a stop() call that fired AFTER the coroutine's pre-launch
+        // shouldRun guard but BEFORE this point would leave an orphaned
+        // socket open.
+        val gen = synchronized(this) {
+            if (!shouldRun) {
+                Log.d(TAG, "openWebSocket aborted: lifecycle stopped while attempt was scheduled")
+                return
+            }
+            ++connectionGeneration
+        }
         closeSocket(1000, null)
 
         _state.value = SendspinState.CONNECTING
@@ -255,7 +266,7 @@ class SendspinClient(
         webSocket = httpClientProvider().newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 if (gen != connectionGeneration) return
-                droppedBinaryFrames = 0
+                droppedBinaryFrames.set(0)
                 _state.value = SendspinState.AUTHENTICATING
                 val auth = SendspinAuthMessage(token = creds.token, clientId = clientIdInternal)
                 val msg = json.encodeToString(auth)
@@ -276,13 +287,15 @@ class SendspinClient(
                 if (gen != connectionGeneration) return
                 val data = bytes.toByteArray()
                 if (!_messages.tryEmit(SendspinMessage.Binary(data))) {
-                    droppedBinaryFrames++
-                    if (droppedBinaryFrames <= 5 || droppedBinaryFrames % 100 == 0) {
-                        Log.w(TAG, "Dropping binary audio frame(s): dropped=$droppedBinaryFrames")
+                    val dropped = droppedBinaryFrames.incrementAndGet()
+                    if (dropped <= 5 || dropped % 100 == 0) {
+                        Log.w(TAG, "Dropping binary audio frame(s): dropped=$dropped")
                     }
-                } else if (droppedBinaryFrames != 0) {
-                    Log.d(TAG, "Recovered after dropping $droppedBinaryFrames binary frame(s)")
-                    droppedBinaryFrames = 0
+                } else {
+                    val previousDropped = droppedBinaryFrames.getAndSet(0)
+                    if (previousDropped != 0) {
+                        Log.d(TAG, "Recovered after dropping $previousDropped binary frame(s)")
+                    }
                 }
                 _binaryMessages.tryEmit(data)
             }
