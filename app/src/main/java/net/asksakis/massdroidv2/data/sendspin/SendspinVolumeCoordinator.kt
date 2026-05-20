@@ -174,26 +174,19 @@ class SendspinVolumeCoordinator(
         // unrelated wakeups and starve legitimate MA volume echoes.
         val previous = lastKnownStreamMusicPct
         lastKnownStreamMusicPct = newPct
-        if (previous == newPct) return
-        if (!effectiveSyncEnabled()) return
+        if (previous == newPct) {
+            Log.d(TAG, "stream_music wake $newPct% (unchanged, ignored)")
+            return
+        }
+        if (!effectiveSyncEnabled()) {
+            Log.d(TAG, "stream_music $previous%→$newPct% (sync OFF, no MA push)")
+            return
+        }
         val id = cachedSendspinPlayerId ?: return
+        Log.d(TAG, "stream_music $previous%→$newPct% → push MA")
         recordLocalPush()
         playerRepository.applyVolumeOptimistic(id, newPct)
         launchPushToServer(id, newPct, reason = "phone_observer")
-    }
-
-    /**
-     * Hardware volume key path for the local Sendspin player. The system
-     * always handles the STREAM_MUSIC adjustment (with the FLAG_SHOW_UI
-     * overlay) — that happens before this is called. We only decide whether
-     * to mirror the new value to MA.
-     */
-    fun onHardwareVolumeKeyMirrored(newPct: Int) {
-        if (!effectiveSyncEnabled()) return
-        val id = cachedSendspinPlayerId ?: return
-        recordLocalPush()
-        playerRepository.applyVolumeOptimistic(id, newPct)
-        launchPushToServer(id, newPct, reason = "hw_keys")
     }
 
     /**
@@ -247,16 +240,21 @@ class SendspinVolumeCoordinator(
     private fun onServerVolumeEvent(pct: Int) {
         val bounded = pct.coerceIn(0, 100)
         lastKnownMaVolume = bounded
-        if (!effectiveSyncEnabled()) return
+        val sinceLocal = System.currentTimeMillis() - lastLocalPushAtMs
+        if (!effectiveSyncEnabled()) {
+            Log.d(TAG, "server vol $bounded% (sync OFF, sinceLocal=${sinceLocal}ms)")
+            return
+        }
         if (awaitingBaseline) {
             awaitingBaseline = false
             Log.d(TAG, "server baseline $bounded% (no STREAM_MUSIC change)")
             return
         }
-        if (System.currentTimeMillis() - lastLocalPushAtMs < ECHO_WINDOW_MS) {
-            Log.d(TAG, "ignoring server echo $bounded% during local-push window")
+        if (sinceLocal < ECHO_WINDOW_MS) {
+            Log.d(TAG, "echo-suppress server vol $bounded% (sinceLocal=${sinceLocal}ms)")
             return
         }
+        Log.d(TAG, "apply server vol $bounded% → STREAM_MUSIC (sinceLocal=${sinceLocal}ms)")
         writeStreamMusic(bounded)
     }
 

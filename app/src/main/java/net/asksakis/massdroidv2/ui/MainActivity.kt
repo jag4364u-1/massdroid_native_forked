@@ -268,10 +268,11 @@ class MainActivity : ComponentActivity() {
                 val isLocal = cachedSsClientId != null && player.playerId == cachedSsClientId
                 if (isLocal) {
                     // Local Sendspin player: let the system handle the
-                    // STREAM_MUSIC adjustment (with the FLAG_SHOW_UI overlay),
-                    // then hand the resulting percent to the coordinator so it
-                    // decides whether to mirror the change to MA based on the
-                    // sync setting.
+                    // STREAM_MUSIC adjustment with the FLAG_SHOW_UI overlay.
+                    // Mirroring to MA happens on the resulting ContentObserver
+                    // tick — onPhoneStreamVolumeChanged is the single canonical
+                    // entry point for every STREAM_MUSIC mutation (HW keys,
+                    // system bar, accessibility shortcuts, all the same).
                     if (event.action == KeyEvent.ACTION_DOWN) {
                         hwVolumeChangeUntilMs = System.currentTimeMillis() + 1000
                         val audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -285,7 +286,6 @@ class MainActivity : ComponentActivity() {
                             direction,
                             AudioManager.FLAG_SHOW_UI
                         )
-                        sendspinVolumeCoordinator.onHardwareVolumeKeyMirrored(readPhoneVolumePercent())
                         return true
                     }
                     return true
@@ -300,7 +300,9 @@ class MainActivity : ComponentActivity() {
                     if (localIsMember && localId != null) {
                         // Hardware keys drive only the local Sendspin's own MA
                         // volume (not the entire group). System handles
-                        // STREAM_MUSIC; coordinator handles the MA mirror.
+                        // STREAM_MUSIC + UI overlay; the ContentObserver wakeup
+                        // mirrors the new level to MA via onPhoneStreamVolumeChanged,
+                        // so there is no need to push from here.
                         hwVolumeChangeUntilMs = System.currentTimeMillis() + 1000
                         val audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                         val direction = if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
@@ -313,7 +315,6 @@ class MainActivity : ComponentActivity() {
                             direction,
                             AudioManager.FLAG_SHOW_UI
                         )
-                        sendspinVolumeCoordinator.onHardwareVolumeKeyMirrored(readPhoneVolumePercent())
                     } else {
                         // Plain remote speaker / non-local group: adjust the
                         // selected player's volume (or the group volume for a
