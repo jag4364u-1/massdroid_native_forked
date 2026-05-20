@@ -41,6 +41,11 @@ import javax.inject.Inject
 
 private const val TAG = "NowPlayingVM"
 private const val SENDSPIN_UI_DBG = "SendspinUiDbg"
+// Coalesce rapid scrub events. Long enough to merge a flick + adjust,
+// short enough that a deliberate single-tap on the slider still feels
+// instant. Values below ~120 ms let HW key repeat through; values above
+// ~500 ms make the seek feel laggy on first contact.
+private const val SEEK_DEBOUNCE_MS = 250L
 
 data class CachedTrackDisplay(
     val title: String,
@@ -196,6 +201,7 @@ class NowPlayingViewModel @Inject constructor(
     private val _lyricsTimingOffsetMs = MutableStateFlow(0)
     val lyricsTimingOffsetMs: StateFlow<Int> = _lyricsTimingOffsetMs.asStateFlow()
     private var lyricsLoadJob: Job? = null
+    private var seekJob: Job? = null
     private var inFlightLyricsUri: String? = null
 
     private val currentLyricsTrackFlow: StateFlow<Track?> =
@@ -506,9 +512,23 @@ class NowPlayingViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Seek with rapid-scrub coalescing.
+     *
+     * Each call cancels the previously-pending seek and waits SEEK_DEBOUNCE_MS
+     * before issuing the WS RPC. If the user releases the slider, taps lyrics,
+     * or drags again within that window, only the final position is sent to
+     * the server. Without this, a quick scrub round-trips 5+ player_queues/seek
+     * commands in a few seconds, each forcing a stream/end + stream/start +
+     * Deezer streamdetails re-fetch on the server. The pile-up was observed
+     * to leave MA in `End of media stream reached` for the current track and
+     * the Sendspin transport in IDLE — i.e. no audio.
+     */
     fun seek(position: Double) {
         val player = selectedPlayer.value ?: return
-        viewModelScope.launch {
+        seekJob?.cancel()
+        seekJob = viewModelScope.launch {
+            delay(SEEK_DEBOUNCE_MS)
             try {
                 playerRepository.seek(player.playerId, position)
             } catch (e: Exception) {
