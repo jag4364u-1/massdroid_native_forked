@@ -138,7 +138,11 @@ When Sendspin is enabled, the phone registers as a Music Assistant player. Audio
 
 ### Stable release
 
-Download the latest signed APK from [GitHub Releases](https://github.com/sfortis/massdroid_native/releases/latest).
+Download the latest signed APK from [GitHub Releases](https://github.com/sfortis/massdroid_native/releases/latest), or add MassDroid to [Obtainium](https://github.com/ImranR98/Obtainium) for automatic updates:
+
+<a href="https://apps.obtainium.imranr.dev/redirect.html?r=obtainium://add/https://github.com/sfortis/massdroid_native">
+  <img src="https://raw.githubusercontent.com/ImranR98/Obtainium/main/assets/graphics/badge_obtainium.png" alt="Get it on Obtainium" height="58" />
+</a>
 
 ### Dev build (latest features, may be unstable)
 
