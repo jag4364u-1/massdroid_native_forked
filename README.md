@@ -50,12 +50,12 @@ MassDroid is a full-featured Music Assistant companion app built around music ex
 
 ## What's New ![NEW](https://img.shields.io/badge/-NEW-brightgreen)
 
+- **Sendspin disconnect/connect flap between songs fixed.** When a track ended, the client was sending an `error` state that made the server close the WebSocket, causing a flap loop with the next song. The client now reports its idle moments correctly so playback transitions smoothly.
+- **Share logs button visible in stable builds.** Settings → About → Share logs now appears in the release APK too, not just debug. Helpful for reporting issues without ADB.
 - **Phone-as-speaker reliability fix:** the "Sendspin player keeps switching to Error" loop is gone. Reconnects are quick, automatic and don't fight each other anymore.
 - **Smoother seek and skip:** scrubbing the slider feels responsive again, dragging to the very end no longer skips to the next track, and the progress bar stays in sync right after a skip.
 - **Volume keys behave properly:** one press = one volume command. The Bluetooth sync toggle stays out of the way when your car already controls the volume.
 - **Remote volume on-screen indicator:** pressing the volume keys while a remote speaker is selected now shows a sliding overlay with the player name and level, so you actually see what changed.
-- **Built-in log sharing:** Settings → About → Share logs bundles recent debug logs into a ZIP you can send through any share target. Helps reporting bugs without needing ADB.
-- **Other polish:** crash fix on volume keys for slow remote speakers, no more accidental phone-speaker resume after disconnecting Bluetooth, and a few smaller stability tweaks around playback.
 
 ## Screenshots
 
