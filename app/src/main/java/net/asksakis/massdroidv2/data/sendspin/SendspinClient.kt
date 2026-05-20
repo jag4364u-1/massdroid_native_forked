@@ -75,7 +75,12 @@ class SendspinClient(
 
     data class Credentials(val serverUrl: String, val token: String)
 
-    private var webSocket: WebSocket? = null
+    // @Volatile because send* methods (sendHello, sendClientState, sendTimeRequest,
+    // sendRequestFormat, sendGoodbye) read the field from coroutine dispatchers
+    // outside the @Synchronized lifecycle methods that write it. Without the
+    // visibility guarantee, a thread could observe a stale closed handle (or a
+    // stale null) after a reconnect, leading to dropped sends or NPE-like races.
+    @Volatile private var webSocket: WebSocket? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var reconnectJob: Job? = null
 

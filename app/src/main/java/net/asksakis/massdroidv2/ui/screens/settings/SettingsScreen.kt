@@ -441,7 +441,7 @@ private fun DiagnosticsCard() {
                 style = MaterialTheme.typography.titleMedium
             )
             Text(
-                "Bundle the rotating logcat files into a ZIP and share via your preferred app. Helps reproduce field issues like #43.",
+                "Bundle recent debug logs into a ZIP and send them through any share target. Useful when reporting a problem.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
