@@ -51,3 +51,24 @@ jobs:
             --notes-file WHATSNEW.md
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Keep dev-latest in sync with the freshly cut release. A hotfix that
+      # lands on main without a subsequent dev push would otherwise leave the
+      # debug channel reporting an older versionName than stable. We rebuild
+      # the same checkout in debug mode and push it to dev-latest so users
+      # tracking the debug release always see a version that is >= the
+      # latest tag on main.
+      - name: Setup debug keystore for dev-latest build
+        run: |
+          mkdir -p $HOME/.android
+          cp ./.ci/debug.keystore $HOME/.android/debug.keystore
+
+      - name: Build debug APK for dev-latest
+        run: ./gradlew app:assembleDebug -PmassdroidBuildRoot=${{ github.workspace }}/build-output --stacktrace
+
+      - name: Refresh dev-latest with matching debug APK
+        run: |
+          gh release create dev-latest --target dev --title "Dev Build (latest)" --notes "Automatically updated debug APK from the latest dev push." --prerelease 2>/dev/null || true
+          gh release upload dev-latest build-output/app/outputs/apk/debug/*.apk --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
