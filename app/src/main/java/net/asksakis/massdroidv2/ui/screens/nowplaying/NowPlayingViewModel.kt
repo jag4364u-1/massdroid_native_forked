@@ -15,8 +15,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
@@ -201,8 +203,22 @@ class NowPlayingViewModel @Inject constructor(
     private val _lyricsTimingOffsetMs = MutableStateFlow(0)
     val lyricsTimingOffsetMs: StateFlow<Int> = _lyricsTimingOffsetMs.asStateFlow()
     private var lyricsLoadJob: Job? = null
-    private var seekJob: Job? = null
     private var inFlightLyricsUri: String? = null
+
+    /**
+     * Hot stream of slider release positions. Coalesced with
+     * [SEEK_DEBOUNCE_MS] before the actual WS RPC is sent, so a rapid
+     * scrub (multiple finishes within the window) only produces one
+     * outbound command and one discontinuity emit. Using a Flow here
+     * instead of cancelling a `Job` per call avoids leaving an in-flight
+     * `playerRepository.seek` half-executed — the previous cancel pattern
+     * could fire the discontinuity (audio flush) but cancel the WS RPC,
+     * so the engine saw "seek occurred" while the server never moved.
+     */
+    private val seekRequests = MutableSharedFlow<Double>(
+        extraBufferCapacity = 8,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
+    )
 
     private val currentLyricsTrackFlow: StateFlow<Track?> =
         combine(
@@ -272,6 +288,7 @@ class NowPlayingViewModel @Inject constructor(
     val optimisticElapsed: StateFlow<Double?> = _optimisticElapsed.asStateFlow()
 
     init {
+        startSeekDebouncer()
         viewModelScope.launch {
             smartListeningRepository.blockedArtistUris.collect { _blockedArtistUris.value = it }
         }
@@ -515,26 +532,34 @@ class NowPlayingViewModel @Inject constructor(
     /**
      * Seek with rapid-scrub coalescing.
      *
-     * Each call cancels the previously-pending seek and waits SEEK_DEBOUNCE_MS
-     * before issuing the WS RPC. If the user releases the slider, taps lyrics,
-     * or drags again within that window, only the final position is sent to
-     * the server. Without this, a quick scrub round-trips 5+ player_queues/seek
-     * commands in a few seconds, each forcing a stream/end + stream/start +
-     * Deezer streamdetails re-fetch on the server. The pile-up was observed
-     * to leave MA in `End of media stream reached` for the current track and
-     * the Sendspin transport in IDLE — i.e. no audio.
+     * Each call emits into [seekRequests], which a single long-lived
+     * collector debounces by [SEEK_DEBOUNCE_MS] before sending the RPC.
+     * A rapid scrub (multiple slider releases or lyric taps within the
+     * window) yields one RPC and one discontinuity emit. Using a Flow
+     * here, instead of cancelling a Job per call, removes the race where
+     * the previous coroutine had already fired `_discontinuityCommands`
+     * (audio flush) but got cancelled before sending the WS RPC — that
+     * left the engine in "seek pending" while the server never moved.
      */
     fun seek(position: Double) {
-        val player = selectedPlayer.value ?: return
-        seekJob?.cancel()
-        seekJob = viewModelScope.launch {
-            delay(SEEK_DEBOUNCE_MS)
-            try {
-                playerRepository.seek(player.playerId, position)
-            } catch (e: Exception) {
-                Log.w(TAG, "seek failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
+        seekRequests.tryEmit(position)
+    }
+
+    @OptIn(FlowPreview::class)
+    private fun startSeekDebouncer() {
+        viewModelScope.launch {
+            seekRequests
+                .debounce(SEEK_DEBOUNCE_MS)
+                .collect { position ->
+                    val player = selectedPlayer.value ?: return@collect
+                    try {
+                        playerRepository.seek(player.playerId, position)
+                    } catch (e: Exception) {
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        Log.w(TAG, "seek failed: ${e.message}")
+                        _error.tryEmit("Not connected to server")
+                    }
+                }
         }
     }
 
