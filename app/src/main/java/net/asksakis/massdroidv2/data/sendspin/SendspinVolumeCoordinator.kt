@@ -9,8 +9,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeoutOrNull
 import net.asksakis.massdroidv2.domain.repository.PlayerRepository
 
 /**
@@ -114,23 +112,22 @@ class SendspinVolumeCoordinator(
         return if (isBt) syncEnabled else true
     }
 
-    /** Lifecycle: bind to a scope and start observing flows. Idempotent. */
+    /**
+     * Lifecycle: bind to a scope and start observing flows. Idempotent.
+     *
+     * Hydration of the persisted sync setting and Sendspin client id is
+     * asynchronous — the collectors below write into [syncEnabled] and
+     * [cachedSendspinPlayerId] on first emission. Input methods that
+     * depend on the client id already bail when it is still null, so a
+     * volume key press in the first few milliseconds after start() is
+     * naturally a no-op until the Flow emits. The previous runBlocking
+     * here was a foreground-service-startup blocker (up to 250 ms when
+     * DataStore was contended) for a race window that resolves itself.
+     */
     fun start(coroutineScope: CoroutineScope) {
         if (jobs.isNotEmpty()) return
         scope = coroutineScope
         awaitingBaseline = true
-        // Synchronous initial read of the persisted sync setting and Sendspin
-        // player id so input methods invoked between start() and the first
-        // Flow emission see the user's saved value rather than the optimistic
-        // defaults. Bounded by a 250 ms timeout so a wedged DataStore can
-        // never block service startup. After this, the launched collectors
-        // keep both fields live for runtime changes.
-        runBlocking {
-            withTimeoutOrNull(250) {
-                syncEnabled = syncEnabledFlow.first()
-                cachedSendspinPlayerId = sendspinClientIdFlow.first()
-            }
-        }
         jobs += coroutineScope.launch {
             syncEnabledFlow.collect { enabled ->
                 if (syncEnabled != enabled) {
@@ -148,7 +145,7 @@ class SendspinVolumeCoordinator(
         jobs += coroutineScope.launch {
             serverMuteEvents.collect { muted -> onServerMuteEvent(muted) }
         }
-        Log.d(TAG, "started syncEnabled=$syncEnabled")
+        Log.d(TAG, "started (async hydration)")
     }
 
     fun stop() {
