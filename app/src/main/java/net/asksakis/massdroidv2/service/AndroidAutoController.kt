@@ -13,13 +13,16 @@ import androidx.media3.session.MediaSession
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.asksakis.massdroidv2.auto.AaMetrics
@@ -537,17 +540,29 @@ class AndroidAutoController(
         return false
     }
 
+    /**
+     * Two upstream signals can ask for a queue refresh:
+     *   - [PlayerRepository.queueItemsChanged]: server-emitted QUEUE_ITEMS_UPDATED
+     *   - [PlayerRepository.queueState] queueId changes: queue switch (player change, restore)
+     *
+     * On cold-start both fire within milliseconds of each other for the
+     * same queueId, which previously caused two parallel
+     * player_queues/items RPCs. Merging into a single debounced stream
+     * collapses that burst into one fetch without losing either trigger.
+     * The 150 ms window is below the AA queue render budget so users do
+     * not perceive the delay.
+     */
+    @OptIn(FlowPreview::class)
     private fun observeQueueItems() {
         scope.launch {
-            playerRepository.queueItemsChanged.collectLatest { queueId ->
-                fetchQueueItems(queueId)
-            }
-        }
-        scope.launch {
-            playerRepository.queueState
-                .map { it?.queueId }
-                .filterNotNull()
-                .distinctUntilChanged()
+            merge(
+                playerRepository.queueItemsChanged,
+                playerRepository.queueState
+                    .map { it?.queueId }
+                    .filterNotNull()
+                    .distinctUntilChanged()
+            )
+                .debounce(QUEUE_ITEMS_FETCH_DEBOUNCE_MS)
                 .collectLatest { queueId -> fetchQueueItems(queueId) }
         }
     }
@@ -662,6 +677,7 @@ class AndroidAutoController(
         private const val TAG = "AndroidAutoController"
         private const val VOLUME_STEP = RemoteControlPlayer.VOLUME_SCALE
         private const val VOLUME_OVERRIDE_MS = 15_000L
+        private const val QUEUE_ITEMS_FETCH_DEBOUNCE_MS = 150L
     }
 
     /**
