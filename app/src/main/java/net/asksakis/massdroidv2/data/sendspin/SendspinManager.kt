@@ -216,9 +216,14 @@ class SendspinManager(
                 val t3 = incoming.payload.serverTransmitted
                 val t4 = System.nanoTime() / 1000
                 val rttUs = (t4 - t1) - (t3 - t2)
-                // Reject absurd RTT only during initial convergence (first 5 samples)
+                // Reject absurd RTT only during initial convergence (first 5 samples).
+                // Tell the synchronizer about each reject so it can back off the
+                // request cadence — otherwise an overloaded server holds us in
+                // the 300 ms send loop forever (every reject leaves
+                // currentSampleCount untouched, so the fast-sync gate never lifts).
                 if (rttUs > 150_000L && clockSynchronizer.currentSampleCount() < 5) {
                     Log.d(TAG, "Clock sync: REJECTED rtt=${rttUs}us (startup, samples=${clockSynchronizer.currentSampleCount()})")
+                    clockSynchronizer.markStartupRejected()
                     return
                 }
                 clockSynchronizer.processTimeResponse(

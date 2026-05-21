@@ -56,6 +56,14 @@ class ClockSynchronizer {
     var currentSyncIntervalMs: Long = INITIAL_SYNC_INTERVAL_MS
         private set
 
+    /**
+     * Number of contiguous startup-phase samples the caller filtered
+     * out (e.g. for RTT > 150 ms before convergence). Drives the
+     * backoff in [markStartupRejected] so we don't keep blasting 3
+     * time-requests/second at an already-overloaded server forever.
+     */
+    private var consecutiveStartupRejections = 0
+
     fun nowMonotonicUs(): Long = System.nanoTime() / 1000
 
     @Synchronized
@@ -73,6 +81,12 @@ class ClockSynchronizer {
         val measurementVariance = maxError * maxError
 
         if (clientReceivedUs == lastUpdateUs) return
+
+        // Any sample that makes it into the filter clears the rejection
+        // streak; the next reject is treated as fresh and pays a small
+        // backoff again instead of resuming whatever interval the
+        // previous burst pushed us to.
+        consecutiveStartupRejections = 0
 
         val dt = (clientReceivedUs - lastUpdateUs).toDouble()
         lastUpdateUs = clientReceivedUs
@@ -214,6 +228,38 @@ class ClockSynchronizer {
     @Synchronized
     fun currentSampleCount(): Int = count
 
+    /**
+     * Called by the protocol layer when it dropped a `server/time`
+     * response without feeding it into the filter (e.g. RTT above the
+     * startup threshold). Bumps the next-request interval according
+     * to the rejection streak so a server that is taking >150 ms to
+     * answer at cold-start does not get 3 unanswered requests per
+     * second from us until convergence. Capped at [MAX_SYNC_INTERVAL_MS].
+     *
+     * The schedule is conservative: the first few rejects stay at the
+     * fast 300 ms cadence so we still converge quickly when the
+     * latency spike is transient, then ramp up by 500 ms per chunk of
+     * rejections. A single accepted sample resets the streak.
+     */
+    @Synchronized
+    fun markStartupRejected() {
+        consecutiveStartupRejections++
+        val nextInterval = when {
+            consecutiveStartupRejections < 3 -> INITIAL_SYNC_INTERVAL_MS
+            consecutiveStartupRejections < 6 -> 600L
+            consecutiveStartupRejections < 12 -> 1_200L
+            else -> MAX_SYNC_INTERVAL_MS
+        }
+        if (nextInterval != currentSyncIntervalMs) {
+            currentSyncIntervalMs = nextInterval
+            Log.d(
+                TAG,
+                "Startup backoff: rejections=$consecutiveStartupRejections " +
+                    "interval=${currentSyncIntervalMs}ms (RTT-gate keeping samples out)"
+            )
+        }
+    }
+
     @Synchronized
     fun softReset(
         previousOffsetUs: Long,
@@ -252,5 +298,6 @@ class ClockSynchronizer {
         currentUseDrift = false
         currentLastUpdate = 0L
         currentSyncIntervalMs = INITIAL_SYNC_INTERVAL_MS
+        consecutiveStartupRejections = 0
     }
 }
