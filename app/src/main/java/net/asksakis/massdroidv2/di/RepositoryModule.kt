@@ -16,6 +16,7 @@ import net.asksakis.massdroidv2.data.repository.PlayHistoryRepositoryImpl
 import net.asksakis.massdroidv2.data.repository.PlayerRepositoryImpl
 import net.asksakis.massdroidv2.data.repository.SettingsRepositoryImpl
 import net.asksakis.massdroidv2.data.repository.SmartListeningRepositoryImpl
+import net.asksakis.massdroidv2.data.repository.queue.QueueItemsCoordinator
 import net.asksakis.massdroidv2.data.websocket.MaAuthProbe
 import net.asksakis.massdroidv2.data.websocket.MaWebSocketClient
 import net.asksakis.massdroidv2.data.websocket.OAuthCallbackBus
@@ -62,7 +63,8 @@ object RepositoryModule {
         settingsRepository: SettingsRepository,
         smartListeningRepository: SmartListeningRepository,
         lastFmGenreResolver: LastFmGenreResolver,
-        sessionEventBus: net.asksakis.massdroidv2.data.websocket.SessionEventBus
+        sessionEventBus: net.asksakis.massdroidv2.data.websocket.SessionEventBus,
+        queueItemsCoordinator: QueueItemsCoordinator,
     ): PlayerRepository = PlayerRepositoryImpl(
         wsClient = wsClient,
         json = json,
@@ -70,7 +72,8 @@ object RepositoryModule {
         settingsRepository = settingsRepository,
         smartListeningRepository = smartListeningRepository,
         lastFmGenreResolver = lastFmGenreResolver,
-        sessionEventBus = sessionEventBus
+        sessionEventBus = sessionEventBus,
+        queueItemsCoordinator = queueItemsCoordinator,
     )
 
     @Provides

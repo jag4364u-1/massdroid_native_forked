@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.StateFlow
 import net.asksakis.massdroidv2.domain.model.GroupProviderOption
 import net.asksakis.massdroidv2.domain.model.Player
 import net.asksakis.massdroidv2.domain.model.PlayerConfig
+import net.asksakis.massdroidv2.domain.model.QueueItemsSnapshot
 import net.asksakis.massdroidv2.domain.model.QueueState
 
 data class PlayerDiscontinuityCommand(
@@ -57,6 +58,17 @@ interface PlayerRepository {
 
     /** Emits the queue ID whenever QUEUE_ITEMS_UPDATED or QUEUE_UPDATED fires for the selected player. */
     val queueItemsChanged: SharedFlow<String>
+
+    /**
+     * Canonical snapshot of the items in the selected queue. Updated
+     * by a single debounced fetcher inside the data layer so multiple
+     * consumers (AA, NowPlaying, Queue screen, blocked-artist cleanup)
+     * share one `player_queues/items` RPC per queue change instead of
+     * each issuing their own. `null` means we have not fetched yet for
+     * the current queue (or the queue cleared); subscribers should
+     * render a loading/empty state.
+     */
+    val queueItems: StateFlow<QueueItemsSnapshot?>
 
     /** Emits explicit discontinuities like next/previous/seek so buffered local playback can reset policy. */
     val discontinuityCommands: SharedFlow<PlayerDiscontinuityCommand>

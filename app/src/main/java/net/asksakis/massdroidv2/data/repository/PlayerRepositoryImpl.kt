@@ -8,6 +8,8 @@ import kotlinx.serialization.json.*
 import net.asksakis.massdroidv2.data.websocket.*
 import net.asksakis.massdroidv2.domain.model.*
 import net.asksakis.massdroidv2.data.lastfm.LastFmGenreResolver
+import net.asksakis.massdroidv2.data.repository.queue.QueueItemsCoordinator
+import net.asksakis.massdroidv2.domain.model.QueueItemsSnapshot
 import net.asksakis.massdroidv2.domain.recommendation.MediaIdentity
 import net.asksakis.massdroidv2.domain.recommendation.normalizeGenre
 import net.asksakis.massdroidv2.domain.repository.PlayHistoryRepository
@@ -28,7 +30,8 @@ class PlayerRepositoryImpl @Inject constructor(
     private val settingsRepository: SettingsRepository,
     private val smartListeningRepository: SmartListeningRepository,
     private val lastFmGenreResolver: LastFmGenreResolver,
-    private val sessionEventBus: SessionEventBus
+    private val sessionEventBus: SessionEventBus,
+    private val queueItemsCoordinator: QueueItemsCoordinator,
 ) : PlayerRepository {
 
     companion object {
@@ -163,7 +166,15 @@ class PlayerRepositoryImpl @Inject constructor(
     @Volatile
     private var smartListeningEnabledSnapshot: Boolean = false
 
+    override val queueItems: StateFlow<QueueItemsSnapshot?> get() = queueItemsCoordinator.queueItems
+
     init {
+        // Wire the coordinator to our flows so it can run the single
+        // debounced fetcher for every consumer that needs queue items.
+        queueItemsCoordinator.bind(
+            queueState = _queueState.asStateFlow(),
+            queueItemsChanged = _queueItemsChanged.asSharedFlow(),
+        )
         scope.launch { observeEvents() }
         scope.launch {
             sessionEventBus.resets.collect { resetForAccountSwitch() }
@@ -798,35 +809,45 @@ class PlayerRepositoryImpl @Inject constructor(
         if (filteredArtists.isEmpty()) return
 
         try {
-            val result = wsClient.sendCommand(
-                MaCommands.PlayerQueues.ITEMS,
-                QueueItemsArgs(
-                    queueId = queueId,
-                    limit = BLOCKED_QUEUE_ITEMS_LIMIT,
-                    offset = 0
-                )
-            )
-            val items = result?.let { json.decodeFromJsonElement<List<ServerQueueItem>>(it) } ?: emptyList()
-            if (items.isEmpty()) return
+            // Source items from the canonical snapshot when it covers
+            // the queue we're operating on. The coordinator's debounced
+            // fetcher already issues one player_queues/items RPC per
+            // queue change, so cleanup just consumes that data instead
+            // of triggering a parallel RPC. If the snapshot is missing
+            // or stale (different queueId), force a refresh through the
+            // coordinator so we still get a single RPC per attempt and
+            // the result is shared with future readers.
+            val snapshot = queueItemsCoordinator.queueItems.value
+                ?.takeIf { it.queueId == queueId }
+                ?: queueItemsCoordinator.refresh(queueId)
+                ?: return
+            val queueItems = snapshot.items
+            if (queueItems.isEmpty()) return
 
             val currentTrackUri = queueTracking[queueId]?.track?.uri
                 ?: _queueState.value?.currentItem?.track?.uri
-            val removeQueueItemIds = items.mapNotNull { item ->
-                val media = item.mediaItem ?: return@mapNotNull null
-                val mediaUri = media.uri.takeIf { it.isNotBlank() }
-                if (!currentTrackUri.isNullOrBlank() && mediaUri == currentTrackUri) {
+            val removeQueueItemIds = queueItems.mapNotNull { item ->
+                val track = item.track ?: return@mapNotNull null
+                val trackUri = track.uri.takeIf { it.isNotBlank() }
+                if (!currentTrackUri.isNullOrBlank() && trackUri == currentTrackUri) {
                     return@mapNotNull null
                 }
-                val artistUris = media.artists
-                    ?.mapNotNull { artist ->
-                        val rawKey = MediaIdentity.canonicalArtistKey(itemId = artist.itemId, uri = artist.uri)
-                            ?: return@mapNotNull null
-                        if (!rawKey.startsWith("library://")) {
-                            resolveLibraryArtistUri(artist.name, rawKey)
-                        } else rawKey
+                val rawArtistKeys = buildList {
+                    track.artistUri?.let { add(it) }
+                    addAll(track.artistUris)
+                    track.artistItemId?.let { id ->
+                        MediaIdentity.canonicalArtistKey(itemId = id, uri = track.artistUri)
+                            ?.let { add(it) }
                     }
-                    .orEmpty()
-                if (artistUris.any { it in filteredArtists }) item.queueItemId else null
+                }
+                val resolvedArtistKeys = rawArtistKeys.mapNotNull { rawKey ->
+                    if (rawKey.startsWith("library://")) {
+                        rawKey
+                    } else {
+                        resolveLibraryArtistUri(track.artistNames, rawKey)
+                    }
+                }
+                if (resolvedArtistKeys.any { it in filteredArtists }) item.queueItemId else null
             }
             if (removeQueueItemIds.isEmpty()) return
 
