@@ -234,8 +234,10 @@ class PlayerRepositoryImpl @Inject constructor(
                         refreshPlayers()
                         restoredPlayerId?.let { id ->
                             if (_players.value.any { it.playerId == id }) {
+                                // selectPlayer launches its own refreshQueueForPlayerWithRetry,
+                                // so do NOT call it again here — that produced the duplicate
+                                // get_active_queue RPC on every cold-start.
                                 selectPlayer(id)
-                                refreshQueueForPlayerWithRetry(id)
                                 Log.d(TAG, "Restored saved player: $id")
                             } else {
                                 Log.d(TAG, "Waiting for late-arriving restored player: $id")
@@ -345,8 +347,9 @@ class PlayerRepositoryImpl @Inject constructor(
                     }
                     // Auto-select if this is the saved player and nothing is selected yet.
                     if (player.playerId == pendingRestoredPlayerId) {
+                        // selectPlayer already fans out to refreshQueueForPlayerWithRetry
+                        // inside its own scope.launch — no second call needed here.
                         selectPlayer(player.playerId)
-                        scope.launch { refreshQueueForPlayerWithRetry(player.playerId) }
                         pendingRestoredPlayerId = null
                         Log.d(TAG, "Auto-selected late-arriving player: ${player.displayName}")
                     }
