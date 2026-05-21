@@ -14,6 +14,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.animateScrollBy
@@ -514,6 +515,7 @@ fun NowPlayingScreen(
     if (showSendspinStatusSheet && statusSnapshot != null) {
         SendspinStatusSheet(
             status = statusSnapshot,
+            inputAudioFormat = audioFormat,
             syncHistory = syncHistory,
             onStaticDelayChanged = { viewModel.setSendspinStaticDelayMs(it) },
             onDismiss = { showSendspinStatusSheet = false }
@@ -855,34 +857,85 @@ private fun NowPlayingLandscape(
     }
 }
 
+/**
+ * Quality tier classification matching the MA web UI (`QualityDetailsBtn.vue`).
+ * Order: HR (Hi-Res) > HQ (Lossless CD) > SQ (lossy, ≥256 kbps) > LQ.
+ */
+private enum class AudioQualityTier(val label: String) {
+    LQ("LQ"),
+    SQ("SQ"),
+    HQ("HQ"),
+    HR("HR"),
+}
+
+private fun isLosslessCodec(codec: String?): Boolean {
+    if (codec.isNullOrBlank()) return false
+    val c = codec.uppercase()
+    return c == "FLAC" || c == "ALAC" || c == "WAV" || c == "AIFF" ||
+        c == "PCM" || c.startsWith("DSF") || c == "WAVPACK" || c == "TAK" ||
+        c.startsWith("DSD")
+}
+
+private fun audioQualityTier(audioFormat: AudioFormatInfo?): AudioQualityTier? {
+    val ct = audioFormat?.contentType ?: return null
+    val sampleRate = audioFormat.sampleRate ?: 0
+    val bitDepth = audioFormat.bitDepth ?: 0
+    val bitRate = audioFormat.bitRate ?: 0
+    if (sampleRate > 48_000 || bitDepth > 16) return AudioQualityTier.HR
+    if (isLosslessCodec(ct)) return AudioQualityTier.HQ
+    if (bitRate >= 256) return AudioQualityTier.SQ
+    return AudioQualityTier.LQ
+}
+
+@Composable
+private fun qualityTierColor(tier: AudioQualityTier): Color = when (tier) {
+    // Mirrors the visual hierarchy of the web UI without copying its exact
+    // palette — Material 3 tokens give a consistent feel with the rest of
+    // the app while still being immediately recognisable.
+    AudioQualityTier.LQ -> MaterialTheme.colorScheme.error
+    AudioQualityTier.SQ -> MaterialTheme.colorScheme.tertiary
+    AudioQualityTier.HQ -> Color(0xFF4CAF50) // green for "lossless CD"
+    AudioQualityTier.HR -> Color(0xFF9C27B0) // purple for "hi-res"
+}
+
 @Composable
 private fun AudioQualityBadges(
     audioFormat: AudioFormatInfo?,
-    outputCodec: String? = null,
     isSendspinPlayer: Boolean = false,
     compact: Boolean = false,
     onClick: (() -> Unit)? = null
 ) {
-    val badges = remember(audioFormat, outputCodec) { buildAudioQualityBadges(audioFormat, outputCodec) }
-    val displayBadges = if (badges.isEmpty() && isSendspinPlayer) listOf("Sendspin") else badges
-    if (displayBadges.isEmpty()) return
+    val tier = remember(audioFormat) { audioQualityTier(audioFormat) }
+    val fallbackLabel = if (tier == null && isSendspinPlayer) "Sendspin" else null
+    if (tier == null && fallbackLabel == null) return
 
     Row(
         modifier = if (onClick != null) Modifier.clip(RoundedCornerShape(999.dp)).clickable { onClick() } else Modifier,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        displayBadges.forEach { badge ->
-            Surface(
-                shape = RoundedCornerShape(999.dp),
-                color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.9f),
-                tonalElevation = 0.dp
+        Surface(
+            shape = RoundedCornerShape(999.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.9f),
+            tonalElevation = 0.dp
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = if (compact) 5.dp else 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                if (tier != null) {
+                    Box(
+                        modifier = Modifier
+                            .size(if (compact) 6.dp else 8.dp)
+                            .clip(CircleShape)
+                            .background(qualityTierColor(tier))
+                    )
+                }
                 Text(
-                    text = badge,
+                    text = tier?.label ?: fallbackLabel!!,
                     style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = if (compact) 5.dp else 6.dp)
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
             }
         }
@@ -965,14 +1018,11 @@ private fun QualityActionRow(
                     )
                 }
             }
-            val streamCodec by viewModel.sendspinStreamCodec.collectAsStateWithLifecycle(initialValue = null)
-            val outputCodec = streamCodec
             AudioQualityBadges(
                 audioFormat = audioFormat,
-                outputCodec = outputCodec,
                 isSendspinPlayer = isSendspinPlayer,
                 compact = compact,
-                onClick = if (isSendspinPlayer) onShowSendspinStatus else null
+                onClick = if (isSendspinPlayer) onShowSendspinStatus else null,
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 @Suppress("DEPRECATION")
@@ -1016,6 +1066,7 @@ private fun QualityActionRow(
 @Composable
 private fun SendspinStatusSheet(
     status: SendspinStatusUi,
+    inputAudioFormat: AudioFormatInfo? = null,
     syncHistory: List<net.asksakis.massdroidv2.data.sendspin.SendspinManager.SyncSample> = emptyList(),
     onStaticDelayChanged: (Int) -> Unit = {},
     onDismiss: () -> Unit
@@ -1077,8 +1128,13 @@ private fun SendspinStatusSheet(
 
             StatusLine(label = "Transport", value = transportLabel)
             StatusLine(label = "Playback", value = stateLabel)
-            StatusLine(label = "Codec", value = status.codec ?: "Unknown")
-            StatusLine(label = "Mode", value = status.configuredFormat)
+            // Source format (what the queue track is encoded as on the
+            // server) → transport format (what the server actually pushes
+            // through the Sendspin WS after re-encode). Showing both side
+            // by side makes it obvious whether the server is upsampling or
+            // transcoding. Codec/Mode were less informative on their own.
+            StatusLine(label = "Input", value = formatAudioDescriptor(inputAudioFormat) ?: "Unknown")
+            StatusLine(label = "Output", value = formatOutputDescriptor(status) ?: "Unknown")
             StatusLine(label = "Network", value = status.networkMode)
 
             HorizontalDivider()
@@ -1628,53 +1684,39 @@ private fun formatLyricsOffset(offsetMs: Int): String {
     )
 }
 
-private fun buildAudioQualityBadges(audioFormat: AudioFormatInfo?, outputCodec: String? = null): List<String> {
-    if (audioFormat == null && outputCodec == null) return emptyList()
-
-    val sourceCodec = audioFormat?.contentType
-        ?.replace('_', ' ')
-        ?.uppercase()
-        ?.takeIf { it.isNotBlank() && it != "?" }
-
-    // Show the source-side descriptor only. Sendspin's transport format is
-    // independent of the source (server upsamples / transcodes as needed) and
-    // belongs in the streaming status panel, not in the now-playing badge.
-    // Keeping the badge to one short token (e.g. "FLAC 96/24", "OPUS 48",
-    // "FLAC 44.1/16") prevents it from pushing the action icons off-screen.
-    val descriptor = compactCodecDescriptor(sourceCodec, audioFormat)
-    val badge = descriptor ?: outputCodec
-    return listOfNotNull(badge)
-}
-
-/**
- * Compose a compact "CODEC rate/bits" badge, e.g. "FLAC 96/24" or "OPUS 48".
- * Drops the "k" suffix on sample rate to keep width small; bit-depth is shown
- * only for lossless codecs where it carries audible information. Returns
- * null when there's no codec to render.
- */
-private fun compactCodecDescriptor(codec: String?, fmt: AudioFormatInfo?): String? {
-    codec ?: return null
-    val sampleRate = fmt?.sampleRate
-    if (sampleRate == null) return codec
-    val sampleStr = formatSampleRateCompact(sampleRate)
-    val isLossless = codec.equals("FLAC", ignoreCase = true) ||
-        codec.equals("ALAC", ignoreCase = true) ||
-        codec.equals("PCM", ignoreCase = true) ||
-        codec.startsWith("WAV", ignoreCase = true) ||
-        codec.startsWith("AIFF", ignoreCase = true) ||
-        codec.startsWith("DSD", ignoreCase = true)
-    val bitDepth = fmt.bitDepth
-    return if (isLossless && bitDepth != null && bitDepth > 0) {
-        "$codec $sampleStr/$bitDepth"
-    } else {
-        "$codec $sampleStr"
-    }
-}
 
 private fun formatSampleRateCompact(sampleRate: Int): String {
     val khz = sampleRate / 1000.0
     val whole = khz.toInt()
     return if (whole.toDouble() == khz) "$whole" else "%.1f".format(java.util.Locale.US, khz)
+}
+
+/**
+ * Format the queue's source audio format as a short "CODEC khz/bits"
+ * descriptor for the Streaming Status sheet. Returns null when codec is
+ * unknown so the sheet can show "Unknown".
+ */
+private fun formatAudioDescriptor(format: AudioFormatInfo?): String? {
+    format ?: return null
+    val codec = format.contentType?.replace('_', ' ')?.uppercase()?.takeIf { it.isNotBlank() && it != "?" } ?: return null
+    val sampleRate = format.sampleRate ?: return codec
+    val sampleStr = formatSampleRateCompact(sampleRate)
+    val bitDepth = format.bitDepth
+    val showBits = isLosslessCodec(codec) && bitDepth != null && bitDepth > 0
+    return if (showBits) "$codec $sampleStr/$bitDepth" else "$codec $sampleStr"
+}
+
+/**
+ * Format the Sendspin transport-side output as "CODEC khz[/bits]".
+ * `outputBitDepth=0` means the codec does not carry an explicit bit depth
+ * (Opus, MP3), in which case it's omitted.
+ */
+private fun formatOutputDescriptor(status: SendspinStatusUi): String? {
+    val codec = status.codec?.uppercase()?.takeIf { it.isNotBlank() } ?: return null
+    if (status.outputSampleRate <= 0) return codec
+    val sampleStr = formatSampleRateCompact(status.outputSampleRate)
+    return if (status.outputBitDepth > 0) "$codec $sampleStr/${status.outputBitDepth}"
+    else "$codec $sampleStr"
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

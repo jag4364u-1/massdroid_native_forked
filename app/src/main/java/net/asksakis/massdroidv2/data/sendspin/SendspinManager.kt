@@ -58,6 +58,21 @@ class SendspinManager(
 
     private val _streamCodec = MutableStateFlow<String?>(null)
     val streamCodec: StateFlow<String?> = _streamCodec.asStateFlow()
+
+    /**
+     * Snapshot of the most recent Sendspin stream/start payload. Exposed so
+     * the UI can show the actual output format (post server re-encode) next
+     * to the source-side info. `null` between tracks or before the first
+     * stream/start.
+     */
+    data class StreamFormatSnapshot(
+        val codec: String,
+        val sampleRate: Int,
+        val bitDepth: Int,
+        val channels: Int,
+    )
+    private val _streamFormat = MutableStateFlow<StreamFormatSnapshot?>(null)
+    val streamFormat: StateFlow<StreamFormatSnapshot?> = _streamFormat.asStateFlow()
     private val _networkMode = MutableStateFlow("WiFi")
     val networkMode: StateFlow<String> = _networkMode.asStateFlow()
     private val _syncState = MutableStateFlow(audio.syncState)
@@ -250,6 +265,12 @@ class SendspinManager(
                     audio.setMuted(muted)
                 }
                 _streamCodec.value = info.codec.uppercase()
+                _streamFormat.value = StreamFormatSnapshot(
+                    codec = info.codec.uppercase(),
+                    sampleRate = info.sampleRate,
+                    bitDepth = info.bitDepth,
+                    channels = info.channels,
+                )
                 client.updateState(SendspinState.STREAMING)
             }
 
@@ -560,6 +581,7 @@ class SendspinManager(
         engine.release()
         _connectionState.value = SendspinState.DISCONNECTED
         _streamCodec.value = null
+        _streamFormat.value = null
         _syncState.value = finalSyncState
         _serverMetadata.value = null
         Log.d(TAG, "Sendspin stopped")

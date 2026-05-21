@@ -75,7 +75,12 @@ data class SendspinStatusUi(
     val clockSamples: Int = 0,
     val clockErrorUs: Long = 0L,
     val resyncs: Int = 0,
-    val correctionMode: String = ""
+    val correctionMode: String = "",
+    // Actual Sendspin transport output format (post server re-encode):
+    // captured from the latest stream/start payload. `outputSampleRate` is in
+    // Hz, `outputBitDepth` is 0 for lossy codecs that don't report it.
+    val outputSampleRate: Int = 0,
+    val outputBitDepth: Int = 0,
 )
 
 data class AdjacentArtworkUi(
@@ -121,7 +126,6 @@ class NowPlayingViewModel @Inject constructor(
     val sendspinClientId = settingsRepository.sendspinClientId
     val sendspinAudioFormat = settingsRepository.sendspinAudioFormat
     val sendspinStaticDelayMs = settingsRepository.sendspinStaticDelayMs
-    val sendspinStreamCodec = sendspinManager.streamCodec
     val sendspinSyncHistory = sendspinManager.syncHistory
     val acousticPhoneBaselineUs = settingsRepository.acousticPhoneBaselineUs
     val acousticRouteCalibrations = settingsRepository.acousticRouteCalibrations
@@ -268,8 +272,22 @@ class NowPlayingViewModel @Inject constructor(
     val error: SharedFlow<String> = _error.asSharedFlow()
     private val _sendspinStatus = MutableStateFlow<SendspinStatusUi?>(null)
     val sendspinStatus: StateFlow<SendspinStatusUi?> = _sendspinStatus.asStateFlow()
-    val isSendspinPlayer: StateFlow<Boolean> = _sendspinStatus.map { it != null }
-        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), false)
+    /**
+     * True when the currently selected player **is** our local Sendspin
+     * client. This used to be `status != null`, which evaluated to true
+     * whenever the Sendspin manager was alive — including while the UI was
+     * showing a remote player like Chromecast or Snapcast. That caused the
+     * "Streaming Status" tap target on the quality badge to open sync
+     * stats for the local Sendspin even when the user was looking at a
+     * different player. The status sheet's content is Sendspin-only, so
+     * the surface is hidden unless the local Sendspin is actually selected.
+     */
+    val isSendspinPlayer: StateFlow<Boolean> = combine(
+        selectedPlayer,
+        sendspinClientId,
+    ) { player, clientId ->
+        clientId != null && player?.playerId == clientId
+    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), false)
     var cachedSendspinClientId: String? = null; private set
     var cachedSendspinAudioFormat = "SMART"; private set
     private var cachedSendspinStaticDelayMs = 0
@@ -423,7 +441,8 @@ class NowPlayingViewModel @Inject constructor(
                 sendspinManager.streamCodec,
                 sendspinManager.networkMode,
                 sendspinClientId,
-                sendspinUiTicker
+                sendspinUiTicker,
+                sendspinManager.streamFormat,
             ) { values: Array<*> ->
                 val conn = values[0] as SendspinState
                 val sync = values[1] as SyncState
@@ -435,6 +454,7 @@ class NowPlayingViewModel @Inject constructor(
                     lastLoggedSendspinStatusKey = null
                     return@combine null
                 }
+                val fmt = values[6] as net.asksakis.massdroidv2.data.sendspin.SendspinManager.StreamFormatSnapshot?
                 SendspinStatusUi(
                     connectionState = conn,
                     syncState = sync,
@@ -452,7 +472,9 @@ class NowPlayingViewModel @Inject constructor(
                     clockSamples = sendspinManager.clockSampleCount(),
                     clockErrorUs = sendspinManager.clockErrorUs(),
                     resyncs = sendspinManager.resyncCount(),
-                    correctionMode = sendspinManager.correctionModeName()
+                    correctionMode = sendspinManager.correctionModeName(),
+                    outputSampleRate = fmt?.sampleRate ?: 0,
+                    outputBitDepth = fmt?.bitDepth ?: 0,
                 ).also { maybeLogSendspinUiStatus(it) }
             }
                 .distinctUntilChanged()
