@@ -69,7 +69,13 @@ internal fun SendspinStatusSheet(
         SyncState.SYNC_ERROR_REBUFFERING -> "Rebuffering"
     }
     val transportLabel = when (status.connectionState) {
-        SendspinState.STREAMING -> "Streaming"
+        // "Streaming" only when audio is actually flowing. The Sendspin
+        // server keeps us in the STREAMING transport state across
+        // pauses/sleeps (WS stays open, ready for the next stream),
+        // but a "Streaming" label paired with playback=Idle reads as
+        // a contradiction in the status sheet. Surface "Ready" for
+        // the connected-but-not-playing case.
+        SendspinState.STREAMING -> if (status.syncState == SyncState.IDLE) "Ready" else "Streaming"
         SendspinState.SYNCING -> "Syncing"
         SendspinState.HANDSHAKING -> "Handshaking"
         SendspinState.AUTHENTICATING -> "Authenticating"
