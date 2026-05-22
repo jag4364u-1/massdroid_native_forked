@@ -216,17 +216,20 @@ class NowPlayingViewModel @Inject constructor(
     private var inFlightLyricsUri: String? = null
 
     private val currentLyricsTrackFlow: StateFlow<Track?> =
-        combine(
-            queueState.map { it?.currentItem?.track },
-            selectedPlayer.map { it?.currentMedia?.uri }
-        ) { queueTrack: Track?, playerMediaUri: String? ->
-            when {
-                queueTrack == null -> null
-                playerMediaUri.isNullOrBlank() -> queueTrack
-                queueTrack.uri == playerMediaUri -> queueTrack
-                else -> null
-            }
-        }
+        // Source the lyrics track from the queue alone. The previous
+        // combine also gated on selectedPlayer.currentMedia.uri to
+        // catch the case where the player is mid-switch and the
+        // queue's "current" track no longer matches what's actually
+        // streaming. In practice the player object emits stale or
+        // briefly null currentMedia values on every server-side seek
+        // (PLAYER_UPDATED -> intermediate state -> PLAYER_UPDATED),
+        // which made the lyrics flow drop to null for ~1s and the
+        // lyrics icon flash UNKNOWN -> AVAILABLE on each scrub. The
+        // queue's currentItem.track is the authoritative identity for
+        // lyrics ownership, so sticking to it keeps the icon stable
+        // while the actual playback path settles.
+        queueState
+            .map { it?.currentItem?.track }
             .distinctUntilChanged { old, new -> old?.uri == new?.uri }
             .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
