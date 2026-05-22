@@ -569,18 +569,60 @@ class NowPlayingViewModel @Inject constructor(
         }
     }
 
-    /** Always go to previous track via play_index (skip the "restart current" behavior). */
+    private var previousTrackInFlight = false
+    private var lastPreviousTrackAtMs = 0L
+
+    /**
+     * Always go to previous track via play_index (skip the "restart current"
+     * behavior of cmd/previous). Resolves the previous item against the
+     * canonical queue snapshot, not [QueueState.currentIndex], because the
+     * latter goes stale when the user moves a track above the current one:
+     * the server shifts the current track's numeric position to N+1, but
+     * the cached index is still N, so naive `currentIndex - 1` would land
+     * on the wrong slot. Falls back to local index math only if the
+     * snapshot is missing.
+     *
+     * Guarded against rapid double-fire (button press storms) with a short
+     * in-flight + cooldown gate so a held tap doesn't queue ten identical
+     * play_index commands to the server.
+     */
     fun previousTrack() {
+        val now = System.currentTimeMillis()
+        if (previousTrackInFlight) return
+        if (now - lastPreviousTrackAtMs < PREVIOUS_TRACK_COOLDOWN_MS) return
         val qs = queueState.value ?: return
-        val prevIndex = qs.currentIndex - 1
-        if (prevIndex < 0) return
+        val currentItemId = qs.currentItem?.queueItemId
+        val snapshot = playerRepository.queueItems.value
+            ?.takeIf { it.queueId == qs.queueId }
+        val resolvedIndex = if (snapshot != null && currentItemId != null) {
+            val currentIdx = snapshot.items.indexOfFirst { it.queueItemId == currentItemId }
+            if (currentIdx > 0) currentIdx - 1 else -1
+        } else {
+            // No fresh snapshot: fall back to the cached index. Stale-window
+            // risk remains (the issue this method exists to fix), but at
+            // least preserves working behavior when canonical data is
+            // unavailable.
+            (qs.currentIndex - 1).coerceAtLeast(-1)
+        }
+        if (resolvedIndex < 0) return
+        lastPreviousTrackAtMs = now
+        previousTrackInFlight = true
         viewModelScope.launch {
             try {
-                musicRepository.playQueueIndex(qs.queueId, prevIndex)
+                musicRepository.playQueueIndex(qs.queueId, resolvedIndex)
             } catch (e: Exception) {
                 Log.w(TAG, "previousTrack failed: ${e.message}")
+            } finally {
+                previousTrackInFlight = false
             }
         }
+    }
+
+    companion object {
+        // Match the typical server round-trip for play_index + new track
+        // metadata so a user that taps twice quickly doesn't fire two
+        // play_index commands back-to-back.
+        private const val PREVIOUS_TRACK_COOLDOWN_MS = 400L
     }
 
     /**
