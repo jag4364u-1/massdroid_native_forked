@@ -77,6 +77,7 @@ fun PlayersScreen(
     val suppressConnectionPrompt by viewModel.suppressConnectionPrompt.collectAsStateWithLifecycle()
     val sendspinClientId by viewModel.sendspinClientId.collectAsStateWithLifecycle()
     val isAaProjecting by viewModel.isAaProjecting.collectAsStateWithLifecycle()
+    val sleepTimerTargetPlayerId by viewModel.sleepTimerTargetPlayerId.collectAsStateWithLifecycle()
     val dstmStates by viewModel.queueDstmStates.collectAsStateWithLifecycle()
     val proximityConfig by viewModel.proximityConfig.collectAsStateWithLifecycle(
         initialValue = net.asksakis.massdroidv2.data.proximity.ProximityConfig()
@@ -196,6 +197,7 @@ fun PlayersScreen(
                                     player.playerId == sendspinClientId,
                                 isFollowMeSelected = proximityConfig.enabled &&
                                     currentDetectedRoom?.playerId == player.playerId,
+                                hasSleepTimer = sleepTimerTargetPlayerId == player.playerId,
                                 roomNames = playerRoomMap[player.playerId] ?: emptyList(),
                                 groupInfo = groupInfo,
                                 onClick = { viewModel.selectPlayer(player) },
@@ -391,6 +393,7 @@ private fun PlayerListItem(
     isLocalPlayer: Boolean = false,
     isAndroidAutoPlayer: Boolean = false,
     isFollowMeSelected: Boolean = false,
+    hasSleepTimer: Boolean = false,
     roomNames: List<String> = emptyList(),
     groupInfo: PlayerGroupInfo = PlayerGroupInfo(),
     onClick: () -> Unit,
@@ -485,6 +488,14 @@ private fun PlayerListItem(
                                 Icons.Default.Link,
                                 contentDescription = null,
                                 tint = groupAccentColor,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        if (hasSleepTimer) {
+                            Icon(
+                                Icons.Default.Bedtime,
+                                contentDescription = "Sleep timer active",
+                                tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(16.dp)
                             )
                         }

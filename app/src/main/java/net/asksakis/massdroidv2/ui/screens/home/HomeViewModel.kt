@@ -15,6 +15,7 @@ import kotlinx.coroutines.withContext
 import net.asksakis.massdroidv2.data.repository.QueueDstmCache
 import net.asksakis.massdroidv2.data.websocket.ConnectionState
 import net.asksakis.massdroidv2.data.websocket.MaWebSocketClient
+import net.asksakis.massdroidv2.service.SleepTimerBridge
 import net.asksakis.massdroidv2.data.proximity.RoomDetector
 import net.asksakis.massdroidv2.auto.AaProjectionObserver
 import net.asksakis.massdroidv2.domain.model.GroupProviderOption
@@ -37,8 +38,23 @@ class HomeViewModel @Inject constructor(
     private val proximityConfigStore: net.asksakis.massdroidv2.data.proximity.ProximityConfigStore,
     private val roomDetector: RoomDetector,
     private val sendspinManager: net.asksakis.massdroidv2.data.sendspin.SendspinManager,
-    private val queueDstmCache: QueueDstmCache
+    private val queueDstmCache: QueueDstmCache,
+    private val sleepTimerBridge: SleepTimerBridge,
 ) : ViewModel() {
+
+    /**
+     * Player id the active sleep timer targets, or null if no timer is
+     * running. PlayersScreen uses this to badge the corresponding row.
+     */
+    val sleepTimerTargetPlayerId: StateFlow<String?> = sleepTimerBridge.state
+        .map { state ->
+            when (state) {
+                is SleepTimerBridge.State.Running -> state.playerId
+                is SleepTimerBridge.State.FadingOut -> state.playerId
+                SleepTimerBridge.State.Idle -> null
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     val players = playerRepository.players
     val selectedPlayer = playerRepository.selectedPlayer

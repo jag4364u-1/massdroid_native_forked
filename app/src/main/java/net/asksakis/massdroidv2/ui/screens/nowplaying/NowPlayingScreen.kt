@@ -531,7 +531,12 @@ fun NowPlayingScreen(
         SleepTimerSheet(
             isActive = sleepTimerActive,
             remainingMinutes = sleepTimerRemainingMin,
-            onStart = { viewModel.sleepTimerBridge.requestStart(it) },
+            onStart = { minutes ->
+                val targetId = player?.playerId
+                if (targetId != null) {
+                    viewModel.sleepTimerBridge.requestStart(minutes, targetId)
+                }
+            },
             onCancel = { viewModel.sleepTimerBridge.requestCancel() },
             onDismiss = { showSleepTimerDialog = false }
         )

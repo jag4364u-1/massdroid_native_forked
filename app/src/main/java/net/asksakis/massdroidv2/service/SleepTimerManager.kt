@@ -21,8 +21,8 @@ class SleepTimerManager(
     private val context: Context,
     private val scope: CoroutineScope,
     private val bridge: SleepTimerBridge,
-    private val onFadeFraction: (Float) -> Unit,
-    private val onStop: suspend () -> Unit
+    private val onFadeFraction: (Float, String) -> Unit,
+    private val onStop: suspend (String) -> Unit,
 ) {
     companion object {
         private const val TAG = "SleepTimer"
@@ -37,8 +37,8 @@ class SleepTimerManager(
 
     sealed interface State {
         data object Idle : State
-        data class Running(val endTimeMs: Long) : State
-        data class FadingOut(val endTimeMs: Long) : State
+        data class Running(val endTimeMs: Long, val playerId: String) : State
+        data class FadingOut(val endTimeMs: Long, val playerId: String) : State
     }
 
     private val _state = MutableStateFlow<State>(State.Idle)
@@ -56,10 +56,10 @@ class SleepTimerManager(
     private fun observeCommands() {
         commandJob = scope.launch {
             launch {
-                bridge.startCommand.collect { minutes ->
-                    if (minutes != null) {
+                bridge.startCommand.collect { request ->
+                    if (request != null) {
                         bridge.consumeStartCommand()
-                        start(minutes)
+                        start(request.minutes, request.playerId)
                     }
                 }
             }
@@ -79,17 +79,17 @@ class SleepTimerManager(
         _state.value = state
         bridge.updateState(when (state) {
             State.Idle -> SleepTimerBridge.State.Idle
-            is State.Running -> SleepTimerBridge.State.Running(state.endTimeMs)
-            is State.FadingOut -> SleepTimerBridge.State.FadingOut(state.endTimeMs)
+            is State.Running -> SleepTimerBridge.State.Running(state.endTimeMs, state.playerId)
+            is State.FadingOut -> SleepTimerBridge.State.FadingOut(state.endTimeMs, state.playerId)
         })
     }
 
-    fun start(durationMinutes: Int) {
+    fun start(durationMinutes: Int, playerId: String) {
         cancel()
         val durationMs = durationMinutes * 60_000L
         val endTime = System.currentTimeMillis() + durationMs
-        setState(State.Running(endTime))
-        Log.d(TAG, "Started: ${durationMinutes}min, fade at last ${FADE_DURATION_MS / 1000}s")
+        setState(State.Running(endTime, playerId))
+        Log.d(TAG, "Started: ${durationMinutes}min for $playerId, fade at last ${FADE_DURATION_MS / 1000}s")
         updateNotification()
 
         timerJob = scope.launch {
@@ -105,38 +105,43 @@ class SleepTimerManager(
             if (!isActive) return@launch
 
             // Fade out over 30 seconds
-            Log.d(TAG, "Fade out starting")
-            setState(State.FadingOut(endTime))
+            Log.d(TAG, "Fade out starting for $playerId")
+            setState(State.FadingOut(endTime, playerId))
             updateNotification()
             val fadeStart = System.currentTimeMillis()
             while (isActive) {
                 val elapsed = System.currentTimeMillis() - fadeStart
                 if (elapsed >= FADE_DURATION_MS) break
                 val fraction = 1f - (elapsed.toFloat() / FADE_DURATION_MS)
-                onFadeFraction(fraction.coerceIn(0f, 1f))
+                onFadeFraction(fraction.coerceIn(0f, 1f), playerId)
                 delay(500)
             }
 
             if (!isActive) return@launch
 
-            // Stop playback
-            Log.d(TAG, "Timer expired, stopping playback")
-            onFadeFraction(0f)
+            // Stop playback on the target player only.
+            Log.d(TAG, "Timer expired, stopping playback for $playerId")
+            onFadeFraction(0f, playerId)
             delay(500)
-            onStop()
+            onStop(playerId)
             delay(2000) // wait for playback to fully stop before restoring volume
-            onFadeFraction(1f) // restore original volumes
+            onFadeFraction(1f, playerId) // restore original volume
             setState(State.Idle)
             cancelNotification()
         }
     }
 
     fun cancel() {
+        val current = _state.value
         if (timerJob?.isActive == true) {
             Log.d(TAG, "Cancelled")
             timerJob?.cancel()
-            if (_state.value is State.FadingOut) {
-                onFadeFraction(1f) // restore original volumes
+            val pid = when (current) {
+                is State.FadingOut -> current.playerId
+                else -> null
+            }
+            if (pid != null) {
+                onFadeFraction(1f, pid) // restore original volume
             }
         }
         timerJob = null

@@ -155,41 +155,39 @@ class PlaybackService : MediaLibraryService() {
             context = this,
             scope = scope,
             bridge = sleepTimerBridge,
-            onFadeFraction = { fraction ->
-                // Cache original volumes on first fade call, restore on fraction=1.0
+            onFadeFraction = { fraction, targetPlayerId ->
+                // Snapshot the target player's original volume on the
+                // first fade tick, restore it when fraction returns to
+                // 1.0 (cancel) or after stop completes. Scope strictly
+                // to the player the user chose — sibling speakers and
+                // group members the user didn't pick keep playing.
                 if (fraction < 1f && sleepTimerOriginalVolumes.isEmpty()) {
-                    for (p in playerRepository.players.value) {
-                        if (p.state == net.asksakis.massdroidv2.domain.model.PlaybackState.PLAYING
-                            || p.playerId == sendspinCoordinator.playerId) {
-                            sleepTimerOriginalVolumes[p.playerId] = p.volumeLevel
-                        }
+                    val target = playerRepository.players.value
+                        .firstOrNull { it.playerId == targetPlayerId }
+                    if (target != null) {
+                        sleepTimerOriginalVolumes[target.playerId] = target.volumeLevel
                     }
                 }
-                val originals = sleepTimerOriginalVolumes
-                for ((id, origVol) in originals) {
-                    val targetVol = (origVol * fraction).toInt()
-                    if (id == sendspinCoordinator.playerId) {
-                        // Sendspin path: route through the coordinator so the
-                        // single-source-of-truth sync logic applies (no direct
-                        // STREAM_MUSIC writes; MA push only).
-                        sendspinVolumeCoordinator.onSleepTimerFade(id, targetVol)
-                    } else {
-                        scope.launch {
-                            try { playerRepository.setVolume(id, targetVol) } catch (_: Exception) {}
-                        }
+                val originalVol = sleepTimerOriginalVolumes[targetPlayerId] ?: return@SleepTimerManager
+                val targetVol = (originalVol * fraction).toInt()
+                if (targetPlayerId == sendspinCoordinator.playerId) {
+                    // Sendspin path: route through the coordinator so the
+                    // single-source-of-truth sync logic applies (no direct
+                    // STREAM_MUSIC writes; MA push only).
+                    sendspinVolumeCoordinator.onSleepTimerFade(targetPlayerId, targetVol)
+                } else {
+                    scope.launch {
+                        try { playerRepository.setVolume(targetPlayerId, targetVol) } catch (_: Exception) {}
                     }
                 }
                 if (fraction >= 1f) sleepTimerOriginalVolumes.clear()
             },
-            onStop = {
-                // Stop ALL playing players, not just selected
-                val playingPlayers = playerRepository.players.value.filter {
-                    it.state == net.asksakis.massdroidv2.domain.model.PlaybackState.PLAYING
-                }
-                for (p in playingPlayers) {
-                    try { playerRepository.pause(p.playerId) } catch (_: Exception) {}
-                }
-                if (sendspinCoordinator.isActive) {
+            onStop = { targetPlayerId ->
+                // Pause only the target player. If it's a Sendspin
+                // player, also tell the controller to release any
+                // local audio focus state.
+                try { playerRepository.pause(targetPlayerId) } catch (_: Exception) {}
+                if (targetPlayerId == sendspinCoordinator.playerId && sendspinCoordinator.isActive) {
                     sendspinCoordinator.controller?.handlePause()
                 }
             }
