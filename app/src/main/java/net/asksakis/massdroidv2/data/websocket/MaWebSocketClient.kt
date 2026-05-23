@@ -3,8 +3,6 @@ package net.asksakis.massdroidv2.data.websocket
 import android.util.Log
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.json.*
 import okhttp3.*
 import java.security.KeyStore
@@ -14,7 +12,6 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
 import javax.net.ssl.*
 import kotlin.math.min
 
@@ -24,29 +21,6 @@ sealed class ConnectionState {
     data class Connected(val serverInfo: ServerInfo) : ConnectionState()
     data class Error(val message: String) : ConnectionState()
 }
-
-/**
- * Cooperative priority hint for [MaWebSocketClient.sendCommand]. The
- * Music Assistant server is single-event-loop, so a burst of bulk
- * metadata RPCs (similar-artist resolution, library enrichment) can
- * starve latency-sensitive transport commands (seek/play/pause) on
- * the shared socket. Callers can mark each command with one of these
- * levels; the client gates LOW commands behind a concurrency semaphore
- * and pauses them whenever a HIGH command is in flight, so the server
- * never sees more than a couple of bulk requests queued ahead of a
- * user-visible action.
- *
- *  - [HIGH]: transport commands (players/cmd, player_queues/play_media,
- *    seek, volume, auth). Bypass every gate and are tracked while in
- *    flight so LOW commands pause around them.
- *  - [NORMAL] *(default)*: ordinary commands that do not need
- *    priority but also do not contribute to server backpressure
- *    (track lookups, metadata, etc.). No gate.
- *  - [LOW]: bulk metadata loops (music/search, artist/album lookups,
- *    `player_queues/items` with limit >= 100). Bounded concurrency +
- *    yields to in-flight HIGH commands.
- */
-enum class CommandPriority { HIGH, NORMAL, LOW }
 
 class MaWebSocketClient(
     private val baseOkHttpClient: OkHttpClient,
@@ -61,8 +35,6 @@ class MaWebSocketClient(
         private const val MAX_RETRY_COUNT = AGGRESSIVE_RETRY_COUNT + PATIENT_RETRY_COUNT
         private const val STABLE_CONNECTION_RESET_MS = 30_000L
         private const val COMMAND_RETRY_DELAY_MS = 140L
-        private const val LOW_PRIORITY_MAX_INFLIGHT = 2
-        private const val LOW_PRIORITY_HIGH_WAIT_TICK_MS = 25L
     }
 
     private var okHttpClient: OkHttpClient = baseOkHttpClient
@@ -85,59 +57,6 @@ class MaWebSocketClient(
 
     private val pendingRequests = ConcurrentHashMap<String, CompletableDeferred<JsonElement?>>()
     private val partialResults = ConcurrentHashMap<String, MutableList<JsonElement>>()
-
-    /**
-     * In-flight HIGH-priority command counter. LOW commands check this
-     * before they send and back off briefly if a transport command is
-     * mid-round-trip, so the server's queue never has bulk requests
-     * stacked ahead of a user action.
-     */
-    private val highPriorityInFlight = AtomicInteger(0)
-
-    /**
-     * Concurrency budget for LOW-priority commands. Two is enough to
-     * overlap server-side I/O for typical 50-100ms responses while
-     * leaving the bulk of the WS pipeline available for HIGH/NORMAL
-     * commands. Empirically derived from production cold-start traces
-     * (47 sequential bulk RPCs caused a 12s seek lag when unbounded).
-     */
-    private val lowPriorityGate = Semaphore(LOW_PRIORITY_MAX_INFLIGHT)
-
-    /**
-     * Default priority inferred from the command name. Explicit
-     * callers can still override via [sendCommand]'s `priority`
-     * parameter, but the inference covers every existing call site
-     * without requiring touching dozens of files. Add new bulk endpoints
-     * to the LOW set as they appear.
-     */
-    @Suppress("MagicNumber")
-    private fun inferPriority(command: String): CommandPriority {
-        if (command == "auth" || command == "auth/login") return CommandPriority.HIGH
-        if (command.startsWith("players/cmd/")) return CommandPriority.HIGH
-        if (command == "player_queues/play_media" ||
-            command == "player_queues/play_index" ||
-            command == "player_queues/shuffle" ||
-            command == "player_queues/repeat" ||
-            command == "player_queues/clear" ||
-            command == "player_queues/move_item" ||
-            command == "player_queues/delete_item" ||
-            command == "player_queues/dont_stop_the_music" ||
-            command == "player_queues/get_active_queue"
-        ) return CommandPriority.HIGH
-        if (command == "music/search" ||
-            command == "music/artists/get" ||
-            command == "music/artists/artist_albums" ||
-            command == "music/artists/artist_tracks" ||
-            command == "music/albums/get" ||
-            command == "music/albums/album_tracks" ||
-            command == "music/artists/library_items" ||
-            command == "music/albums/library_items" ||
-            command == "music/tracks/library_items" ||
-            command == "music/playlists/library_items" ||
-            command == "metadata/get_track_lyrics"
-        ) return CommandPriority.LOW
-        return CommandPriority.NORMAL
-    }
 
     /**
      * Rolling 1-second counter of outbound WS commands. Logs a summary
@@ -602,40 +521,6 @@ class MaWebSocketClient(
         args: JsonObject? = null,
         awaitResponse: Boolean = true,
         timeoutMs: Long = 30_000,
-        priority: CommandPriority? = null,
-    ): JsonElement? {
-        val effective = priority ?: inferPriority(command)
-        return when (effective) {
-            CommandPriority.HIGH -> {
-                highPriorityInFlight.incrementAndGet()
-                try {
-                    sendCommandInternal(command, args, awaitResponse, timeoutMs)
-                } finally {
-                    highPriorityInFlight.decrementAndGet()
-                }
-            }
-            CommandPriority.NORMAL -> sendCommandInternal(command, args, awaitResponse, timeoutMs)
-            CommandPriority.LOW -> {
-                // Yield to in-flight HIGH commands so we don't push a
-                // bulk request into the server queue right behind a
-                // user-initiated seek/play/pause. The wait loop ticks
-                // at LOW_PRIORITY_HIGH_WAIT_TICK_MS, fast enough to be
-                // imperceptible but cheap CPU-wise.
-                while (highPriorityInFlight.get() > 0) {
-                    delay(LOW_PRIORITY_HIGH_WAIT_TICK_MS)
-                }
-                lowPriorityGate.withPermit {
-                    sendCommandInternal(command, args, awaitResponse, timeoutMs)
-                }
-            }
-        }
-    }
-
-    private suspend fun sendCommandInternal(
-        command: String,
-        args: JsonObject?,
-        awaitResponse: Boolean,
-        timeoutMs: Long,
     ): JsonElement? {
         waitUntilReadyForCommand(command = command, awaitResponse = awaitResponse, timeoutMs = timeoutMs)
         if (_connectionState.value !is ConnectionState.Connected && !isAuthCommand(command)) return null
