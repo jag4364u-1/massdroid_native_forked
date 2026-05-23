@@ -24,6 +24,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -63,7 +65,6 @@ class SendspinAudioController(
 ) {
     companion object {
         private const val TAG = "SendspinCtrl"
-        private const val PAUSE_DEBOUNCE_MS = 400L
         private const val WAKE_LOCK_TIMEOUT_MS = 6 * 60 * 60 * 1000L
         private const val GROUP_JOIN_RELOCK_COOLDOWN_MS = 5_000L
         private const val GROUP_SOLO_STARTUP_GRACE_MS = 5_000L
@@ -86,10 +87,8 @@ class SendspinAudioController(
             if (intent.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
                 Log.d(TAG, "Audio becoming noisy (headset unplugged), pausing")
                 val id = sendspinPlayerId ?: return
-                currentIsPlaying = false
+                _userIntent.value = false
                 sendspinManager.pauseAudio()
-                optimisticUntil = System.currentTimeMillis() + 1000
-                notifyStateChanged()
                 scope.launch { playerRepository.pause(id) }
             }
         }
@@ -180,10 +179,8 @@ class SendspinAudioController(
     private fun pauseForBtSpeakerFallback() {
         val id = sendspinPlayerId ?: return
         Log.d(TAG, "Bluetooth output disconnected, pausing Sendspin to avoid phone-speaker fallback")
-        currentIsPlaying = false
-        optimisticUntil = System.currentTimeMillis() + 1000
+        _userIntent.value = false
         sendspinManager.pauseAudio()
-        notifyStateChanged()
         scope.launch { playerRepository.pause(id) }
     }
 
@@ -209,6 +206,29 @@ class SendspinAudioController(
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
+    // ===== Playback intent / state =====
+    //
+    // `_userIntent` is the SINGLE source of truth for "does the user want
+    // Sendspin to be playing right now". It is mutated only by explicit user-
+    // level actions: the local play/pause handlers, the playbackIntent flow
+    // from the repository (UI-driven), the noisy receiver (BT unplug), the
+    // BT-to-speaker fallback, permanent audio focus loss, and stop(). Reactive
+    // signals from the Sendspin server/transport never touch it.
+    //
+    // `_currentIsPlaying` is DERIVED in start() via combine() over userIntent,
+    // selected player, transport state, sync state, and server metadata. It
+    // reflects "is the user wanting to play AND is the system actually
+    // delivering audio right now". This is what we report to the MediaSession
+    // and what handlePlayPause toggles against.
+    //
+    // Auto-resume on MA reconnect still checks userIntent + sendspinSelected
+    // explicitly, because user intent survives a player-selection switch (you
+    // can be enjoying Sendspin and open the JBL screen to control it) but
+    // auto-resume must NOT fire on a player the user is no longer using.
+    private val _userIntent = MutableStateFlow(false)
+    private val _currentIsPlaying = MutableStateFlow(false)
+    private val currentIsPlaying: Boolean get() = _currentIsPlaying.value
+
     // State
     private var currentArt: Bitmap? = null
     private var currentArtUrl: String? = null
@@ -216,20 +236,16 @@ class SendspinAudioController(
     @Volatile var isReady = false; private set
     @Volatile private var transportState = SendspinState.DISCONNECTED
     @Volatile private var localSyncState = SyncState.IDLE
-    @Volatile private var lastSendspinReportedPlaying = false
     private var currentTrackUri: String? = null
     private var currentTitle = ""
     private var currentArtist = ""
     private var currentAlbum = ""
     private var currentDurationMs = 0L
     private var currentPositionMs = 0L
-    private var currentIsPlaying = false
-    private var optimisticUntil = 0L
     var sendspinPlayerId: String? = null; private set
     private val collectorJobs = mutableListOf<Job>()
     private var autoRecoveryJob: Job? = null
     private var reconnectJob: Deferred<Boolean>? = null
-    private var lastPlayingAtMs = 0L
     private var lastObservedInGroup: Boolean? = null
     private var groupObserverStartedAtMs = 0L
     private var lastGroupJoinRelockAtMs = 0L
@@ -321,7 +337,11 @@ class SendspinAudioController(
             }
         }
 
-        // Collector 1: Observe connection state
+        // Collector 1: Observe connection state. Updates `isStreaming` /
+        // `isReady` via `recomputeAvailability()`, manages wake/wifi locks
+        // and audio-focus acquisition on the streaming edge, and asks the
+        // audio engine to flush on ERROR. It does NOT touch playback
+        // intent or `_currentIsPlaying` — the derived flow does that.
         collectorJobs += scope.launch {
             sendspinManager.connectionState.collect { state ->
                 val wasStreaming = transportState == SendspinState.STREAMING
@@ -332,6 +352,7 @@ class SendspinAudioController(
 
                 if (!wasStreaming && transportState == SendspinState.STREAMING) {
                     acquireLocks()
+                    if (!hasAudioFocus) requestAudioFocus()
                 }
                 if (wasStreaming && transportState != SendspinState.STREAMING) {
                     releaseLocks()
@@ -348,39 +369,18 @@ class SendspinAudioController(
                 if (state == SendspinState.ERROR && !wasError) {
                     sendspinManager.onTransportFailure()
                 }
-
-                val outsideOptimistic = System.currentTimeMillis() >= optimisticUntil
-                if (isStreaming && !wasStreaming) {
-                    if (!hasAudioFocus) requestAudioFocus()
-                    if (outsideOptimistic) {
-                        currentIsPlaying = true
-                        lastPlayingAtMs = System.currentTimeMillis()
-                    }
-                } else if (wasStreaming && state == SendspinState.SYNCING) {
-                    if (outsideOptimistic) currentIsPlaying = false
-                } else if (!isStreaming && state != SendspinState.SYNCING && outsideOptimistic) {
-                    currentIsPlaying = false
-                }
                 notifyStateChanged()
             }
         }
 
+        // Collector: sync state drives `isReady` via recomputeAvailability().
+        // The derived flow folds rebuffering / idle into `_currentIsPlaying`.
         collectorJobs += scope.launch {
-            sendspinManager.syncState
-                .collect { state ->
-                    localSyncState = state
-                    recomputeAvailability()
-                    if (state == SyncState.SYNC_ERROR_REBUFFERING &&
-                        System.currentTimeMillis() >= optimisticUntil
-                    ) {
-                        currentIsPlaying = false
-                    } else if (state == SyncState.HOLDOVER_PLAYING_FROM_BUFFER &&
-                        System.currentTimeMillis() >= optimisticUntil
-                    ) {
-                        currentIsPlaying = true
-                    }
-                    notifyStateChanged()
-                }
+            sendspinManager.syncState.collect { state ->
+                localSyncState = state
+                recomputeAvailability()
+                notifyStateChanged()
+            }
         }
 
         collectorJobs += scope.launch {
@@ -407,14 +407,8 @@ class SendspinAudioController(
                     currentArt = loadArt(artUrl)
                 }
 
-                val playbackSpeed = metadata.progress?.playbackSpeed
-                if (playbackSpeed != null && System.currentTimeMillis() >= optimisticUntil) {
-                    currentIsPlaying = playbackSpeed > 0
-                    if (currentIsPlaying) {
-                        lastPlayingAtMs = System.currentTimeMillis()
-                    }
-                }
-
+                // playbackSpeed flows into `_currentIsPlaying` via the
+                // derived combine in start(); no direct write here.
                 notifyMetadataChanged()
                 notifyStateChanged()
             }
@@ -461,23 +455,13 @@ class SendspinAudioController(
                         sendspinManager.setInSyncGroup(inGroup)
                         if (joinedGroup) requestGroupJoinRelock(player)
                     }
-                    lastSendspinReportedPlaying = player.state == PlaybackState.PLAYING
-                    val outsideOptimistic = System.currentTimeMillis() >= optimisticUntil
-                    if (outsideOptimistic) {
-                        if (lastSendspinReportedPlaying) {
-                            currentIsPlaying = true
-                            lastPlayingAtMs = System.currentTimeMillis()
-                        } else if (currentIsPlaying && isStreaming) {
-                            val sincePlayingMs = System.currentTimeMillis() - lastPlayingAtMs
-                            if (sincePlayingMs >= PAUSE_DEBOUNCE_MS) {
-                                currentIsPlaying = false
-                            } else {
-                                Log.d(TAG, "Ignoring transient pause jitter (${sincePlayingMs}ms)")
-                            }
-                        } else {
-                            currentIsPlaying = false
-                        }
-                    }
+                    // Playing-state used to be reconciled from player.state
+                    // here with a 400ms transient-pause debouncer. After the
+                    // derived-flow refactor the source of truth for "is
+                    // Sendspin actually playing right now" is the combine in
+                    // start() (userIntent + transport + sync + metadata speed
+                    // + selected player). This collector keeps only
+                    // group/metadata bookkeeping.
                     if (!isStreaming) return@collect
                     val media = player.currentMedia
                     val hasMeaningfulMetadata =
@@ -515,14 +499,17 @@ class SendspinAudioController(
                 }
         }
 
-        // Collector 3: Immediate audio pause/resume when app UI controls the sendspin player
+        // Collector: immediate audio pause/resume when the UI (or any other
+        // caller of `playerRepository.play()/pause()`) targets the sendspin
+        // player. This is the canonical UI-driven path for user intent —
+        // both this and `handlePlay`/`handlePause` route through
+        // `playerRepository.play()/pause()`, so writes here cover both.
         collectorJobs += scope.launch {
             playerRepository.playbackIntent.collect { willPlay ->
                 val selectedId = playerRepository.selectedPlayer.value?.playerId ?: return@collect
                 if (selectedId != sendspinPlayerId) return@collect
                 if (willPlay) {
-                    currentIsPlaying = true
-                    lastPlayingAtMs = System.currentTimeMillis()
+                    _userIntent.value = true
                     if (!hasAudioFocus) requestAudioFocus()
                     if (isReady) {
                         sendspinManager.resumeAudio()
@@ -531,11 +518,50 @@ class SendspinAudioController(
                     }
                 } else {
                     if (!isReady) return@collect
-                    currentIsPlaying = false
+                    _userIntent.value = false
                     sendspinManager.pauseAudio()
                 }
-                notifyStateChanged()
             }
+        }
+
+        // Derived flow: `_currentIsPlaying` = user intent AND sendspin is the
+        // selected player AND the transport is actually flowing audio (not
+        // syncing/error/idle) AND the server-reported playback speed is > 0.
+        // Replaces the 17 imperative writes the previous design scattered
+        // across collectors and handlers. Writes only `_currentIsPlaying`
+        // and fires `notifyStateChanged()` on each emission so MediaSession
+        // tracks the same canonical state as our internal consumers.
+        //
+        // Two chained 3-ary combines because the 5-ary overload's lambda
+        // inference trips on the heterogeneous nullable flow types here.
+        collectorJobs += scope.launch {
+            val transportFlow = combine(
+                sendspinManager.connectionState,
+                sendspinManager.syncState,
+                sendspinManager.serverMetadata,
+            ) { transport, sync, metadata ->
+                val streaming = transport == SendspinState.STREAMING
+                val syncOk = sync != SyncState.SYNC_ERROR_REBUFFERING &&
+                    sync != SyncState.IDLE
+                // Treat unknown/missing speed as "not paused": the server
+                // omits the field on first frames and on some transports.
+                val speedOk = (metadata?.progress?.playbackSpeed ?: 1) > 0
+                streaming && syncOk && speedOk
+            }
+            combine(
+                _userIntent,
+                playerRepository.selectedPlayer,
+                transportFlow,
+            ) { intent, selected, transportPlaying ->
+                val sendspinSelected = sendspinPlayerId != null &&
+                    selected?.playerId == sendspinPlayerId
+                intent && sendspinSelected && transportPlaying
+            }
+                .distinctUntilChanged()
+                .collect { playing ->
+                    _currentIsPlaying.value = playing
+                    notifyStateChanged()
+                }
         }
 
         // Collector 4: Read settings and start sendspin
@@ -587,11 +613,17 @@ class SendspinAudioController(
 
         // Collector 6: Refresh Sendspin transport when MA reconnects, and
         // auto-resume playback if the user wanted to play. The auto-resume
-        // gate is `currentIsPlaying` (set false by the noisy receiver on BT
-        // disconnect and by handlePause, true on handlePlay or while server
-        // reports PLAYING). This honours the BT-disconnect-pause contract:
-        // when the user leaves the car, music does not silently come back on
-        // the phone speaker; it stays paused until they explicitly play.
+        // gate is the canonical `_userIntent` (cleared by noisy receiver on
+        // BT disconnect, by handlePause, and by permanent audio focus loss).
+        // This honours the BT-disconnect-pause contract: when the user
+        // leaves the car, music does not silently come back on the phone
+        // speaker; it stays paused until they explicitly play.
+        //
+        // We also explicitly require Sendspin to be the currently selected
+        // player. User intent survives a player-selection switch (you can
+        // be enjoying Sendspin in the kitchen and open the JBL screen to
+        // control your living-room speaker), but auto-resume must never
+        // fire on a player the user has stepped away from.
         //
         // The manager.refresh() call is a graceful reconnect through the
         // client's single state machine — no stop+start race with the
@@ -602,33 +634,18 @@ class SendspinAudioController(
                 val isConnected = state is ConnectionState.Connected
                 if (isConnected && connectedBefore) {
                     val currentSsState = sendspinManager.connectionState.value
-                    // Auto-resume must check the *currently* selected player too,
-                    // not just `currentIsPlaying`. The intent gate is per-player
-                    // (only mutated from Sendspin's own state collectors), so it
-                    // can stay true after the user switched the selected player
-                    // away from Sendspin to a remote one — leading to a wrong-
-                    // player auto-play when the WS reconnects (user reported:
-                    // came home with JBL Authentics selected, but the phone
-                    // speaker started playing on its own).
                     val sendspinIsSelected =
                         playerRepository.selectedPlayer.value?.playerId == sendspinPlayerId
-                    val wantToResume = currentIsPlaying && sendspinIsSelected
+                    val intent = _userIntent.value
+                    val wantToResume = intent && sendspinIsSelected
                     Log.d(
                         TAG,
                         "MA reconnected, sendspin is $currentSsState, refreshing " +
-                            "(wantToResume=$wantToResume, currentIsPlaying=$currentIsPlaying, " +
+                            "(wantToResume=$wantToResume, userIntent=$intent, " +
                             "sendspinIsSelected=$sendspinIsSelected)"
                     )
                     sendspinManager.refresh()
                     if (wantToResume) {
-                        // After the force-restart MA does not auto-resume the
-                        // stream (the brief WS outage leaves it expecting a
-                        // play command from the client). Wait until the new
-                        // Sendspin session is at least SYNCING (server has
-                        // acknowledged us) and send play. The currentIsPlaying
-                        // check above is the canonical intent gate: BT
-                        // disconnect / user pause already cleared it, so we
-                        // never resume against the user's wish.
                         launch {
                             val ready = withTimeoutOrNull(15_000) {
                                 sendspinManager.connectionState
@@ -660,13 +677,15 @@ class SendspinAudioController(
         autoRecoveryJob = null
         reconnectJob?.cancel()
         reconnectJob = null
-        lastSendspinReportedPlaying = false
         abandonAudioFocus()
         unregisterNoisyReceiver()
         releaseLocks()
         // volumeCoordinator outlives this controller — stopped by SendspinCoordinator.
         sendspinManager.stop()
-        currentIsPlaying = false
+        // Collectors are cancelled above so the derived flow no longer runs;
+        // reset both flows explicitly so a subsequent start() begins clean.
+        _userIntent.value = false
+        _currentIsPlaying.value = false
         isReady = false
         isStreaming = false
         notifyStateChanged()
@@ -685,16 +704,12 @@ class SendspinAudioController(
         val id = sendspinPlayerId ?: return
 
         playerRepository.selectPlayer(id)
-        currentIsPlaying = true
-        lastPlayingAtMs = System.currentTimeMillis()
-        optimisticUntil = System.currentTimeMillis() + 1000
-        notifyStateChanged()
+        _userIntent.value = true
         if (!hasAudioFocus) requestAudioFocus()
         if (isReady) sendspinManager.resumeAudio()
         scope.launch {
             if (!isReady && !ensureSendspinConnected()) {
-                currentIsPlaying = false
-                notifyStateChanged()
+                _userIntent.value = false
                 return@launch
             }
             playerRepository.play(id)
@@ -704,32 +719,28 @@ class SendspinAudioController(
     fun handlePause() {
         val id = sendspinPlayerId ?: return
 
-        currentIsPlaying = false
-        optimisticUntil = System.currentTimeMillis() + 1000
-        notifyStateChanged()
+        _userIntent.value = false
         sendspinManager.pauseAudio()
         scope.launch { playerRepository.pause(id) }
     }
 
     fun handlePlayPause() {
         val id = sendspinPlayerId ?: return
+        // Toggle off actual playback state, not intent: external controllers
+        // (car HMI, watch) show MediaSession's currentIsPlaying, so a click
+        // means "do what the icon implies".
         val wantPlay = !currentIsPlaying
         if (wantPlay) {
-    
-            currentIsPlaying = true
-            lastPlayingAtMs = System.currentTimeMillis()
+            _userIntent.value = true
             if (!hasAudioFocus) requestAudioFocus()
             if (isReady) sendspinManager.resumeAudio()
         } else {
-            currentIsPlaying = false
+            _userIntent.value = false
             sendspinManager.pauseAudio()
         }
-        optimisticUntil = System.currentTimeMillis() + 1000
-        notifyStateChanged()
         scope.launch {
             if (wantPlay && !isReady && !ensureSendspinConnected()) {
-                currentIsPlaying = false
-                notifyStateChanged()
+                _userIntent.value = false
                 return@launch
             }
             playerRepository.playPause(id)
@@ -768,16 +779,19 @@ class SendspinAudioController(
             .setOnAudioFocusChangeListener { focusChange ->
                 when (focusChange) {
                     AudioManager.AUDIOFOCUS_GAIN -> {
-                        Log.d(TAG, "Audio focus gained, isStreaming=$isStreaming isReady=$isReady currentIsPlaying=$currentIsPlaying")
+                        val intent = _userIntent.value
+                        Log.d(TAG, "Audio focus gained, isStreaming=$isStreaming isReady=$isReady userIntent=$intent")
                         hasAudioFocus = true
-                        // Always undo a prior duck. Resume is gated on the canonical
-                        // playback intent (currentIsPlaying): noisy/route-loss and
-                        // permanent-loss paths set it to false, so the route-change
-                        // focus-shuffle that follows a BT disconnect will not silently
-                        // hand audio off to the phone speaker. Transient losses (phone
-                        // call, nav prompt) leave the intent true and resume normally.
+                        // Always undo a prior duck. Resume is gated on
+                        // `_userIntent` — the canonical user-level intent
+                        // flow. Noisy receiver, BT-to-speaker fallback, and
+                        // permanent focus loss all clear it, so the
+                        // route-change focus-shuffle that follows a BT
+                        // disconnect will not silently hand audio off to the
+                        // phone speaker. Transient losses (phone call, nav
+                        // prompt) leave intent true and resume normally.
                         sendspinManager.restoreVolume()
-                        if (!currentIsPlaying) {
+                        if (!intent) {
                             Log.d(TAG, "Focus gained but intent is paused, staying paused")
                             return@setOnAudioFocusChangeListener
                         }
@@ -796,10 +810,11 @@ class SendspinAudioController(
                     AudioManager.AUDIOFOCUS_LOSS -> {
                         Log.d(TAG, "Audio focus lost permanently")
                         hasAudioFocus = false
-                        // Align intent with the permanent loss: another app has taken
-                        // over, the user is no longer "trying to play". Without this,
-                        // a later AUDIOFOCUS_GAIN would resume against the user's wish.
-                        currentIsPlaying = false
+                        // Align intent with the permanent loss: another app
+                        // has taken over, the user is no longer "trying to
+                        // play". Without this, a later AUDIOFOCUS_GAIN would
+                        // resume against the user's wish.
+                        _userIntent.value = false
                         if (isStreaming) {
                             val id = sendspinPlayerId
                             if (id != null) {
@@ -807,7 +822,6 @@ class SendspinAudioController(
                             }
                         }
                         sendspinManager.pauseAudio()
-                        notifyStateChanged()
                     }
                     AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
                         Log.d(TAG, "Audio focus lost transiently")
