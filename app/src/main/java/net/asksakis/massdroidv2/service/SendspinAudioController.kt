@@ -197,8 +197,17 @@ class SendspinAudioController(
 
     private suspend fun resolveAcousticCorrectionForRoute(route: String): Long {
         return when (route) {
-            // Phone speaker: use acoustic baseline if calibrated (full one-way output delay).
-            "speaker" -> settingsRepository.acousticPhoneBaselineUs.first()
+            // Phone speaker: NO acoustic compensation. The Sendspin spec syncs at
+            // the audio port, and the reference client (sendspin-js) uses only the
+            // platform's one-way output latency (baseLatency + outputLatency) — our
+            // equivalent is the pipeline measurement from AudioTrack.getTimestamp.
+            // The acoustic chirp measures a speaker->mic ROUND TRIP; applying that
+            // full value as a one-way output delay double-counts the microphone
+            // input path and pushes playback ~half the round trip early ("locked
+            // 0.1ms but audibly out of sync"). The phone baseline stays stored as a
+            // REFERENCE for computing BT route deltas (btRoundTrip - phoneBaseline);
+            // it is not a compensation for the phone-speaker route itself.
+            "speaker" -> 0L
             "wired", "usb" -> 0L
             "bt" -> {
                 val productName = sendspinManager.getRoutedDeviceProductName() ?: "unknown"

@@ -160,9 +160,14 @@ class NowPlayingViewModel @Inject constructor(
 
     fun saveAcousticBaseline(baselineUs: Long) {
         viewModelScope.launch {
+            // Store the round-trip baseline as a REFERENCE for BT route deltas
+            // only. On the phone-speaker route itself we apply zero acoustic
+            // extra (sync at the port, pipeline is the one-way output latency);
+            // applying the full round trip here double-counts the mic input path
+            // and plays ~half the round trip early.
             settingsRepository.setAcousticPhoneBaselineUs(baselineUs)
             if (!isBtRoute()) {
-                sendspinManager.setRouteAcousticExtraUs(baselineUs)
+                sendspinManager.setRouteAcousticExtraUs(0L)
             }
         }
     }
