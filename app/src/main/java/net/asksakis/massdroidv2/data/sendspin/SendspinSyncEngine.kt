@@ -58,7 +58,10 @@ class SendspinSyncEngine : SendspinAudioEngine {
         private const val SYNC_ERROR_EMA_ALPHA = 0.10
         private const val CONTINUATION_GRACE_MS = 1000L
         private const val RATE_GENTLE = 0.005f   // 0.5% speed change
-        private const val RATE_STRONG = 0.01f    // 1.0% speed change
+        private const val RATE_STRONG = 0.02f    // 2.0% speed change (faster convergence
+                                                 // for large offsets, e.g. the one-shot DAC
+                                                 // re-seat; tiers de-escalate as error shrinks
+                                                 // so no overshoot). Pitch-preserved, subtle.
 
         // Direct mode thresholds
         private const val DIRECT_STARTUP_MS_OPUS = 300L
