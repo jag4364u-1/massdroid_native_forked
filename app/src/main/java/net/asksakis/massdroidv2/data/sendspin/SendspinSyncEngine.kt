@@ -226,6 +226,17 @@ class SendspinSyncEngine : SendspinAudioEngine {
     // One-shot guard: the closed-loop DAC anchor re-seat runs once per session
     // (reset on stream boundaries via resetSyncState).
     @Volatile private var dacAnchorReseated = false
+    // Learned per-route feed-forward (microseconds). The cold-start/pipeline
+    // offset is near-constant per device/route (~-60ms), so once the re-seat
+    // measures it we ADD this shift to BOTH the startup play target AND the
+    // buffering/late-drop target, so the NEXT stream (track change) starts
+    // already-synced with no Measuring/Converging cycle. Applied to both
+    // targets together (Codex: the previous attempt ran away because the
+    // stale/late-drop logic used the UNSHIFTED target, so a delayed start made
+    // frames look late, they were dropped, advancing the stream and cancelling
+    // the delay). Persists across pause/play; reset on route change; learned
+    // only on non-acoustic (phone/wired) routes.
+    @Volatile private var routeStartupFeedForwardUs = 0L
     private var lastSyncLogMs = 0L
     @Volatile var resyncCount = 0; private set
     private var playbackStartedAtMs = 0L             // wall clock when playback started
@@ -367,7 +378,8 @@ class SendspinSyncEngine : SendspinAudioEngine {
         // (which reads routeAcousticExtraUs from the acoustic calibration).
         // Matches the Music Assistant web UI's "Sendspin sync delay" slider
         // semantics so users see the same behaviour on both surfaces.
-        return localUs + (syncDelayMs.toLong() * 1000L) - latencyModel.totalCompensationUs()
+        return localUs + (syncDelayMs.toLong() * 1000L) - latencyModel.totalCompensationUs() +
+            routeStartupFeedForwardUs
     }
 
     /**
@@ -383,8 +395,13 @@ class SendspinSyncEngine : SendspinAudioEngine {
         // low-latency outputs (phone speaker ~25ms) using 0 here, diverging
         // from the actual play target and skewing stale/late-frame decisions.
         val latencyCompensation = measuredOutputLatencyUs.coerceAtLeast(0L)
-        // Same sign convention as targetLocalPlayUs: ADD UX nudge.
-        return localUs + (syncDelayMs.toLong() * 1000L) - latencyCompensation
+        // Same sign convention as targetLocalPlayUs, AND the same feed-forward
+        // shift — critical: the startup play target and the stale/late-drop
+        // target MUST move together, otherwise a feed-forward-delayed start
+        // makes frames look late here, they get dropped, the stream advances,
+        // and the delay is cancelled (the runaway the previous attempt hit).
+        return localUs + (syncDelayMs.toLong() * 1000L) - latencyCompensation +
+            routeStartupFeedForwardUs
     }
 
     private fun acousticExtraUs(): Long = latencyModel.acousticExtraUs()
@@ -1200,11 +1217,22 @@ class SendspinSyncEngine : SendspinAudioEngine {
                 && dacValidator.divergenceSameSignCount >= DAC_RESEAT_SIGN_COUNT
                 && kotlin.math.abs(smoothedDacAbsMs) > DAC_RESEAT_THRESHOLD_MS
             ) {
-                anchorLocalUs -= (smoothedDacAbsMs * 1000.0).toLong()
+                val reseatShiftUs = -(smoothedDacAbsMs * 1000.0).toLong()
+                anchorLocalUs += reseatShiftUs
                 smoothedSyncErrorMs = 0.0
                 dacAnchorReseated = true
+                // Learn the per-route feed-forward for the NEXT stream. This is a
+                // self-correcting accumulation, NOT blind: reseatShiftUs is the
+                // residual that survived the feed-forward already applied this
+                // stream, so once the feed-forward is right the residual (and
+                // thus this update) goes to ~0 and it stops growing. The runaway
+                // before came from the stale/drop target not being shifted too
+                // (now fixed), which kept the residual non-zero forever.
+                routeStartupFeedForwardUs =
+                    (routeStartupFeedForwardUs + reseatShiftUs).coerceIn(-500_000L, 500_000L)
                 Log.d(TAG, "DAC anchor re-seat (closed-loop): injected ${"%.1f".format(smoothedDacAbsMs)}ms " +
-                    "real offset into the anchor; correction loop will converge true output to 0")
+                    "real offset; correction loop converges this stream; " +
+                    "learned feedForward=${routeStartupFeedForwardUs / 1000}ms for next stream")
             }
         }
 
@@ -2096,6 +2124,9 @@ class SendspinSyncEngine : SendspinAudioEngine {
         latencyModel.onRouteChanged()
         clockPreciseForCorrections = false
         applyPlaybackRate(1.0f)
+        // New device = different cold-start/pipeline offset: drop the learned
+        // feed-forward so the new route re-learns its own from scratch.
+        routeStartupFeedForwardUs = 0L
         // Route change: audio content unchanged, only output device changed.
         // Flush AudioTrack (new hardware pipeline) but KEEP frame queue intact.
         // Queue head is at current playback position; flushing it would cause server
