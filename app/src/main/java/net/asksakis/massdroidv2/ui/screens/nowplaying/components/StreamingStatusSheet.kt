@@ -84,6 +84,9 @@ internal fun SendspinStatusSheet(
         SendspinState.DISCONNECTED -> "Disconnected"
     }
     val syncLockLabel = when {
+        // DIRECT (solo) mode runs no sync loop, so the DAC ground truth never
+        // matures and the sync-lock states below don't apply — show "Direct".
+        status.correctionMode.equals("DIRECT", ignoreCase = true) -> "Direct (no sync)"
         status.syncState != SyncState.SYNCHRONIZED -> stateLabel
         status.syncMuted -> "Aligning (muted)"
         // Until the closed-loop DAC ground truth matures, the sync error is the

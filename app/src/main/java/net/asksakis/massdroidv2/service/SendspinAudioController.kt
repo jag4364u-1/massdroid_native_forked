@@ -269,10 +269,36 @@ class SendspinAudioController(
     private var lastObservedInGroup: Boolean? = null
     private var groupObserverStartedAtMs = 0L
     private var lastGroupJoinRelockAtMs = 0L
+    // One-shot timer that commits the deferred initial solo verdict. The players
+    // flow is distinctUntilChanged, so once it has emitted "solo" it will NOT
+    // re-emit when streaming starts — without this the deferred verdict would
+    // never commit and a solo phone would stay in SYNC (correcting + audible
+    // resampling warble) forever instead of downgrading to DIRECT.
+    private var deferredSoloJob: Job? = null
 
     /** Use MA player timeline as source of truth (matches seek command target). */
     private fun serverPositionMs(rawPositionMs: Long): Long {
         return rawPositionMs.coerceAtLeast(0L)
+    }
+
+    /**
+     * Commit the deferred initial solo verdict after the startup grace. The
+     * players flow is distinctUntilChanged and won't re-emit when streaming
+     * starts, so the deferral (which keeps the SYNC default while group
+     * membership is still unconfirmed) would otherwise never resolve and a solo
+     * phone would stay in SYNC forever. If no group was observed by the time the
+     * grace elapses, commit solo so the engine downgrades to DIRECT.
+     */
+    private fun scheduleDeferredSoloCommit() {
+        if (deferredSoloJob?.isActive == true) return
+        deferredSoloJob = scope.launch {
+            delay(GROUP_SOLO_STARTUP_GRACE_MS)
+            if (lastObservedInGroup == null) {
+                Log.d(TAG, "Group check: solo grace elapsed, committing DIRECT (inGroup=false)")
+                lastObservedInGroup = false
+                sendspinManager.setInSyncGroup(false)
+            }
+        }
     }
 
     private fun requestGroupJoinRelock(player: net.asksakis.massdroidv2.domain.model.Player) {
@@ -311,6 +337,8 @@ class SendspinAudioController(
             return
         }
         groupObserverStartedAtMs = System.currentTimeMillis()
+        deferredSoloJob?.cancel()
+        lastObservedInGroup = null
 
         // AudioTrack routing change listener (canonical route detection from actual track)
         sendspinManager.setOnRoutingChangedCallback { checkRouteChange() }
@@ -469,7 +497,11 @@ class SendspinAudioController(
                         System.currentTimeMillis() - groupObserverStartedAtMs < GROUP_SOLO_STARTUP_GRACE_MS
                     if (deferInitialSoloVerdict) {
                         Log.d(TAG, "Group check: deferring initial solo verdict, keeping SYNC default")
+                        scheduleDeferredSoloCommit()
                     } else {
+                        // A definitive verdict (group seen, streaming, or grace
+                        // elapsed via the timer) supersedes the deferral.
+                        deferredSoloJob?.cancel()
                         val joinedGroup = previousGroupState == false && inGroup
                         lastObservedInGroup = inGroup
                         sendspinManager.setInSyncGroup(inGroup)
