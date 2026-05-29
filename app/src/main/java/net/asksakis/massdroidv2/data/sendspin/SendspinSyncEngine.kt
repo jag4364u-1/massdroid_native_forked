@@ -71,13 +71,11 @@ class SendspinSyncEngine : SendspinAudioEngine {
         private const val CLOCK_PRECISION_TIMEOUT_MS = 10_000L
         private const val CLOCK_PRECISION_THRESHOLD_US = 15_000  // Int to match errorUs()
 
-        // DAC divergence validator: anchor re-seat when DAC disagrees persistently
+        // DAC divergence validator: diagnostic only. The EMA + maturity feed the
+        // Sync log so we can watch DAC-vs-anchor disagreement; the signal is NOT
+        // used for correction (anchor is the correction signal).
         private const val DAC_DIVERGENCE_EMA_ALPHA = 0.15
-        private const val DAC_DIVERGENCE_THRESHOLD_MS = 15.0
-        private const val DAC_DIVERGENCE_SIGN_COUNT = 10
         private const val DAC_DIVERGENCE_MATURITY = 20  // min DAC absolute samples before trusting
-        private const val DAC_RESEAT_COOLDOWN_MS = 15_000L
-        private const val DAC_DIVERGENCE_RESEAT_ENABLED = false
         private const val DAC_WARMUP_MS = 1_000L
         private const val BT_LIKE_OUTPUT_LATENCY_US = 50_000L
         private const val BT_LIKE_ACOUSTIC_LATENCY_US = 100_000L
@@ -226,9 +224,28 @@ class SendspinSyncEngine : SendspinAudioEngine {
         fadeInRemaining--
     }
 
-    private fun isBtLikeOutput(): Boolean =
-        measuredOutputLatencyUs > BT_LIKE_OUTPUT_LATENCY_US ||
+    /**
+     * True when the active output is a wireless/buffered sink (Bluetooth) whose
+     * pipeline latency shifts across a flush and whose DAC/output baseline can
+     * move after seek — so seek/clear paths force a fresh re-measurement and the
+     * early-unmute path keeps it muted until the post-startup anchor settles.
+     *
+     * Prefers the REAL routed AudioTrack device type (project principle: the
+     * routed device is the source of truth, not a latency magnitude heuristic).
+     * Falls back to the measured pipeline / acoustic magnitude only when the
+     * device type is momentarily unavailable (transient route change).
+     */
+    private fun isBtLikeOutput(): Boolean {
+        when (audioTrack?.routedDevice?.type) {
+            android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+            android.media.AudioDeviceInfo.TYPE_BLE_HEADSET,
+            android.media.AudioDeviceInfo.TYPE_BLE_SPEAKER -> return true
+            null -> Unit // device type unknown: fall back to magnitude heuristic
+            else -> return false
+        }
+        return measuredOutputLatencyUs > BT_LIKE_OUTPUT_LATENCY_US ||
             routeAcousticExtraUs > BT_LIKE_ACOUSTIC_LATENCY_US
+    }
 
     private fun startSyncFadeIn(errorMs: Double, reason: String) {
         syncMuted = false
@@ -852,7 +869,7 @@ class SendspinSyncEngine : SendspinAudioEngine {
             consecutiveDecodeFailures = 0
             discardUntilTimestampUs = 0L
             dacValidator.resetTimeline(audioTrack)
-            if (measuredOutputLatencyUs > 50_000L) {
+            if (isBtLikeOutput()) {
                 // BT: pipeline latency can shift after pause+flush.
                 // Force full re-measurement so pre-cal and startup median
                 // get fresh values instead of keeping stale EMA.
@@ -1107,6 +1124,11 @@ class SendspinSyncEngine : SendspinAudioEngine {
         // DAC divergence validator: detect persistent anchor-vs-DAC disagreement
         val dacAbsMs = if (dacWarmed) dacValidator.absoluteErrorMs(DAC_DIVERGENCE_MATURITY) else null
         if (dacAbsMs != null) {
+            // Diagnostic only: track how much the DAC ground-truth absolute error
+            // disagrees with the open-loop anchor error. Feeds the Sync log
+            // (dacDiv=...). NOT used for correction — the anchor is the correction
+            // signal. (Promoting this DAC signal to the correction path is the
+            // closed-loop rework tracked separately.)
             val divergence = dacAbsMs - anchorErrorMs
             dacValidator.divergenceEma = DAC_DIVERGENCE_EMA_ALPHA * divergence + (1 - DAC_DIVERGENCE_EMA_ALPHA) * dacValidator.divergenceEma
             val sign = if (dacValidator.divergenceEma > 1.0) 1 else if (dacValidator.divergenceEma < -1.0) -1 else 0
@@ -1115,32 +1137,6 @@ class SendspinSyncEngine : SendspinAudioEngine {
             } else {
                 dacValidator.divergenceSameSignCount = if (sign != 0) 1 else 0
                 dacValidator.divergenceLastSign = sign
-            }
-            // Re-seat anchor if DAC consistently disagrees, with safety gates.
-            // Disabled for now: logs show raw DAC absolute bias on phone speaker
-            // (30-140ms) while anchor error stays near zero.
-            if (DAC_DIVERGENCE_RESEAT_ENABLED
-                && measuredOutputLatencyUs <= 50_000L
-                && kotlin.math.abs(dacValidator.divergenceEma) > DAC_DIVERGENCE_THRESHOLD_MS
-                && dacValidator.divergenceSameSignCount >= DAC_DIVERGENCE_SIGN_COUNT
-                && now - dacValidator.lastAnchorReseatMs > DAC_RESEAT_COOLDOWN_MS
-                && clockPreciseForCorrections
-                && measuredOutputLatencyUs > 0
-                && continuationGraceUntilMs < now
-                && now - latencyModel.outputRouteChangedAtMs > 5000
-                && syncState == SyncState.SYNCHRONIZED
-            ) {
-                Log.d(TAG, "Anchor re-seat: DAC divergence=${"%.1f".format(dacValidator.divergenceEma)}ms " +
-                    "sameSign=${dacValidator.divergenceSameSignCount} anchor=${"%.1f".format(anchorErrorMs)}ms dacAbs=${"%.1f".format(dacAbsMs)}ms")
-                anchorServerTimestampUs = 0L
-                anchorLocalUs = 0L
-                anchorLocalEquivalentUs = 0L
-                smoothedSyncErrorMs = 0.0
-                startupOffsetMs = 0.0
-                dacValidator.divergenceEma = 0.0
-                dacValidator.divergenceSameSignCount = 0
-                dacValidator.lastAnchorReseatMs = now
-                return
             }
         }
 
@@ -1936,7 +1932,7 @@ class SendspinSyncEngine : SendspinAudioEngine {
             enqueueLateDropGraceUntilUs = 0L
             lateDropCount = 0L
             dacValidator.resetTimeline(audioTrack)
-            if (measuredOutputLatencyUs > 50_000L) {
+            if (isBtLikeOutput()) {
                 dacValidator.clearCalibrations()
             }
             resetSyncState()

@@ -98,7 +98,7 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideAcousticLatencyCalibrator(): net.asksakis.massdroidv2.data.sendspin.NativeAcousticCalibrator =
+    fun provideNativeAcousticCalibrator(): net.asksakis.massdroidv2.data.sendspin.NativeAcousticCalibrator =
         net.asksakis.massdroidv2.data.sendspin.NativeAcousticCalibrator()
 
     @Provides

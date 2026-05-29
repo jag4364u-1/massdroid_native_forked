@@ -41,7 +41,6 @@ class DacDriftValidator(private val tag: String = "AudioStream") {
     @Volatile var divergenceSameSignCount = 0
     @Volatile var divergenceLastSign = 0
     @Volatile var matureCount = 0
-    var lastAnchorReseatMs = 0L
 
     /** Record a frame written to AudioTrack. Called from decode/write path. */
     fun onFrameWritten(endTimestampUs: Long, pcmFrameCount: Long) {

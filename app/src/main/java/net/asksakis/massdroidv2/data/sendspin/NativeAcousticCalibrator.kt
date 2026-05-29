@@ -10,8 +10,6 @@ import kotlinx.coroutines.withContext
  * Plays 1kHz tone bursts through the speaker and detects them via the
  * microphone using native Oboe streams for deterministic, low-jitter timing.
  * All audio I/O and DSP runs in C++ on SCHED_FIFO audio threads.
- *
- * Drop-in replacement for AcousticLatencyCalibrator (Java MVP).
  */
 class NativeAcousticCalibrator {
 
