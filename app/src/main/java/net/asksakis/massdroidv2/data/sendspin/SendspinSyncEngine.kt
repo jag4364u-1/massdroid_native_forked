@@ -118,6 +118,14 @@ class SendspinSyncEngine : SendspinAudioEngine {
         // noise/drift creep into the feed-forward and slowly desync it.
         private const val FF_LEARN_MAX_MATURE = 20
         private const val FEEDFORWARD_LEARN_ALPHA = 0.5  // damped feed-forward learning (settle to mean, not chase noise)
+        // DAC stability gate for the closed loop. dacDriftMagMs is an EMA of the
+        // per-sample |drift|. In steady state it sits near 0 (isolated spikes
+        // decay); after a seek the baseline aliases and it stays ~15-20ms. Below
+        // STABLE -> trust the DAC ground truth; otherwise fall back to the anchor.
+        // Reset to UNSTABLE on every boundary so stability must be re-proven.
+        private const val DAC_STABLE_DRIFT_MS = 8.0
+        private const val DAC_UNSTABLE_DRIFT_MS = 30.0
+        private const val DAC_DRIFT_MAG_EMA_ALPHA = 0.30
         private const val BT_LIKE_OUTPUT_LATENCY_US = 50_000L
         private const val BT_LIKE_ACOUSTIC_LATENCY_US = 100_000L
         private const val FADE_IN_STEPS = 15  // ~300ms at 20ms/frame
@@ -250,6 +258,12 @@ class SendspinSyncEngine : SendspinAudioEngine {
     // until the DAC signal matures. (For BT this reflects up to the BT handoff.)
     @Volatile private var smoothedDacAbsMs = 0.0
     @Volatile private var hasDacAbs = false
+    // Smoothed magnitude of the per-sample DAC drift. After a seek the DAC
+    // frame baseline aliases by ~one frame and the absolute error oscillates
+    // ±20ms every sample (a measurement artifact, not real). When this stays
+    // high the DAC is NOT trustworthy, so the closed loop falls back to the
+    // (clean) anchor and the feed-forward does not learn the bogus value.
+    @Volatile private var dacDriftMagMs = 0.0
     // One-shot guard: the closed-loop DAC anchor re-seat runs once per session
     // (reset on stream boundaries via resetSyncState).
     @Volatile private var dacAnchorReseated = false
@@ -1050,6 +1064,9 @@ class SendspinSyncEngine : SendspinAudioEngine {
         smoothedDacAbsMs = 0.0
         hasDacAbs = false
         dacAnchorReseated = false
+        // Start "unstable" so the closed loop must re-prove DAC stability after
+        // every boundary (seek/track change) before it trusts the ground truth.
+        dacDriftMagMs = DAC_UNSTABLE_DRIFT_MS
         latencyModel.resetForBoundary()
     }
 
@@ -1060,7 +1077,8 @@ class SendspinSyncEngine : SendspinAudioEngine {
      * an honest status display instead of the open-loop anchor error (which
      * reports ~0 even when the real output is off, e.g. -16..-40ms per session).
      */
-    fun dacGroundTruthErrorMs(): Float? = if (hasDacAbs) smoothedDacAbsMs.toFloat() else null
+    fun dacGroundTruthErrorMs(): Float? =
+        if (hasDacAbs && dacDriftMagMs < DAC_STABLE_DRIFT_MS) smoothedDacAbsMs.toFloat() else null
 
     /**
      * Anchor-based sync error: compare elapsed wall-clock time vs expected
@@ -1192,6 +1210,14 @@ class SendspinSyncEngine : SendspinAudioEngine {
         } else {
             null
         }
+        // Track DAC stability: a persistently large per-sample drift means the
+        // ground truth is aliasing (e.g. post-seek baseline) and must not drive
+        // the loop. Decays back below STABLE once the DAC settles.
+        if (dacDriftUs != null) {
+            dacDriftMagMs = DAC_DRIFT_MAG_EMA_ALPHA * kotlin.math.abs(dacDriftUs / 1000.0) +
+                (1 - DAC_DRIFT_MAG_EMA_ALPHA) * dacDriftMagMs
+        }
+        val dacStable = dacDriftMagMs < DAC_STABLE_DRIFT_MS
 
         // DAC divergence validator: detect persistent anchor-vs-DAC disagreement
         val dacAbsMs = if (dacWarmed) dacValidator.absoluteErrorMs(DAC_DIVERGENCE_MATURITY) else null
@@ -1227,7 +1253,8 @@ class SendspinSyncEngine : SendspinAudioEngine {
             // at e.g. -12ms with nothing left to close the gap.
             if (!dacAnchorReseated
                 && anchorLocalUs != 0L
-                && routeAcousticExtraUs == 0L
+                && !isBtLikeOutput()
+                && dacStable
                 && clockPreciseForCorrections
                 && syncState == SyncState.SYNCHRONIZED
                 && dacValidator.matureCount <= FF_LEARN_MAX_MATURE
@@ -1252,7 +1279,12 @@ class SendspinSyncEngine : SendspinAudioEngine {
         // residual (the previous one-shot re-seat could not). Open loop: the
         // blind anchor is the fallback during the startup window before the DAC
         // matures, and permanently for BT.
-        val closedLoop = hasDacAbs && routeAcousticExtraUs == 0L && clockPreciseForCorrections
+        // !isBtLikeOutput() (not routeAcousticExtraUs==0): getTimestamp reaches
+        // the real DAC only on in-phone routes (speaker/wired/USB). On BT it stops
+        // at the A2DP handoff, so an UNcalibrated BT route (acousticExtra==0) must
+        // NOT engage the closed loop — it would sync to the handoff, ignoring the
+        // speaker latency. BT stays on anchor + acoustic.
+        val closedLoop = hasDacAbs && !isBtLikeOutput() && clockPreciseForCorrections && dacStable
         val rawErrorMs: Double
         if (closedLoop) {
             // smoothedDacAbsMs is already EMA-smoothed (DAC_ABS_EMA_ALPHA); use it
@@ -1352,7 +1384,13 @@ class SendspinSyncEngine : SendspinAudioEngine {
                 .setPitch(1.0f)
         } catch (e: Exception) {
             if (rateCorrectionSupported) {
-                Log.w(TAG, "Rate correction not supported: ${e.message}, falling back to samples-only")
+                // Confirmed via AOSP: a fast track (granted PERFORMANCE_MODE_LOW_LATENCY)
+                // rejects setPlaybackRate() with INVALID_OPERATION -> JNI throws
+                // "arguments out of range" even for valid mild speeds (e.g. 0.94).
+                // The fast-mixer path bypasses the Sonic timestretch stage. We keep
+                // low latency and fall back to sample insert/drop drift correction.
+                Log.w(TAG, "Rate correction unsupported on this output (low-latency fast track): " +
+                    "speed=$rate perf=${track.performanceMode}; using sample correction. ${e.message}")
             }
             rateCorrectionSupported = false
             currentPlaybackRate = 1.0f
