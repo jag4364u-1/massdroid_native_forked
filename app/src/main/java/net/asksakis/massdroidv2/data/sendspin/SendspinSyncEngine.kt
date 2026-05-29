@@ -49,26 +49,38 @@ class SendspinSyncEngine : SendspinAudioEngine {
         // Sync mode thresholds
         private const val MIN_SYNC_BUFFER_MS = 200L
         private const val SYNC_DEADBAND_MS = 1.0
-        private const val SYNC_SAMPLE_CORRECTION_MS = 8.0
-        private const val SYNC_RATE_GENTLE_MS = 20.0
         private const val SYNC_RESYNC_MS = 500.0  // matches SendspinDroid; DAC correction handles <500ms
         private const val SYNC_CHECK_INTERVAL_FRAMES = 10
         private const val SYNC_STARTUP_GRACE_MS = 3000L
         private const val SYNC_RESYNC_COOLDOWN_MS = 3000L
-        private const val SYNC_ERROR_EMA_ALPHA = 0.10
+        // EMA smoothing of the per-frame sync error. checkSync runs every
+        // SYNC_CHECK_INTERVAL_FRAMES (~200ms), so alpha sets the smoothing time
+        // constant ~= 200ms/alpha. 0.30 keeps ~0.5-0.7s of smoothing (enough to
+        // reject per-frame jitter) while staying responsive enough that the
+        // proportional controller below can converge in ~1s without the lag
+        // causing overshoot. The previous 0.10 (~2s lag) was the dominant cause
+        // of multi-second convergence: the controller acted on a stale error.
+        private const val SYNC_ERROR_EMA_ALPHA = 0.30
         private const val CONTINUATION_GRACE_MS = 1000L
-        private const val SYNC_RATE_VERYSTRONG_MS = 40.0 // above this, use the aggressive rate
-        private const val RATE_VERYSTRONG = 0.06f // 6% speed change: converges a large one-shot
-                                                  // DAC re-seat offset (~60ms) in ~1s. Audible as
-                                                  // a brief subtle tempo shift, but only during
-                                                  // the initial large-offset window; tiers
-                                                  // de-escalate to 2% -> 0.5% -> samples as it
-                                                  // shrinks, so it is fast then smooth.
-        private const val RATE_GENTLE = 0.005f   // 0.5% speed change
-        private const val RATE_STRONG = 0.02f    // 2.0% speed change (faster convergence
-                                                 // for large offsets, e.g. the one-shot DAC
-                                                 // re-seat; tiers de-escalate as error shrinks
-                                                 // so no overshoot). Pitch-preserved, subtle.
+        // Proportional (P-controller) rate correction. rate = clamp(|error|*GAIN, MAX).
+        // Converges exponentially via playback speed (pitch) like the reference
+        // web client, with no slow fixed-rate tail (the old 0.5% tier crawled
+        // the last 8-20ms over several seconds). GAIN is tuned for the ~200ms
+        // control loop so each step corrects ~40% of the error (stable, no
+        // overshoot given the EMA lag). MAX caps the audible pitch bend at ~6%
+        // (about a semitone), reached only for large one-shot offsets such as
+        // the cold-start DAC re-seat (~60ms), and de-escalates as error shrinks.
+        private const val SYNC_RATE_GAIN = 0.0015   // per ms of error
+        private const val SYNC_RATE_MAX = 0.06f      // 6% max speed change
+        // EMA for the DAC ground-truth absolute error WHEN it is the closed-loop
+        // correction signal. Faster than the divergence EMA (0.15): the
+        // correction loop must see the real offset with low lag or it cannot
+        // converge quickly. 0.40 keeps ~0.3s smoothing (jitter rejection) while
+        // staying responsive enough that the proportional rate above converges
+        // a cold-start offset in ~2s without windup. Kept moderate (not high) so
+        // the DAC's occasional ±20ms noise spikes are smoothed out instead of
+        // driving a rate excursion (audible wobble).
+        private const val DAC_ABS_EMA_ALPHA = 0.20
 
         // Direct mode thresholds
         private const val DIRECT_STARTUP_MS_OPUS = 300L
@@ -86,17 +98,25 @@ class SendspinSyncEngine : SendspinAudioEngine {
         // and the one-shot anchor re-seat that corrects the open-loop anchor's
         // blindness to cold-start/pipeline latency.
         private const val DAC_DIVERGENCE_EMA_ALPHA = 0.15
-        private const val DAC_DIVERGENCE_MATURITY = 20  // min DAC absolute samples before trusting
+        // Min DAC samples before the closed loop trusts the ground truth. The
+        // phone DAC reads a stable offset from the very first sample, so 6 (~1.2s)
+        // is plenty — 20 (~4s) was pure dead time where the audio sat at the
+        // cold-start offset uncorrected.
+        private const val DAC_DIVERGENCE_MATURITY = 6
         private const val DAC_WARMUP_MS = 1_000L
-        // One-shot closed-loop anchor re-seat (phone/wired only for now).
-        // Threshold at the edge of audibility (~25ms): the feed-forward already
-        // gets each stream close, and the reference web client does NOT chase
-        // small residuals either — it tolerates them and stays instant. Only
-        // re-seat (and thus audibly converge) when the real offset is large
-        // enough to matter; smaller residuals are left alone for instant,
-        // glitch-free track changes.
-        private const val DAC_RESEAT_THRESHOLD_MS = 25.0
-        private const val DAC_RESEAT_SIGN_COUNT = 10     // require a stable divergence sign before trusting the re-seat
+        // Feed-forward learn gate (phone/wired only). The cold-start offset is
+        // typically only ~12-16ms, so the threshold MUST be well below it or the
+        // feed-forward never learns and EVERY track restarts cold and re-converges
+        // (the exact symptom). 3ms lets the real bias be captured and pre-applied
+        // to the next stream so track 2+ start already aligned (instant lock).
+        private const val DAC_RESEAT_THRESHOLD_MS = 3.0
+        private const val DAC_RESEAT_SIGN_COUNT = 4      // stable divergence sign before learning the feed-forward
+        // Feed-forward must learn the COLD-START offset only, never a mid-stream
+        // residual. Once the DAC has matured this many samples we are past the
+        // cold-start window and into steady state, where the closed loop (not the
+        // startup feed-forward) owns the small residual — learning there would let
+        // noise/drift creep into the feed-forward and slowly desync it.
+        private const val FF_LEARN_MAX_MATURE = 20
         private const val FEEDFORWARD_LEARN_ALPHA = 0.5  // damped feed-forward learning (settle to mean, not chase noise)
         private const val BT_LIKE_OUTPUT_LATENCY_US = 50_000L
         private const val BT_LIKE_ACOUSTIC_LATENCY_US = 100_000L
@@ -1161,40 +1181,32 @@ class SendspinSyncEngine : SendspinAudioEngine {
             return
         }
 
-        // Anchor-based error (primary: absolute position)
+        // Open-loop anchor error: blind to the pipeline/cold-start offset. It is
+        // the correction signal only during the startup window before the
+        // closed-loop DAC ground truth matures, and permanently for BT (where
+        // getTimestamp stops at the A2DP handoff, not the speaker DAC). The
+        // signal actually used is selected below once the DAC state is known.
         val anchorErrorMs = computeSyncErrorMs(serverTimestampUs)
-        // DAC drift: diagnostic only, not used for correction.
-        // With acoustic calibration active, anchor + calibration handle compensation.
-        // DAC raw is too noisy (±20ms jumps, baseline shifts after seek) to feed
-        // into the correction loop without risking audible artifacts.
         val dacDriftUs = if (dacWarmed) {
             dacValidator.measureDriftUs(track, sync, activeSampleRate, decodedFrameCount)
         } else {
             null
         }
-        val rawErrorMs = anchorErrorMs
-
-        // EMA smoothing
-        smoothedSyncErrorMs = if (smoothedSyncErrorMs == 0.0) {
-            rawErrorMs
-        } else {
-            SYNC_ERROR_EMA_ALPHA * rawErrorMs + (1 - SYNC_ERROR_EMA_ALPHA) * smoothedSyncErrorMs
-        }
 
         // DAC divergence validator: detect persistent anchor-vs-DAC disagreement
         val dacAbsMs = if (dacWarmed) dacValidator.absoluteErrorMs(DAC_DIVERGENCE_MATURITY) else null
         if (dacAbsMs != null) {
-            // Diagnostic only: track how much the DAC ground-truth absolute error
-            // disagrees with the open-loop anchor error. Feeds the Sync log
-            // (dacDiv=...). NOT used for correction — the anchor is the correction
-            // signal. (Promoting this DAC signal to the correction path is the
-            // closed-loop rework tracked separately.)
+            // Track how much the DAC ground-truth absolute error disagrees with
+            // the open-loop anchor error (Sync log dacDiv=...). The divergence
+            // keeps its slow EMA (sign-stability gate for feed-forward learning).
             val divergence = dacAbsMs - anchorErrorMs
             dacValidator.divergenceEma = DAC_DIVERGENCE_EMA_ALPHA * divergence + (1 - DAC_DIVERGENCE_EMA_ALPHA) * dacValidator.divergenceEma
-            // Smooth the DAC absolute error itself (the real output offset) for
-            // the honest status display.
+            // Smooth the DAC absolute error (the REAL output offset). This is both
+            // the honest status value AND the closed-loop correction signal, so it
+            // uses the faster DAC_ABS_EMA_ALPHA: low lag for quick convergence,
+            // still enough smoothing to reject per-measurement jitter.
             smoothedDacAbsMs = if (!hasDacAbs) dacAbsMs
-                else DAC_DIVERGENCE_EMA_ALPHA * dacAbsMs + (1 - DAC_DIVERGENCE_EMA_ALPHA) * smoothedDacAbsMs
+                else DAC_ABS_EMA_ALPHA * dacAbsMs + (1 - DAC_ABS_EMA_ALPHA) * smoothedDacAbsMs
             hasDacAbs = true
             val sign = if (dacValidator.divergenceEma > 1.0) 1 else if (dacValidator.divergenceEma < -1.0) -1 else 0
             if (sign != 0 && sign == dacValidator.divergenceLastSign) {
@@ -1204,42 +1216,55 @@ class SendspinSyncEngine : SendspinAudioEngine {
                 dacValidator.divergenceLastSign = sign
             }
 
-            // Closed-loop one-shot anchor re-seat. The open-loop anchor is blind
-            // to the cold-start/pipeline offset (reads ~0 while the DAC ground
-            // truth is e.g. -62ms, varying per session). Once the DAC signal is
-            // mature and its sign is stable, shift the anchor by the smoothed DAC
-            // absolute error so the existing correction loop drives the REAL
-            // output to 0. anchorLocalUs -= dacAbs*1000 injects dacAbs into
-            // computeSyncErrorMs (d(error)/d(anchorLocalUs) = -1), so the loop
-            // then corrects the previously-invisible offset. Negative dacAbs
-            // (playing early) -> loop slows -> delays -> dacAbs converges to 0.
-            // Phone/wired only for now (routeAcousticExtraUs==0): there the DAC
-            // is the full output truth. BT (acoustic beyond the handoff) is a
-            // separate follow-up.
+            // Feed-forward learn (once per stream): capture the cold-start offset
+            // so the NEXT stream starts pre-aligned and the closed loop has almost
+            // nothing to do — that is what makes track 2+ lock instantly. Full
+            // capture the first time (no feed-forward yet), damped after to reject
+            // per-stream cold-start noise. We do NOT shift the anchor here: the
+            // DAC ground truth is the correction signal directly (selected below),
+            // so a one-shot anchor shift is unnecessary and was the cause of the
+            // stuck residual — it drove the anchor to 0 while the real DAC stayed
+            // at e.g. -12ms with nothing left to close the gap.
             if (!dacAnchorReseated
                 && anchorLocalUs != 0L
                 && routeAcousticExtraUs == 0L
                 && clockPreciseForCorrections
                 && syncState == SyncState.SYNCHRONIZED
+                && dacValidator.matureCount <= FF_LEARN_MAX_MATURE
                 && dacValidator.divergenceSameSignCount >= DAC_RESEAT_SIGN_COUNT
                 && kotlin.math.abs(smoothedDacAbsMs) > DAC_RESEAT_THRESHOLD_MS
             ) {
-                val reseatShiftUs = -(smoothedDacAbsMs * 1000.0).toLong()
-                anchorLocalUs += reseatShiftUs
-                smoothedSyncErrorMs = 0.0
                 dacAnchorReseated = true
-                // Learn the per-route feed-forward for the NEXT stream with a
-                // damped (EMA) update — NOT full correction. The cold-start
-                // offset varies stream-to-stream, so applying the full residual
-                // each time chases the noise and oscillates. A 0.5 factor settles
-                // toward the MEAN offset; once the residual drops under the
-                // re-seat threshold the update stops and the feed-forward holds.
+                val learnShiftUs = -(smoothedDacAbsMs * 1000.0).toLong()
+                val learnAlpha = if (routeStartupFeedForwardUs == 0L) 1.0 else FEEDFORWARD_LEARN_ALPHA
                 routeStartupFeedForwardUs =
-                    (routeStartupFeedForwardUs + (reseatShiftUs * FEEDFORWARD_LEARN_ALPHA).toLong())
+                    (routeStartupFeedForwardUs + (learnShiftUs * learnAlpha).toLong())
                         .coerceIn(-500_000L, 500_000L)
-                Log.d(TAG, "DAC anchor re-seat (closed-loop): injected ${"%.1f".format(smoothedDacAbsMs)}ms " +
-                    "real offset; correction loop converges this stream; " +
-                    "learned feedForward=${routeStartupFeedForwardUs / 1000}ms for next stream")
+                Log.d(TAG, "Closed-loop feedForward learned=${routeStartupFeedForwardUs / 1000}ms " +
+                    "from cold-start ${"%.1f".format(smoothedDacAbsMs)}ms")
+            }
+        }
+
+        // ── Correction signal selection ──
+        // Closed loop: the DAC ground truth (REAL output offset) drives the
+        // correction whenever it is mature, on a non-BT route, with a precise
+        // clock. The proportional loop below converges this to zero with no stuck
+        // residual (the previous one-shot re-seat could not). Open loop: the
+        // blind anchor is the fallback during the startup window before the DAC
+        // matures, and permanently for BT.
+        val closedLoop = hasDacAbs && routeAcousticExtraUs == 0L && clockPreciseForCorrections
+        val rawErrorMs: Double
+        if (closedLoop) {
+            // smoothedDacAbsMs is already EMA-smoothed (DAC_ABS_EMA_ALPHA); use it
+            // directly. A second EMA would only add lag and slow the convergence.
+            rawErrorMs = smoothedDacAbsMs
+            smoothedSyncErrorMs = smoothedDacAbsMs
+        } else {
+            rawErrorMs = anchorErrorMs
+            smoothedSyncErrorMs = if (smoothedSyncErrorMs == 0.0) {
+                anchorErrorMs
+            } else {
+                SYNC_ERROR_EMA_ALPHA * anchorErrorMs + (1 - SYNC_ERROR_EMA_ALPHA) * smoothedSyncErrorMs
             }
         }
 
@@ -1282,21 +1307,22 @@ class SendspinSyncEngine : SendspinAudioEngine {
             return
         }
 
-        // Tier 3: Rate correction for medium errors (8-500ms), if device supports.
-        // Three steps so a large one-shot DAC re-seat (~60ms) converges fast
-        // (~1s at 6%) then tapers: 6% (>40ms) -> 2% (>20ms) -> 0.5% (>8ms).
-        if (absTotal > SYNC_SAMPLE_CORRECTION_MS && rateCorrectionSupported) {
-            val rateAdjust = when {
-                absTotal > SYNC_RATE_VERYSTRONG_MS -> RATE_VERYSTRONG
-                absTotal > SYNC_RATE_GENTLE_MS -> RATE_STRONG
-                else -> RATE_GENTLE
-            }
+        // Tier 3: Proportional rate correction (8ms..500ms collapsed into one
+        // continuous law) — converges via playback speed like the web client.
+        // rate = clamp(|error|*GAIN, MAX); exponential decay, no fixed-rate tail.
+        // Sign: absoluteSyncMs>0 = audio late -> speed up (1+r) to catch up;
+        // <0 = audio early -> slow down (1-r) to fall back. Matches the re-seat
+        // semantics (negative injected error -> slow down -> delays -> converges).
+        if (absTotal > SYNC_DEADBAND_MS && rateCorrectionSupported) {
+            val rateAdjust = (absTotal * SYNC_RATE_GAIN).toFloat().coerceAtMost(SYNC_RATE_MAX)
             val targetRate = if (absoluteSyncMs > 0) 1.0f + rateAdjust else 1.0f - rateAdjust
             applyPlaybackRate(targetRate)
             pendingSampleCorrection = 0
             pendingSampleCount = 1
         }
-        // Tier 2: Sample correction (all errors above deadband; also fallback for unsupported rate)
+        // Tier 2: Sample correction fallback for devices that reject PlaybackParams
+        // rate changes (some Samsung/OEM paths). Only reached when rate is
+        // unsupported; the proportional rate above is the primary path.
         else if (absTotal > SYNC_DEADBAND_MS) {
             applyPlaybackRate(1.0f)
             pendingSampleCorrection = if (absoluteSyncMs > 0) 1 else -1
