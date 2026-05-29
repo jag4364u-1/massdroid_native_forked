@@ -57,6 +57,13 @@ class SendspinSyncEngine : SendspinAudioEngine {
         private const val SYNC_RESYNC_COOLDOWN_MS = 3000L
         private const val SYNC_ERROR_EMA_ALPHA = 0.10
         private const val CONTINUATION_GRACE_MS = 1000L
+        private const val SYNC_RATE_VERYSTRONG_MS = 40.0 // above this, use the aggressive rate
+        private const val RATE_VERYSTRONG = 0.06f // 6% speed change: converges a large one-shot
+                                                  // DAC re-seat offset (~60ms) in ~1s. Audible as
+                                                  // a brief subtle tempo shift, but only during
+                                                  // the initial large-offset window; tiers
+                                                  // de-escalate to 2% -> 0.5% -> samples as it
+                                                  // shrinks, so it is fast then smooth.
         private const val RATE_GENTLE = 0.005f   // 0.5% speed change
         private const val RATE_STRONG = 0.02f    // 2.0% speed change (faster convergence
                                                  // for large offsets, e.g. the one-shot DAC
@@ -1240,9 +1247,15 @@ class SendspinSyncEngine : SendspinAudioEngine {
             return
         }
 
-        // Tier 3: Rate correction for medium errors (8-100ms), if device supports
+        // Tier 3: Rate correction for medium errors (8-500ms), if device supports.
+        // Three steps so a large one-shot DAC re-seat (~60ms) converges fast
+        // (~1s at 6%) then tapers: 6% (>40ms) -> 2% (>20ms) -> 0.5% (>8ms).
         if (absTotal > SYNC_SAMPLE_CORRECTION_MS && rateCorrectionSupported) {
-            val rateAdjust = if (absTotal > SYNC_RATE_GENTLE_MS) RATE_STRONG else RATE_GENTLE
+            val rateAdjust = when {
+                absTotal > SYNC_RATE_VERYSTRONG_MS -> RATE_VERYSTRONG
+                absTotal > SYNC_RATE_GENTLE_MS -> RATE_STRONG
+                else -> RATE_GENTLE
+            }
             val targetRate = if (absoluteSyncMs > 0) 1.0f + rateAdjust else 1.0f - rateAdjust
             applyPlaybackRate(targetRate)
             pendingSampleCorrection = 0
