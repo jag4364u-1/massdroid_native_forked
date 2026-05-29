@@ -748,6 +748,15 @@ class SendspinSyncEngine : SendspinAudioEngine {
             )
             .setBufferSizeInBytes(bufferSize)
             .setTransferMode(AudioTrack.MODE_STREAM)
+            // LOW_LATENCY (fast track): gives a STABLE getTimestamp/framePosition,
+            // which the closed-loop DAC correction depends on. The normal mixer
+            // (PERFORMANCE_MODE_NONE) enables hardware pitch-preserved rate but its
+            // getTimestamp is noisy/aliasing (~124ms pipeline) and the closed loop
+            // oscillates ("cardiogram", never locks). Low-latency rejects the
+            // hardware rate on some devices (Samsung) so drift correction falls
+            // back to software resampling there; we keep that trade because a
+            // stable lock matters more, and minimise resampling churn via the
+            // outlier clamp + closed-loop hold (no blind-anchor fallback).
             .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .build()
 
@@ -1322,7 +1331,14 @@ class SendspinSyncEngine : SendspinAudioEngine {
         // at the A2DP handoff, so an UNcalibrated BT route (acousticExtra==0) must
         // NOT engage the closed loop — it would sync to the handoff, ignoring the
         // speaker latency. BT stays on anchor + acoustic.
-        val closedLoop = hasDacAbs && !isBtLikeOutput() && clockPreciseForCorrections && dacStable
+        // dacStable is NOT part of the source selection: once the DAC has matured
+        // on a non-BT route we STAY closed-loop. Flipping to the blind anchor on a
+        // transient instability blip caused a ~60ms jump (anchor reads the
+        // uncorrected pipeline offset) -> spurious correction -> resampling
+        // glitch. Instead, transient instability gates whether we APPLY a
+        // correction this cycle (dacHold below) — we hold, we do not jump signals.
+        val closedLoop = hasDacAbs && !isBtLikeOutput() && clockPreciseForCorrections
+        val dacHold = closedLoop && !dacStable
         val rawErrorMs: Double
         if (closedLoop) {
             // smoothedDacAbsMs is already EMA-smoothed (DAC_ABS_EMA_ALPHA); use it
@@ -1365,6 +1381,13 @@ class SendspinSyncEngine : SendspinAudioEngine {
         if (syncMuted && absTotal < 20.0) {
             startSyncFadeIn(absTotal, "validated")
         }
+
+        // Closed-loop DAC transiently unreliable (getTimestamp aliasing spike):
+        // HOLD the current rate rather than correct on a bad reading. Resumes
+        // automatically once the DAC settles. Prevents the resampling glitch from
+        // chasing spurious spikes; the outlier clamp already keeps smoothedDacAbsMs
+        // from drifting during the hold.
+        if (dacHold) return
 
         // Tier 4: Hard resync for large errors
         if (absTotal > SYNC_RESYNC_MS && now - lastResyncAtMs > SYNC_RESYNC_COOLDOWN_MS) {
