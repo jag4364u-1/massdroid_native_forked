@@ -91,6 +91,7 @@ class SendspinSyncEngine : SendspinAudioEngine {
         // One-shot closed-loop anchor re-seat (phone/wired only for now).
         private const val DAC_RESEAT_THRESHOLD_MS = 8.0  // only re-seat if real offset exceeds the sample-correction deadband
         private const val DAC_RESEAT_SIGN_COUNT = 10     // require a stable divergence sign before trusting the re-seat
+        private const val FEEDFORWARD_LEARN_ALPHA = 0.5  // damped feed-forward learning (settle to mean, not chase noise)
         private const val BT_LIKE_OUTPUT_LATENCY_US = 50_000L
         private const val BT_LIKE_ACOUSTIC_LATENCY_US = 100_000L
         private const val FADE_IN_STEPS = 15  // ~300ms at 20ms/frame
@@ -1221,15 +1222,15 @@ class SendspinSyncEngine : SendspinAudioEngine {
                 anchorLocalUs += reseatShiftUs
                 smoothedSyncErrorMs = 0.0
                 dacAnchorReseated = true
-                // Learn the per-route feed-forward for the NEXT stream. This is a
-                // self-correcting accumulation, NOT blind: reseatShiftUs is the
-                // residual that survived the feed-forward already applied this
-                // stream, so once the feed-forward is right the residual (and
-                // thus this update) goes to ~0 and it stops growing. The runaway
-                // before came from the stale/drop target not being shifted too
-                // (now fixed), which kept the residual non-zero forever.
+                // Learn the per-route feed-forward for the NEXT stream with a
+                // damped (EMA) update — NOT full correction. The cold-start
+                // offset varies stream-to-stream, so applying the full residual
+                // each time chases the noise and oscillates. A 0.5 factor settles
+                // toward the MEAN offset; once the residual drops under the
+                // re-seat threshold the update stops and the feed-forward holds.
                 routeStartupFeedForwardUs =
-                    (routeStartupFeedForwardUs + reseatShiftUs).coerceIn(-500_000L, 500_000L)
+                    (routeStartupFeedForwardUs + (reseatShiftUs * FEEDFORWARD_LEARN_ALPHA).toLong())
+                        .coerceIn(-500_000L, 500_000L)
                 Log.d(TAG, "DAC anchor re-seat (closed-loop): injected ${"%.1f".format(smoothedDacAbsMs)}ms " +
                     "real offset; correction loop converges this stream; " +
                     "learned feedForward=${routeStartupFeedForwardUs / 1000}ms for next stream")
