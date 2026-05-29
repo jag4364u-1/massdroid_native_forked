@@ -523,7 +523,13 @@ class SendspinManager(
     fun dacSyncErrorMs(): Float = (engine as? SendspinSyncEngine)?.smoothedSyncErrorMs?.toFloat() ?: 0f
     fun absoluteSyncMs(): Float {
         val e = engine as? SendspinSyncEngine ?: return 0f
-        return (e.startupOffsetMs + e.smoothedSyncErrorMs).toFloat()
+        // Prefer the DAC ground-truth absolute error (what the speaker actually
+        // outputs) over the open-loop anchor error. The anchor reads ~0 even
+        // when the real output is off (cold-start/pipeline latency the anchor is
+        // blind to), which made the status show "ideal" while playback was
+        // -16..-40ms off and varying per session. Fall back to the anchor error
+        // before the DAC matures.
+        return e.dacGroundTruthErrorMs() ?: (e.startupOffsetMs + e.smoothedSyncErrorMs).toFloat()
     }
     fun isSyncMuted(): Boolean = (engine as? SendspinSyncEngine)?.syncMuted ?: false
     fun clockSampleCount(): Int = clockSynchronizer.currentSampleCount()

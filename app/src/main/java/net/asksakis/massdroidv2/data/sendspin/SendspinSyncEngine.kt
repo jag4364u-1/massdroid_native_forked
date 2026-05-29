@@ -202,6 +202,13 @@ class SendspinSyncEngine : SendspinAudioEngine {
     // Sync correction state
     @Volatile var smoothedSyncErrorMs = 0.0; private set  // EMA-filtered sync error (DAC-based)
     @Volatile var startupOffsetMs = 0.0; private set  // absolute offset captured at startup (positive = late)
+    // Smoothed DAC ground-truth absolute error (ms): what the speaker actually
+    // outputs relative to the server timeline (closed-loop getTimestamp), as
+    // opposed to the open-loop anchor error which reads ~0 even when the real
+    // output is off. Used for an HONEST status display. hasDacAbs gates it
+    // until the DAC signal matures. (For BT this reflects up to the BT handoff.)
+    @Volatile private var smoothedDacAbsMs = 0.0
+    @Volatile private var hasDacAbs = false
     private var lastSyncLogMs = 0L
     @Volatile var resyncCount = 0; private set
     private var playbackStartedAtMs = 0L             // wall clock when playback started
@@ -979,8 +986,19 @@ class SendspinSyncEngine : SendspinAudioEngine {
         anchorServerTimestampUs = 0L
         anchorLocalUs = 0L
         anchorLocalEquivalentUs = 0L
+        smoothedDacAbsMs = 0.0
+        hasDacAbs = false
         latencyModel.resetForBoundary()
     }
+
+    /**
+     * DAC ground-truth absolute sync error in ms (smoothed), or null until the
+     * DAC timestamp signal matures. This is the closed-loop truth — what the
+     * speaker actually outputs relative to the server timeline — surfaced for
+     * an honest status display instead of the open-loop anchor error (which
+     * reports ~0 even when the real output is off, e.g. -16..-40ms per session).
+     */
+    fun dacGroundTruthErrorMs(): Float? = if (hasDacAbs) smoothedDacAbsMs.toFloat() else null
 
     /**
      * Anchor-based sync error: compare elapsed wall-clock time vs expected
@@ -1131,6 +1149,11 @@ class SendspinSyncEngine : SendspinAudioEngine {
             // closed-loop rework tracked separately.)
             val divergence = dacAbsMs - anchorErrorMs
             dacValidator.divergenceEma = DAC_DIVERGENCE_EMA_ALPHA * divergence + (1 - DAC_DIVERGENCE_EMA_ALPHA) * dacValidator.divergenceEma
+            // Smooth the DAC absolute error itself (the real output offset) for
+            // the honest status display.
+            smoothedDacAbsMs = if (!hasDacAbs) dacAbsMs
+                else DAC_DIVERGENCE_EMA_ALPHA * dacAbsMs + (1 - DAC_DIVERGENCE_EMA_ALPHA) * smoothedDacAbsMs
+            hasDacAbs = true
             val sign = if (dacValidator.divergenceEma > 1.0) 1 else if (dacValidator.divergenceEma < -1.0) -1 else 0
             if (sign != 0 && sign == dacValidator.divergenceLastSign) {
                 dacValidator.divergenceSameSignCount++
