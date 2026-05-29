@@ -89,7 +89,13 @@ class SendspinSyncEngine : SendspinAudioEngine {
         private const val DAC_DIVERGENCE_MATURITY = 20  // min DAC absolute samples before trusting
         private const val DAC_WARMUP_MS = 1_000L
         // One-shot closed-loop anchor re-seat (phone/wired only for now).
-        private const val DAC_RESEAT_THRESHOLD_MS = 8.0  // only re-seat if real offset exceeds the sample-correction deadband
+        // Threshold at the edge of audibility (~25ms): the feed-forward already
+        // gets each stream close, and the reference web client does NOT chase
+        // small residuals either — it tolerates them and stays instant. Only
+        // re-seat (and thus audibly converge) when the real offset is large
+        // enough to matter; smaller residuals are left alone for instant,
+        // glitch-free track changes.
+        private const val DAC_RESEAT_THRESHOLD_MS = 25.0
         private const val DAC_RESEAT_SIGN_COUNT = 10     // require a stable divergence sign before trusting the re-seat
         private const val FEEDFORWARD_LEARN_ALPHA = 0.5  // damped feed-forward learning (settle to mean, not chase noise)
         private const val BT_LIKE_OUTPUT_LATENCY_US = 50_000L
