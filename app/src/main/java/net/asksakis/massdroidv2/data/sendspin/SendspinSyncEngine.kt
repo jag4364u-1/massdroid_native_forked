@@ -86,6 +86,11 @@ class SendspinSyncEngine : SendspinAudioEngine {
         // the DAC's occasional ±20ms noise spikes are smoothed out instead of
         // driving a rate excursion (audible wobble).
         private const val DAC_ABS_EMA_ALPHA = 0.20
+        // Max per-sample change the DAC absolute error may contribute to the
+        // smoothed correction signal. Rejects isolated getTimestamp spikes
+        // (±20ms+) that would otherwise trigger a spurious correction; sustained
+        // drift still converges because consecutive steps each pass within it.
+        private const val DAC_OUTLIER_CLAMP_MS = 6.0
 
         // Direct mode thresholds
         private const val DIRECT_STARTUP_MS_OPUS = 300L
@@ -1242,11 +1247,22 @@ class SendspinSyncEngine : SendspinAudioEngine {
             val divergence = dacAbsMs - anchorErrorMs
             dacValidator.divergenceEma = DAC_DIVERGENCE_EMA_ALPHA * divergence + (1 - DAC_DIVERGENCE_EMA_ALPHA) * dacValidator.divergenceEma
             // Smooth the DAC absolute error (the REAL output offset). This is both
-            // the honest status value AND the closed-loop correction signal, so it
-            // uses the faster DAC_ABS_EMA_ALPHA: low lag for quick convergence,
-            // still enough smoothing to reject per-measurement jitter.
-            smoothedDacAbsMs = if (!hasDacAbs) dacAbsMs
-                else DAC_ABS_EMA_ALPHA * dacAbsMs + (1 - DAC_ABS_EMA_ALPHA) * smoothedDacAbsMs
+            // the honest status value AND the closed-loop correction signal.
+            // Outlier-clamped EMA: getTimestamp occasionally returns a single
+            // wildly-off sample (±20-56ms aliasing) that is NOT real drift. Left
+            // unclamped it pulls the smoothed value far enough to trigger a
+            // spurious rate correction — audible on rate-rejected outputs as a
+            // resampling glitch. Clamping each step's delta lets a single spike
+            // move the estimate only slightly while SUSTAINED drift (consecutive
+            // in-clamp steps) still converges. First sample seeds directly so a
+            // genuine cold-start offset is captured in full.
+            smoothedDacAbsMs = if (!hasDacAbs) {
+                dacAbsMs
+            } else {
+                val delta = (dacAbsMs - smoothedDacAbsMs)
+                    .coerceIn(-DAC_OUTLIER_CLAMP_MS, DAC_OUTLIER_CLAMP_MS)
+                smoothedDacAbsMs + DAC_ABS_EMA_ALPHA * delta
+            }
             hasDacAbs = true
             val sign = if (dacValidator.divergenceEma > 1.0) 1 else if (dacValidator.divergenceEma < -1.0) -1 else 0
             if (sign != 0 && sign == dacValidator.divergenceLastSign) {
