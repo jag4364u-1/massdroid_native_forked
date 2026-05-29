@@ -364,12 +364,23 @@ class SendspinAudioController(
                 val selfInGroup = self?.groupChilds?.any { it != ssId } == true
                 val childOfOther = allPlayers.any { it.playerId != ssId && ssId in it.groupChilds }
                 if (selfInGroup || childOfOther) {
+                    lastObservedInGroup = true
                     sendspinManager.setInSyncGroup(true)
                     Log.d(TAG, "Eager group check: inGroup=true before connect")
+                } else if (self != null) {
+                    // Our own player IS in the list -> player data is loaded and
+                    // reliable, and no group references it: genuinely solo. Commit
+                    // DIRECT now so playback does not start with a few seconds of
+                    // needless SYNC correction (Measuring + resampling warble)
+                    // before the collector downgrades. (self==null = data not yet
+                    // loaded -> NOT authoritative, keep SYNC default below.)
+                    lastObservedInGroup = false
+                    sendspinManager.setInSyncGroup(false)
+                    Log.d(TAG, "Eager group check: solo confirmed (self present, no group) -> DIRECT before connect")
                 } else {
-                    // Cold start: keep default SYNC (safe). Continuous collector
-                    // will downgrade to DIRECT once steady-state data confirms solo.
-                    Log.d(TAG, "Eager group check: no group detected, keeping SYNC default (collector will refine)")
+                    // No reliable player data yet: keep default SYNC (safe). The
+                    // continuous collector + deferred-solo timer refine it.
+                    Log.d(TAG, "Eager group check: no player data, keeping SYNC default (collector will refine)")
                 }
             }
             ensureSendspinConnected()
