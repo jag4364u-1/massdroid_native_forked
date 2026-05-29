@@ -271,13 +271,10 @@ class SendspinCoordinator(
         val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
             override fun onChange(selfChange: Boolean) {
                 if (!isActive) return
-                val max = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                val cur = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
-                val percent = if (max > 0) ((cur * 100f / max) + 0.5f).toInt() else 0
-                // The coordinator owns the sync-switch policy and the MA push.
-                // We just report "STREAM_MUSIC observed at X%" and let it
-                // decide what to do.
-                volumeCoordinator.onPhoneStreamVolumeChanged(percent)
+                // The coordinator reads the STREAM_MUSIC index itself and decides
+                // (index-based dedup) whether this is a real user change or its
+                // own mirror write / an unrelated Settings.System URI wake.
+                volumeCoordinator.onPhoneStreamVolumeChanged()
             }
         }
         volumeObserver = observer

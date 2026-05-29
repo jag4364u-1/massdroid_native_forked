@@ -46,14 +46,25 @@ class SendspinManager(
     private val _enabled = MutableStateFlow(false)
     val enabled: StateFlow<Boolean> = _enabled.asStateFlow()
 
-    // Server-pushed volume and mute events. Consumed by
-    // [LocalSpeakerVolumeBridge] to translate MA-side values into the phone's
-    // STREAM_MUSIC so the local Sendspin playback is always controlled by a
-    // single gain stage (the system volume) rather than a mix of system and
-    // AudioTrack gains. Keep replay=0 so we only react to live changes.
-    private val _serverVolumeEvents = MutableSharedFlow<Int>(extraBufferCapacity = 4)
+    // Server-pushed volume and mute events. Consumed by the
+    // SendspinVolumeCoordinator to translate MA-side values into the phone's
+    // STREAM_MUSIC so local Sendspin playback is controlled by a single gain
+    // stage (the system volume). replay=1 + DROP_OLDEST so the LATEST value is
+    // never lost: a tryEmit during a brief collector gap (coordinator start/stop
+    // cycle) or a rapid multi-step ramp used to be silently dropped on a
+    // capacity-bounded, replay-0 flow, leaving STREAM_MUSIC out of sync. Volume
+    // is idempotent (only the latest target matters), so coalescing is correct.
+    private val _serverVolumeEvents = MutableSharedFlow<Int>(
+        replay = 1,
+        extraBufferCapacity = 8,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
+    )
     val serverVolumeEvents: SharedFlow<Int> = _serverVolumeEvents.asSharedFlow()
-    private val _serverMuteEvents = MutableSharedFlow<Boolean>(extraBufferCapacity = 4)
+    private val _serverMuteEvents = MutableSharedFlow<Boolean>(
+        replay = 1,
+        extraBufferCapacity = 8,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
+    )
     val serverMuteEvents: SharedFlow<Boolean> = _serverMuteEvents.asSharedFlow()
 
     private val _streamCodec = MutableStateFlow<String?>(null)
