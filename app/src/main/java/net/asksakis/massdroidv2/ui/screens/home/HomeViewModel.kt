@@ -40,6 +40,7 @@ class HomeViewModel @Inject constructor(
     private val sendspinManager: net.asksakis.massdroidv2.data.sendspin.SendspinManager,
     private val queueDstmCache: QueueDstmCache,
     private val sleepTimerBridge: SleepTimerBridge,
+    val acoustic: net.asksakis.massdroidv2.data.sendspin.AcousticCalibrationCoordinator,
 ) : ViewModel() {
 
     /**
@@ -66,7 +67,7 @@ class HomeViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
     val sendspinAudioFormat = settingsRepository.sendspinAudioFormat
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
-    val sendspinStaticDelayMs = settingsRepository.sendspinStaticDelayMs
+    val sendspinSyncDelayMs = settingsRepository.sendspinSyncDelayMs
         .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
     val sendspinSyncHistory = sendspinManager.syncHistory
     val proximityConfig = proximityConfigStore.config
@@ -261,9 +262,9 @@ class HomeViewModel @Inject constructor(
         }
     }
 
-    fun setSendspinStaticDelayMs(delayMs: Int) {
+    fun setSendspinSyncDelayMs(delayMs: Int) {
         viewModelScope.launch {
-            settingsRepository.setSendspinStaticDelayMs(delayMs)
+            settingsRepository.setSendspinSyncDelayMs(delayMs)
         }
     }
 

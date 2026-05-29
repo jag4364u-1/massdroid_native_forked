@@ -44,12 +44,21 @@ class OutputLatencyModel(private val tag: String = "AudioStream") {
     /**
      * Total latency compensation for startup alignment.
      * Acoustic calibration is ground truth when available (full one-way output delay:
-     * DAC + transport + speaker + air). Measured pipeline is fallback for uncalibrated routes.
+     * DAC + transport + speaker + air). Otherwise the measured AudioTrack pipeline
+     * (write -> DAC) is used so audio exits the audio PORT at the timestamp.
+     *
+     * We apply the measured pipeline whenever a valid measurement exists, NOT only
+     * for high-latency (BT) outputs. The spec requires compensating known processing
+     * delays ("DAC latency, audio buffer delays"); a phone speaker / wired output has
+     * a small but real ~25ms pipeline. Gating that out at 50ms left low-latency
+     * outputs uncompensated, so they played their full pipeline latency late and the
+     * user had to dial it back in manually via sync delay (observed: 25ms measured
+     * == 25ms sync delay needed to align with another client). The acoustic path is
+     * unaffected (it returns above before reaching here).
      */
     fun totalCompensationUs(): Long {
         if (routeAcousticExtraUs > 0) return routeAcousticExtraUs
-        // Fallback: pipeline measurement, only for high-latency outputs (BT without calibration)
-        return if (measuredOutputLatencyUs > 50_000L) measuredOutputLatencyUs else 0L
+        return measuredOutputLatencyUs.coerceAtLeast(0L)
     }
 
     /** Diagnostic: how much of the compensation is beyond what AudioTrack measures. */

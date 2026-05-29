@@ -80,25 +80,22 @@ fun PlayerSettingsDialog(
     isSendspinPlayer: Boolean = false,
     isLocalPlayer: Boolean = false,
     initialAudioFormat: SendspinAudioFormat = SendspinAudioFormat.SMART,
-    initialStaticDelayMs: Int = 0,
+    initialSyncDelayMs: Int = 0,
     onLoadConfig: suspend (playerId: String) -> PlayerConfig?,
     onSave: (playerId: String, values: Map<String, Any>) -> Unit,
     onDstmChanged: ((enabled: Boolean) -> Unit)?,
     onAudioFormatChanged: ((SendspinAudioFormat) -> Unit)? = null,
-    onStaticDelayChanged: ((Int) -> Unit)? = null,
+    onSyncDelayChanged: ((Int) -> Unit)? = null,
     isBtRoute: Boolean = false,
     acousticCorrectionMs: Int = 0,
-    calibrator: net.asksakis.massdroidv2.data.sendspin.NativeAcousticCalibrator? = null,
-    hasPhoneBaseline: Boolean = false,
-    phoneBaselineUs: Long = 0L,
+    acoustic: net.asksakis.massdroidv2.data.sendspin.AcousticCalibrationCoordinator? = null,
+    micPathCalibratedMs: Long = 0L,
     isPlaybackActive: Boolean = false,
     btRouteName: String = "",
     onPausePlayback: (() -> Unit)? = null,
     onResumePlayback: (() -> Unit)? = null,
-    onBaselineComplete: ((Long) -> Unit)? = null,
-    onAcousticCalibrationComplete: ((correctionUs: Long, quality: String) -> Unit)? = null,
-    onResetPhoneBaseline: (() -> Unit)? = null,
     onResetBtCalibration: (() -> Unit)? = null,
+    onResetMicPath: (() -> Unit)? = null,
     syncHistory: List<SendspinManager.SyncSample> = emptyList(),
     onDismiss: () -> Unit
 ) {
@@ -117,12 +114,17 @@ fun PlayerSettingsDialog(
         mutableStateOf<List<net.asksakis.massdroidv2.domain.model.FormatOption>>(emptyList())
     }
     var audioFormat by remember(player.playerId, initialAudioFormat) { mutableStateOf(initialAudioFormat) }
-    var staticDelayMs by remember(player.playerId, initialStaticDelayMs) {
-        mutableIntStateOf(initialStaticDelayMs)
+    // Local client-side UX sync nudge (DataStore-backed). Range -1000..+1000,
+    // positive shifts playback later (intuitive sign, matches MA web UI's
+    // "Sendspin sync delay" slider).
+    var syncDelayMs by remember(player.playerId, initialSyncDelayMs) {
+        mutableIntStateOf(initialSyncDelayMs)
     }
-    // Server-side support for sendspin_static_delay is decided by the sendspin
-    // player's role: only advertised roles expose this config entry. Pre-PR
-    // #3689 MA servers don't expose it at all, so the row stays hidden there.
+    // Server-side spec field sendspin_static_delay (per-player config).
+    // Range 0..5000, positive compensates for known external delay (spec
+    // sign). Only available on MA servers with PR #3689 deployed; otherwise
+    // the load returns null and the row stays hidden.
+    var staticDelayMs by remember(player.playerId) { mutableIntStateOf(0) }
     var hasServerStaticDelay by remember(player.playerId) { mutableStateOf(false) }
 
     LaunchedEffect(player.playerId) {
@@ -328,36 +330,80 @@ fun PlayerSettingsDialog(
                         }
                     }
 
-                    if (isLocalPlayer || hasServerStaticDelay) {
-                        // Local: DataStore-backed (fast path, allows negative offsets because
-                        // our own engine applies them client-side).
-                        // Remote: server-backed, uses the upstream PR #3689 range (0..5000).
-                        val minValue = if (isLocalPlayer) -500 else 0
-                        val maxValue = if (isLocalPlayer) 500 else 5000
-                        StaticDelayCard(
-                            valueMs = staticDelayMs,
+                    if (isLocalPlayer) {
+                        // Sendspin sync delay (LOCAL client-side UX nudge,
+                        // DataStore-backed). Range -1000..+1000 ms, positive
+                        // shifts playback later — intuitive sign convention
+                        // matching the MA web UI's "Sendspin sync delay"
+                        // slider. Applied locally in SendspinSyncEngine; not
+                        // sent to the server.
+                        DelayStepperCard(
+                            label = "Sendspin sync delay",
+                            helperText = "Negative plays sooner, positive plays later. Applies locally to this device.",
+                            valueMs = syncDelayMs,
+                            minValue = -1000,
+                            maxValue = 1000,
                             onDecrement = {
-                                staticDelayMs = (staticDelayMs - 2).coerceAtLeast(minValue)
-                                if (isLocalPlayer) onStaticDelayChanged?.invoke(staticDelayMs)
+                                syncDelayMs = (syncDelayMs - 2).coerceAtLeast(-1000)
+                                onSyncDelayChanged?.invoke(syncDelayMs)
                             },
                             onIncrement = {
-                                staticDelayMs = (staticDelayMs + 2).coerceAtMost(maxValue)
-                                if (isLocalPlayer) onStaticDelayChanged?.invoke(staticDelayMs)
+                                syncDelayMs = (syncDelayMs + 2).coerceAtMost(1000)
+                                onSyncDelayChanged?.invoke(syncDelayMs)
                             },
                             onReset = {
-                                if (staticDelayMs != 0) {
-                                    staticDelayMs = 0
-                                    if (isLocalPlayer) onStaticDelayChanged?.invoke(0)
+                                if (syncDelayMs != 0) {
+                                    syncDelayMs = 0
+                                    onSyncDelayChanged?.invoke(0)
                                 }
                             }
                         )
                     }
 
-                    // Acoustic calibration: phone baseline plus optional BT route calibration.
-                    if (isLocalPlayer && calibrator != null) {
-                        var showPhoneCalibrationDialog by remember { mutableStateOf(false) }
+                    if (hasServerStaticDelay) {
+                        // Static playback delay (SERVER-side spec field
+                        // sendspin_static_delay, available only on MA servers
+                        // with PR #3689 deployed). Range 0..5000 ms, positive
+                        // compensates for external delay beyond the audio
+                        // port (spec sign). Saved via player config; affects
+                        // ALL clients of this player.
+                        DelayStepperCard(
+                            label = "Static playback delay",
+                            helperText = "Server-side spec compensation for external device delay. Affects all clients of this player.",
+                            valueMs = staticDelayMs,
+                            minValue = 0,
+                            maxValue = 5000,
+                            onDecrement = {
+                                staticDelayMs = (staticDelayMs - 2).coerceAtLeast(0)
+                            },
+                            onIncrement = {
+                                staticDelayMs = (staticDelayMs + 2).coerceAtMost(5000)
+                            },
+                            onReset = {
+                                if (staticDelayMs != 0) {
+                                    staticDelayMs = 0
+                                }
+                            }
+                        )
+                    }
+
+                    // Acoustic calibration for the active Bluetooth output route.
+                    // No phone-speaker row: phone, wired and USB paths sync at
+                    // the audio port via the AudioTrack pipeline measurement
+                    // (per the Sendspin spec), so an acoustic chirp would
+                    // double-count the listener air path. The BT row stays
+                    // visible on local-player settings regardless of the
+                    // current route, but the Calibrate button is enabled only
+                    // while a BT route is connected (so users can review or
+                    // reset a saved value even when BT is currently off).
+                    //
+                    // A second row reports the cached "mic path" reference
+                    // (the phone-side mic chain latency measured once on the
+                    // built-in speaker). It is reused across all BT speakers
+                    // by the two-pass algorithm. A Reset button forces a
+                    // re-measurement on the next BT calibration.
+                    if (isLocalPlayer && acoustic != null) {
                         var showBtCalibrationDialog by remember { mutableStateOf(false) }
-                        val phoneBaselineMs = phoneBaselineUs / 1000
                         val btDeviceName = btRouteName.ifBlank { "Bluetooth speaker" }
 
                         Row(
@@ -366,56 +412,11 @@ fun PlayerSettingsDialog(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text("Phone speaker calibration", style = MaterialTheme.typography.bodyMedium)
-                                Text(
-                                    if (hasPhoneBaseline) "Baseline: ${phoneBaselineMs}ms" else "Not calibrated",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                if (hasPhoneBaseline) {
-                                    MdTextButton(onClick = { onResetPhoneBaseline?.invoke() }) {
-                                        Text("Reset")
-                                    }
-                                }
-                                MdTextButton(onClick = { showPhoneCalibrationDialog = true }) {
-                                    Text(if (hasPhoneBaseline) "Recalibrate" else "Calibrate")
-                                }
-                            }
-                        }
-                        if (showPhoneCalibrationDialog) {
-                            AcousticCalibrationDialog(
-                                routeName = "Phone speaker",
-                                hasPhoneBaseline = hasPhoneBaseline,
-                                phoneBaselineUs = phoneBaselineUs,
-                                isBtRoute = false,
-                                isPlaybackActive = isPlaybackActive,
-                                calibrator = calibrator,
-                                onPausePlayback = { onPausePlayback?.invoke() },
-                                onResumePlayback = { onResumePlayback?.invoke() },
-                                onDismiss = { showPhoneCalibrationDialog = false },
-                                onBaselineComplete = { baselineUs ->
-                                    onBaselineComplete?.invoke(baselineUs)
-                                },
-                                onCalibrationComplete = { correctionUs, quality ->
-                                    onAcousticCalibrationComplete?.invoke(correctionUs, quality)
-                                }
-                            )
-                        }
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("Bluetooth device calibration", style = MaterialTheme.typography.bodyMedium)
+                                Text("Bluetooth calibration", style = MaterialTheme.typography.bodyMedium)
                                 Text(
                                     when {
                                         !isBtRoute -> "Connect a Bluetooth device to calibrate"
                                         acousticCorrectionMs > 0 -> "$btDeviceName: ${acousticCorrectionMs}ms"
-                                        !hasPhoneBaseline -> "Phone baseline required first"
                                         else -> "$btDeviceName not calibrated"
                                     },
                                     style = MaterialTheme.typography.bodySmall,
@@ -436,23 +437,37 @@ fun PlayerSettingsDialog(
                                 }
                             }
                         }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Mic path reference", style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    if (micPathCalibratedMs > 0L) {
+                                        "Calibrated: ${micPathCalibratedMs}ms (shared across BT routes)"
+                                    } else {
+                                        "Will be measured on the next BT calibration"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            if (micPathCalibratedMs > 0L) {
+                                MdTextButton(onClick = { onResetMicPath?.invoke() }) {
+                                    Text("Reset")
+                                }
+                            }
+                        }
                         if (showBtCalibrationDialog) {
                             AcousticCalibrationDialog(
                                 routeName = btDeviceName,
-                                hasPhoneBaseline = hasPhoneBaseline,
-                                phoneBaselineUs = phoneBaselineUs,
-                                isBtRoute = true,
                                 isPlaybackActive = isPlaybackActive,
-                                calibrator = calibrator,
+                                coordinator = acoustic,
                                 onPausePlayback = { onPausePlayback?.invoke() },
                                 onResumePlayback = { onResumePlayback?.invoke() },
-                                onDismiss = { showBtCalibrationDialog = false },
-                                onBaselineComplete = { baselineUs ->
-                                    onBaselineComplete?.invoke(baselineUs)
-                                },
-                                onCalibrationComplete = { correctionUs, quality ->
-                                    onAcousticCalibrationComplete?.invoke(correctionUs, quality)
-                                }
+                                onDismiss = { showBtCalibrationDialog = false }
                             )
                         }
                     }
@@ -505,55 +520,67 @@ fun PlayerSettingsDialog(
 }
 
 @Composable
-private fun StaticDelayCard(
+private fun DelayStepperCard(
+    label: String,
+    helperText: String,
     valueMs: Int,
+    minValue: Int,
+    maxValue: Int,
     onDecrement: () -> Unit,
     onIncrement: () -> Unit,
-    onReset: () -> Unit
+    onReset: () -> Unit,
 ) {
     OutlinedCard(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("Static delay", style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    text = "${valueMs}ms",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.primary
-                )
-            }
-            MdTextButton(
-                onClick = onReset,
-                enabled = valueMs != 0,
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                    horizontal = 6.dp, vertical = 0.dp
-                )
-            ) { Text("Reset", style = MaterialTheme.typography.labelMedium) }
-            RepeatingIconButton(
-                onClick = onDecrement,
-                modifier = Modifier.size(36.dp)
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Icon(
-                    Icons.Default.Remove,
-                    contentDescription = "Decrease static delay",
-                    modifier = Modifier.size(18.dp)
-                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(label, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        text = "${valueMs}ms",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                MdTextButton(
+                    onClick = onReset,
+                    enabled = valueMs != 0,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        horizontal = 6.dp, vertical = 0.dp
+                    )
+                ) { Text("Reset", style = MaterialTheme.typography.labelMedium) }
+                RepeatingIconButton(
+                    onClick = onDecrement,
+                    enabled = valueMs > minValue,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Remove,
+                        contentDescription = "Decrease $label",
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                RepeatingIconButton(
+                    onClick = onIncrement,
+                    enabled = valueMs < maxValue,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Add,
+                        contentDescription = "Increase $label",
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
             }
-            RepeatingIconButton(
-                onClick = onIncrement,
-                modifier = Modifier.size(36.dp)
-            ) {
-                Icon(
-                    Icons.Default.Add,
-                    contentDescription = "Increase static delay",
-                    modifier = Modifier.size(18.dp)
-                )
-            }
+            Text(
+                helperText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp)
+            )
         }
     }
 }

@@ -11,6 +11,28 @@ struct CalibrationResult {
     double  varianceMs    = 0.0;
     float   snrDb         = 0.0f;
     int     quality       = 2;  // 0=GOOD, 1=MARGINAL, 2=FAILED
+    // Microphone input-path latency reported by Oboe
+    // (AAudio.calculateLatencyMillis on the input stream). Reports only the
+    // AAudio HAL buffer occupancy — DSP/processing stages that sit between
+    // the analog mic and the AAudio buffer are NOT included. Use the
+    // outputHALUs + chirp round trip on a phone-speaker reference pass to
+    // measure the full mic-path latency instead.
+    int64_t inputLatencyUs = 0;
+    // Output pipeline latency measured from Oboe getTimestamp() during the
+    // chirp playback — the time between calling requestStart() and the
+    // first audio frame leaving the routed DAC. Meaningful only when the
+    // routed output is an in-phone device (built-in speaker, wired, USB):
+    // BT output reports the time frames were handed to the BT transport
+    // layer, not actual speaker playback, so this value is opaque for BT.
+    // Callers should consult routedOutputDeviceId/Type when interpreting.
+    int64_t outputHALUs = 0;
+    // AAudio device ids that the two streams actually opened on. Lets the
+    // caller verify whether a routing override (via outputDeviceId) took
+    // effect; if the value differs from the requested id, callers should
+    // treat the measurement as an "active output" pass rather than a
+    // forced-speaker reference pass.
+    int32_t routedOutputDeviceId = 0;
+    int32_t routedInputDeviceId  = 0;
 };
 
 // Bandpass filter coefficients: 2nd order IIR centered at 1kHz, Q~5, for 48kHz

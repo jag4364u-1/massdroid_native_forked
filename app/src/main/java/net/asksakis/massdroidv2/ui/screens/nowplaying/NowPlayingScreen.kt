@@ -458,11 +458,11 @@ fun NowPlayingScreen(
         if (showPlayerSettingsDialog) {
             val ssClientId by viewModel.sendspinClientId.collectAsStateWithLifecycle(initialValue = viewModel.cachedSendspinClientId)
             val audioFormat by viewModel.sendspinAudioFormat.collectAsStateWithLifecycle(initialValue = viewModel.cachedSendspinAudioFormat)
-            val staticDelayMs by viewModel.sendspinStaticDelayMs.collectAsStateWithLifecycle(initialValue = 0)
-            val isBt = viewModel.isBtRoute()
-            val phoneBaseline by viewModel.acousticPhoneBaselineUs.collectAsStateWithLifecycle(initialValue = 0L)
-            val calibrations by viewModel.acousticRouteCalibrations.collectAsStateWithLifecycle(initialValue = emptyMap())
-            val btRouteKey = viewModel.getBtRouteKey()
+            val syncDelayMs by viewModel.sendspinSyncDelayMs.collectAsStateWithLifecycle(initialValue = 0)
+            val isBt = viewModel.acoustic.isBtRoute()
+            val calibrations by viewModel.acoustic.acousticRouteCalibrations.collectAsStateWithLifecycle(initialValue = emptyMap())
+            val micPathUs by viewModel.acoustic.acousticMicPathUs.collectAsStateWithLifecycle(initialValue = 0L)
+            val btRouteKey = viewModel.acoustic.getBtRouteKey()
             val acousticCorrectionMs = (calibrations[btRouteKey]?.correctionUs ?: 0L) / 1000
             val dstmStates by viewModel.queueDstmStates.collectAsStateWithLifecycle()
 
@@ -472,27 +472,22 @@ fun NowPlayingScreen(
                 isSendspinPlayer = currentPlayer.provider == "sendspin",
                 isLocalPlayer = ssClientId != null && currentPlayer.playerId == ssClientId,
                 initialAudioFormat = net.asksakis.massdroidv2.domain.model.SendspinAudioFormat.fromStored(audioFormat),
-                initialStaticDelayMs = staticDelayMs,
+                initialSyncDelayMs = syncDelayMs,
                 onLoadConfig = { viewModel.getPlayerConfig(it) },
                 onSave = { id, values -> viewModel.savePlayerConfig(id, values) },
                 onDstmChanged = { viewModel.setDontStopTheMusic(currentPlayer.playerId, it) },
                 onAudioFormatChanged = { viewModel.setAudioFormat(it) },
-                onStaticDelayChanged = { viewModel.setSendspinStaticDelayMs(it) },
+                onSyncDelayChanged = { viewModel.setSendspinSyncDelayMs(it) },
                 isBtRoute = isBt,
                 acousticCorrectionMs = acousticCorrectionMs.toInt(),
-                calibrator = viewModel.acousticCalibrator,
-                hasPhoneBaseline = phoneBaseline > 0L,
-                phoneBaselineUs = phoneBaseline,
-                isPlaybackActive = viewModel.isPlaybackActive(),
-                onPausePlayback = { viewModel.pauseForCalibration() },
-                onResumePlayback = { viewModel.resumeAfterCalibration() },
-                btRouteName = viewModel.getBtRouteName(),
-                onBaselineComplete = { viewModel.saveAcousticBaseline(it) },
-                onAcousticCalibrationComplete = { correctionUs, quality ->
-                    viewModel.saveAcousticCalibration(correctionUs, quality)
-                },
-                onResetPhoneBaseline = { viewModel.resetAcousticBaseline() },
-                onResetBtCalibration = { viewModel.resetAcousticCalibration() },
+                acoustic = viewModel.acoustic,
+                micPathCalibratedMs = micPathUs / 1000,
+                isPlaybackActive = viewModel.acoustic.isPlaybackActive(),
+                onPausePlayback = { viewModel.acoustic.pauseForCalibration() },
+                onResumePlayback = { viewModel.acoustic.resumeAfterCalibration() },
+                btRouteName = viewModel.acoustic.getBtRouteName(),
+                onResetBtCalibration = { viewModel.acoustic.resetCalibration() },
+                onResetMicPath = { viewModel.acoustic.resetMicPath() },
                 onDismiss = { showPlayerSettingsDialog = false }
             )
         }
@@ -522,7 +517,7 @@ fun NowPlayingScreen(
             status = statusSnapshot,
             inputAudioFormat = audioFormat,
             syncHistory = syncHistory,
-            onStaticDelayChanged = { viewModel.setSendspinStaticDelayMs(it) },
+            onSyncDelayChanged = { viewModel.setSendspinSyncDelayMs(it) },
             onDismiss = { showSendspinStatusSheet = false }
         )
     }

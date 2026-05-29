@@ -32,8 +32,11 @@ static bool ensureResultClassCached(JNIEnv* env) {
     gResultClass = static_cast<jclass>(env->NewGlobalRef(localResult));
     env->DeleteLocalRef(localResult);
 
+    // Signature: (roundTripUs:Long, detectedTones:Int, varianceMs:Double,
+    // snrDb:Float, quality:Quality, inputLatencyUs:Long, outputHALUs:Long,
+    // routedOutputDeviceId:Int, routedInputDeviceId:Int) -> Unit
     gResultCtor = env->GetMethodID(gResultClass, "<init>",
-        "(JIDFLnet/asksakis/massdroidv2/data/sendspin/NativeAcousticCalibrator$Quality;)V");
+        "(JIDFLnet/asksakis/massdroidv2/data/sendspin/NativeAcousticCalibrator$Quality;JJII)V");
     if (!gResultCtor) {
         LOGE("Cannot find CalibrationResult constructor");
         return false;
@@ -94,7 +97,11 @@ static jobject resultToJava(JNIEnv* env, const acoustic::CalibrationResult& resu
         static_cast<jint>(result.detectedTones),
         static_cast<jdouble>(result.varianceMs),
         static_cast<jfloat>(result.snrDb),
-        qualityObj);
+        qualityObj,
+        static_cast<jlong>(result.inputLatencyUs),
+        static_cast<jlong>(result.outputHALUs),
+        static_cast<jint>(result.routedOutputDeviceId),
+        static_cast<jint>(result.routedInputDeviceId));
 }
 
 extern "C" {
@@ -126,11 +133,11 @@ Java_net_asksakis_massdroidv2_data_sendspin_NativeAcousticCalibrator_nativeDestr
 
 JNIEXPORT jobject JNICALL
 Java_net_asksakis_massdroidv2_data_sendspin_NativeAcousticCalibrator_nativeMeasure(
-    JNIEnv* env, jobject thiz, jlong enginePtr, jint maxDelayMs
+    JNIEnv* env, jobject thiz, jlong enginePtr, jint maxDelayMs, jint outputDeviceId
 ) {
     if (enginePtr == 0) {
         LOGE("nativeMeasure called with null engine");
-        acoustic::CalibrationResult failed{0, 0, 0.0, 0.0f, 2};
+        acoustic::CalibrationResult failed{0, 0, 0.0, 0.0f, 2, 0, 0, 0, 0};
         return resultToJava(env, failed);
     }
 
@@ -163,7 +170,8 @@ Java_net_asksakis_massdroidv2_data_sendspin_NativeAcousticCalibrator_nativeMeasu
         }
     };
 
-    acoustic::CalibrationResult result = engine->measureRoundTrip(maxDelayMs, progressCb);
+    acoustic::CalibrationResult result =
+        engine->measureRoundTrip(maxDelayMs, outputDeviceId, progressCb);
 
     env->DeleteGlobalRef(globalThiz);
 

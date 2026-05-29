@@ -23,7 +23,15 @@ interface SettingsRepository {
     val lastFmApiKey: Flow<String>
     val themeMode: Flow<String>
     val sendspinAudioFormat: Flow<String>
-    val sendspinStaticDelayMs: Flow<Int>
+    /**
+     * Client-side sync delay applied locally by the Android Sendspin engine,
+     * range -1000..+1000 ms. **Positive shifts playback later, negative
+     * shifts playback sooner** — the intuitive sign convention used by the
+     * Music Assistant web UI's "Sendspin sync delay" slider. Independent of
+     * the per-player spec field `static_delay_ms` (which is server-side and
+     * available only on MA servers with PR #3689 deployed).
+     */
+    val sendspinSyncDelayMs: Flow<Int>
     val sendspinClockOffsetUs: Flow<Long>
     /**
      * Whether Sendspin player volume should be bridged to the phone's
@@ -35,7 +43,16 @@ interface SettingsRepository {
      * Sendspin player volume server-side.
      */
     val sendspinSyncSystemVolume: Flow<Boolean>
-    val acousticPhoneBaselineUs: Flow<Long>
+    /**
+     * Cached one-way mic-path latency in microseconds, measured once on the
+     * phone built-in speaker (chirp roundTrip minus Oboe outputHAL). Stays
+     * stable per device + Android version, so subsequent BT calibrations
+     * skip the phone-speaker reference pass and reuse this value to isolate
+     * the BT output latency from the chirp roundTrip. 0 means uncalibrated;
+     * callers fall back to a single-pass BT calibration (with Oboe input
+     * latency as an approximation) in that case.
+     */
+    val acousticMicPathUs: Flow<Long>
     val acousticRouteCalibrations: Flow<Map<String, AcousticRouteCalibration>>
 
     suspend fun setServerUrl(url: String)
@@ -55,10 +72,10 @@ interface SettingsRepository {
     suspend fun setLastFmApiKey(key: String)
     suspend fun setThemeMode(mode: String)
     suspend fun setSendspinAudioFormat(format: String)
-    suspend fun setSendspinStaticDelayMs(delayMs: Int)
+    suspend fun setSendspinSyncDelayMs(delayMs: Int)
     suspend fun setSendspinClockOffsetUs(offsetUs: Long)
     suspend fun setSendspinSyncSystemVolume(enabled: Boolean)
-    suspend fun setAcousticPhoneBaselineUs(baselineUs: Long)
+    suspend fun setAcousticMicPathUs(valueUs: Long)
     suspend fun setAcousticRouteCalibration(routeKey: String, calibration: AcousticRouteCalibration)
     suspend fun removeAcousticRouteCalibration(routeKey: String)
 }

@@ -71,13 +71,18 @@ data class SendspinStatusUi(
     val networkMode: String,
     val activeBufferMs: Long,
     val bufferBytes: Long,
-    val staticDelayMs: Int,
+    val syncDelayMs: Int,
     val outputLatencyMs: Long = 0L,
     val acousticCorrectionMs: Long = 0L,
     val dacSyncErrorMs: Float = 0f,
     val absoluteSyncMs: Float = 0f,
     val syncMuted: Boolean = false,
     val audioRoute: String = "",
+    // True when the active AudioTrack output is routed to a Bluetooth sink.
+    // Drives the streaming-status sheet's latency label: BT routes show
+    // calibration state, non-BT routes are labelled "port latency" since
+    // they sync at the audio port via the AudioTrack pipeline measurement.
+    val isBtRoute: Boolean = false,
     val clockSamples: Int = 0,
     val clockErrorUs: Long = 0L,
     val resyncs: Int = 0,
@@ -119,7 +124,7 @@ class NowPlayingViewModel @Inject constructor(
     private val lyricsProvider: LyricsProvider,
     private val sendspinManager: net.asksakis.massdroidv2.data.sendspin.SendspinManager,
     private val volumeCoordinator: net.asksakis.massdroidv2.data.sendspin.SendspinVolumeCoordinator,
-    val acousticCalibrator: net.asksakis.massdroidv2.data.sendspin.NativeAcousticCalibrator,
+    val acoustic: net.asksakis.massdroidv2.data.sendspin.AcousticCalibrationCoordinator,
     val sleepTimerBridge: SleepTimerBridge,
     private val queueDstmCache: net.asksakis.massdroidv2.data.repository.QueueDstmCache
 ) : ViewModel() {
@@ -131,78 +136,8 @@ class NowPlayingViewModel @Inject constructor(
     val elapsedTime = playerRepository.elapsedTime
     val sendspinClientId = settingsRepository.sendspinClientId
     val sendspinAudioFormat = settingsRepository.sendspinAudioFormat
-    val sendspinStaticDelayMs = settingsRepository.sendspinStaticDelayMs
+    val sendspinSyncDelayMs = settingsRepository.sendspinSyncDelayMs
     val sendspinSyncHistory = sendspinManager.syncHistory
-    val acousticPhoneBaselineUs = settingsRepository.acousticPhoneBaselineUs
-    val acousticRouteCalibrations = settingsRepository.acousticRouteCalibrations
-
-    fun getBtRouteName(): String = sendspinManager.getRoutedDeviceProductName() ?: "Bluetooth"
-    fun getBtRouteKey(): String = "bt:${sendspinManager.getRoutedDeviceProductName() ?: "unknown"}"
-    fun isBtRoute(): Boolean = sendspinManager.getRoutedDeviceType()?.let {
-        it == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
-        it == android.media.AudioDeviceInfo.TYPE_BLE_HEADSET ||
-        it == android.media.AudioDeviceInfo.TYPE_BLE_SPEAKER
-    } ?: false
-    fun isPlaybackActive(): Boolean {
-        val player = playerRepository.selectedPlayer.value ?: return false
-        return player.state == net.asksakis.massdroidv2.domain.model.PlaybackState.PLAYING
-    }
-
-    fun pauseForCalibration() {
-        val playerId = playerRepository.selectedPlayer.value?.playerId ?: return
-        viewModelScope.launch { playerRepository.pause(playerId) }
-    }
-
-    fun resumeAfterCalibration() {
-        val playerId = playerRepository.selectedPlayer.value?.playerId ?: return
-        viewModelScope.launch { playerRepository.play(playerId) }
-    }
-
-    fun saveAcousticBaseline(baselineUs: Long) {
-        viewModelScope.launch {
-            // Store the round-trip baseline as a REFERENCE for BT route deltas
-            // only. On the phone-speaker route itself we apply zero acoustic
-            // extra (sync at the port, pipeline is the one-way output latency);
-            // applying the full round trip here double-counts the mic input path
-            // and plays ~half the round trip early.
-            settingsRepository.setAcousticPhoneBaselineUs(baselineUs)
-            if (!isBtRoute()) {
-                sendspinManager.setRouteAcousticExtraUs(0L)
-            }
-        }
-    }
-
-    fun resetAcousticBaseline() {
-        viewModelScope.launch {
-            settingsRepository.setAcousticPhoneBaselineUs(0L)
-            if (!isBtRoute()) {
-                sendspinManager.setRouteAcousticExtraUs(0L)
-            }
-        }
-    }
-
-    fun saveAcousticCalibration(correctionUs: Long, quality: String) {
-        val routeKey = getBtRouteKey()
-        viewModelScope.launch {
-            settingsRepository.setAcousticRouteCalibration(
-                routeKey,
-                net.asksakis.massdroidv2.domain.repository.AcousticRouteCalibration(
-                    correctionUs = correctionUs,
-                    quality = quality,
-                    updatedAt = System.currentTimeMillis()
-                )
-            )
-            sendspinManager.setRouteAcousticExtraUs(correctionUs)
-        }
-    }
-
-    fun resetAcousticCalibration() {
-        val routeKey = getBtRouteKey()
-        viewModelScope.launch {
-            settingsRepository.removeAcousticRouteCalibration(routeKey)
-            sendspinManager.setRouteAcousticExtraUs(0L)
-        }
-    }
     private val _blockedArtistUris = MutableStateFlow<Set<String>>(emptySet())
     val blockedArtistUris: StateFlow<Set<String>> = _blockedArtistUris.asStateFlow()
     private val _playlists = MutableStateFlow<List<Playlist>>(emptyList())
@@ -289,7 +224,7 @@ class NowPlayingViewModel @Inject constructor(
     }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), false)
     var cachedSendspinClientId: String? = null; private set
     var cachedSendspinAudioFormat = "SMART"; private set
-    private var cachedSendspinStaticDelayMs = 0
+    private var cachedSendspinSyncDelayMs = 0
     private var lastSendspinStatusLogAtMs = 0L
     private var lastLoggedSendspinStatusKey: String? = null
     private val _cachedTrackDisplay = MutableStateFlow<CachedTrackDisplay?>(null)
@@ -347,7 +282,7 @@ class NowPlayingViewModel @Inject constructor(
             sendspinAudioFormat.collect { cachedSendspinAudioFormat = it }
         }
         viewModelScope.launch {
-            sendspinStaticDelayMs.collect { cachedSendspinStaticDelayMs = it }
+            sendspinSyncDelayMs.collect { cachedSendspinSyncDelayMs = it }
         }
         viewModelScope.launch {
             currentLyricsTrackFlow.collectLatest { track: Track? ->
@@ -480,12 +415,13 @@ class NowPlayingViewModel @Inject constructor(
                     networkMode = netMode,
                     activeBufferMs = sendspinManager.bufferedAudioMs().coerceAtLeast(0L),
                     bufferBytes = sendspinManager.bufferedAudioBytes().coerceAtLeast(0L),
-                    staticDelayMs = cachedSendspinStaticDelayMs,
+                    syncDelayMs = cachedSendspinSyncDelayMs,
                     outputLatencyMs = sendspinManager.outputLatencyMs(),
                     acousticCorrectionMs = sendspinManager.acousticExtraMs(),
                     dacSyncErrorMs = sendspinManager.dacSyncErrorMs(),
                     absoluteSyncMs = sendspinManager.absoluteSyncMs(),
                     syncMuted = sendspinManager.isSyncMuted(),
+                    isBtRoute = acoustic.isBtRoute(),
                     clockSamples = sendspinManager.clockSampleCount(),
                     clockErrorUs = sendspinManager.clockErrorUs(),
                     resyncs = sendspinManager.resyncCount(),
@@ -634,9 +570,9 @@ class NowPlayingViewModel @Inject constructor(
         }
     }
 
-    fun setSendspinStaticDelayMs(delayMs: Int) {
+    fun setSendspinSyncDelayMs(delayMs: Int) {
         viewModelScope.launch {
-            settingsRepository.setSendspinStaticDelayMs(delayMs)
+            settingsRepository.setSendspinSyncDelayMs(delayMs)
         }
     }
 
@@ -1126,7 +1062,7 @@ class NowPlayingViewModel @Inject constructor(
         Log.d(
             SENDSPIN_UI_DBG,
             "transport=${status.connectionState} playback=${status.syncState} codec=${status.codec ?: "unknown"} " +
-                "mode=${status.configuredFormat} delay=${status.staticDelayMs}ms " +
+                "mode=${status.configuredFormat} syncDelay=${status.syncDelayMs}ms " +
                 "buf=${String.format(java.util.Locale.US, "%.1f", status.activeBufferMs / 1000f)}s " +
                 "bytes=${status.bufferBytes}"
         )

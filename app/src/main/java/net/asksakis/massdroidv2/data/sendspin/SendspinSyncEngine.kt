@@ -166,7 +166,7 @@ class SendspinSyncEngine : SendspinAudioEngine {
 
     // Clock sync
     @Volatile override var clockSynchronizer: ClockSynchronizer? = null
-    @Volatile override var staticDelayMs: Int = 0
+    @Volatile override var syncDelayMs: Int = 0
     // Output latency measurement + acoustic correction (extracted)
     private val latencyModel = OutputLatencyModel(TAG)
     override var routeAcousticExtraUs: Long
@@ -318,15 +318,15 @@ class SendspinSyncEngine : SendspinAudioEngine {
     private fun targetLocalPlayUs(serverTimestampUs: Long): Long {
         val localUs = clockSynchronizer?.serverToLocalUs(serverTimestampUs)
             ?: serverTimestampUs
-        // static_delay_ms is SUBTRACTED, per the Sendspin spec ("clients
-        // subtract their static_delay_ms from server timestamps before
-        // scheduling playback") and the sendspin-js reference scheduler
-        // (scheduleTime = playbackTime - syncDelaySec). It compensates for
-        // delay beyond the audio port (external speaker/amp), so a larger
-        // delay schedules audio EARLIER. We previously added it, which moved
-        // playback the wrong way and put us 2x out of sync against compliant
-        // clients in a group (issue #45). Default 0 makes this a no-op.
-        return localUs - (staticDelayMs.toLong() * 1000L) - latencyModel.totalCompensationUs()
+        // syncDelayMs is the user-facing UX nudge (intuitive sign:
+        // positive shifts playback later, negative shifts it sooner). It is
+        // ADDED to the local play target — distinct from the Sendspin spec
+        // field static_delay_ms, which compensates for known external delay
+        // and is already accounted for via latencyModel.totalCompensationUs()
+        // (which reads routeAcousticExtraUs from the acoustic calibration).
+        // Matches the Music Assistant web UI's "Sendspin sync delay" slider
+        // semantics so users see the same behaviour on both surfaces.
+        return localUs + (syncDelayMs.toLong() * 1000L) - latencyModel.totalCompensationUs()
     }
 
     /**
@@ -337,13 +337,13 @@ class SendspinSyncEngine : SendspinAudioEngine {
     private fun targetLocalPlayUsForBuffering(serverTimestampUs: Long): Long {
         val localUs = clockSynchronizer?.serverToLocalUs(serverTimestampUs)
             ?: serverTimestampUs
-        val latencyCompensation = if (measuredOutputLatencyUs > 50_000L) {
-            measuredOutputLatencyUs
-        } else {
-            0L
-        }
-        // Subtract static_delay_ms, same spec semantics as targetLocalPlayUs.
-        return localUs - (staticDelayMs.toLong() * 1000L) - latencyCompensation
+        // Use the real measured pipeline latency as the buffering reference,
+        // matching targetLocalPlayUs. Previously gated at 50ms which left
+        // low-latency outputs (phone speaker ~25ms) using 0 here, diverging
+        // from the actual play target and skewing stale/late-frame decisions.
+        val latencyCompensation = measuredOutputLatencyUs.coerceAtLeast(0L)
+        // Same sign convention as targetLocalPlayUs: ADD UX nudge.
+        return localUs + (syncDelayMs.toLong() * 1000L) - latencyCompensation
     }
 
     private fun acousticExtraUs(): Long = latencyModel.acousticExtraUs()
@@ -938,17 +938,17 @@ class SendspinSyncEngine : SendspinAudioEngine {
      * Negative delta (advance): symmetric, anchor moves earlier → positive error →
      * sample removal → audio speeds up to advance.
      */
-    override fun shiftAnchorForDelayChange(deltaMs: Int) {
+    override fun shiftAnchorForSyncDelayChange(deltaMs: Int) {
         if (anchorLocalUs == 0L) return
-        // Mirror the sign of targetLocalPlayUs: static_delay is subtracted, so a
-        // positive delay delta shifts the play target (and thus the anchor)
-        // EARLIER, not later. Keeps a live delay change consistent with the
-        // spec-compliant scheduling sign.
-        anchorLocalUs -= deltaMs.toLong() * 1000L
+        // syncDelayMs is ADDED to targetLocalPlayUs (positive = play later),
+        // so a positive delta shifts the play target (and anchor) LATER.
+        // Keeps a live UX-delay change consistent with the intuitive sign
+        // convention surfaced to the user.
+        anchorLocalUs += deltaMs.toLong() * 1000L
         smoothedSyncErrorMs = 0.0
         pendingSampleCorrection = 0
         pendingSampleCount = 1
-        Log.d(TAG, "Anchor shifted by ${-deltaMs}ms for delay change")
+        Log.d(TAG, "Anchor shifted by ${deltaMs}ms for sync delay change")
     }
 
     private fun resetSyncState() {
@@ -1047,6 +1047,39 @@ class SendspinSyncEngine : SendspinAudioEngine {
             anchorServerTimestampUs = serverTimestampUs
             anchorLocalUs = nowLocalUs()
             anchorLocalEquivalentUs = sync.serverToLocalUs(serverTimestampUs)
+
+            // ANCHOR-DIAG (logging only, no behavior change). The anchor above
+            // asserts "server frame `serverTimestampUs` is audible NOW
+            // (anchorLocalUs = nowLocalUs())". But that frame is still queued in
+            // the AudioTrack buffer, ~pipeline ahead of the DAC. getTimestamp
+            // gives the REAL frame-at-DAC mapping (CLOCK_MONOTONIC, same base as
+            // nowLocalUs). proxyOffset = the latency the code bakes in; realOffset
+            // = the latency implied by the real DAC timestamp. If proxyOffset
+            // varies across starts while realOffset stays ~constant, the per-start
+            // sync "randomness" is the nowLocalUs() proxy, NOT the DAC.
+            val diagTs = android.media.AudioTimestamp()
+            if (track.getTimestamp(diagTs) && activeSampleRate > 0) {
+                val framesAtDac = diagTs.framePosition
+                val framesConsumed = track.playbackHeadPosition.toLong()
+                val pipelineFrames = framesConsumed - framesAtDac
+                val pipelineMs = pipelineFrames * 1000.0 / activeSampleRate
+                val tsAgeMs = (System.nanoTime() - diagTs.nanoTime) / 1_000_000.0
+                // Local time the anchor frame actually reaches the DAC: the frame
+                // currently at the DAC (framesAtDac) was there at diagTs.nanoTime;
+                // the anchor frame sits pipelineFrames further along the buffer.
+                val realAnchorLocalUs = diagTs.nanoTime / 1000L +
+                    (pipelineFrames * 1_000_000L / activeSampleRate)
+                val proxyOffsetMs = (anchorLocalUs - anchorLocalEquivalentUs) / 1000.0
+                val realOffsetMs = (realAnchorLocalUs - anchorLocalEquivalentUs) / 1000.0
+                Log.d(TAG, "ANCHOR-DIAG: proxyOffset=${"%.1f".format(proxyOffsetMs)}ms " +
+                    "realOffset=${"%.1f".format(realOffsetMs)}ms " +
+                    "anchorErr(real-proxy)=${"%.1f".format(realOffsetMs - proxyOffsetMs)}ms " +
+                    "pipeline=${"%.1f".format(pipelineMs)}ms tsAge=${"%.1f".format(tsAgeMs)}ms " +
+                    "framePos=$framesAtDac headPos=$framesConsumed")
+            } else {
+                Log.d(TAG, "ANCHOR-DIAG: getTimestamp unavailable at anchor set")
+            }
+
             Log.d(TAG, "Sync anchor set, filterError=${sync.errorUs()}us")
             return
         }
@@ -1498,7 +1531,7 @@ class SendspinSyncEngine : SendspinAudioEngine {
                                 Log.d(TAG, "Startup align (precise): lead=${leadMs}ms " +
                                     "absOffset=${"%.1f".format(startupOffsetMs)}ms " +
                                     "filterErr=${clockSynchronizer?.errorUs() ?: -1}us " +
-                                    "[s2l=${s2l / 1000}ms static=${staticDelayMs}ms " +
+                                    "[s2l=${s2l / 1000}ms syncDelay=${syncDelayMs}ms " +
                                     "pipeline=${measuredOutputLatencyUs / 1000}ms " +
                                     "routeExtra=${routeAcousticExtraUs / 1000}ms " +
                                     "acousticExtra=${acousticExtraUs() / 1000}ms " +

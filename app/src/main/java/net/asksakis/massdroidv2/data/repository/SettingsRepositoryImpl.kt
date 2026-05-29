@@ -47,10 +47,10 @@ class SettingsRepositoryImpl @Inject constructor(
         private val KEY_LASTFM_API_KEY = stringPreferencesKey("lastfm_api_key")
         private val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
         private val KEY_SENDSPIN_AUDIO_FORMAT = stringPreferencesKey("sendspin_audio_format")
-        private val KEY_SENDSPIN_STATIC_DELAY_MS = stringPreferencesKey("sendspin_static_delay_ms")
+        private val KEY_SENDSPIN_SYNC_DELAY_MS = stringPreferencesKey("sendspin_sync_delay_ms")
         private val KEY_SENDSPIN_CLOCK_OFFSET_US = stringPreferencesKey("sendspin_server_minus_wall_us")
         private val KEY_SENDSPIN_SYNC_SYSTEM_VOLUME = stringPreferencesKey("sendspin_sync_system_volume")
-        private val KEY_ACOUSTIC_PHONE_BASELINE_US = stringPreferencesKey("acoustic_phone_baseline_us")
+        private val KEY_ACOUSTIC_MIC_PATH_US = stringPreferencesKey("acoustic_mic_path_us")
         private val KEY_ACOUSTIC_ROUTE_CALIBRATIONS = stringPreferencesKey("acoustic_route_calibrations")
     }
 
@@ -209,12 +209,12 @@ class SettingsRepositoryImpl @Inject constructor(
         context.dataStore.edit { it[KEY_SENDSPIN_AUDIO_FORMAT] = format }
     }
 
-    override val sendspinStaticDelayMs: Flow<Int> = safeData.map { prefs ->
-        prefs[KEY_SENDSPIN_STATIC_DELAY_MS]?.toIntOrNull()?.coerceIn(-500, 5000) ?: 0
+    override val sendspinSyncDelayMs: Flow<Int> = safeData.map { prefs ->
+        prefs[KEY_SENDSPIN_SYNC_DELAY_MS]?.toIntOrNull()?.coerceIn(-1000, 1000) ?: 0
     }
 
-    override suspend fun setSendspinStaticDelayMs(delayMs: Int) {
-        context.dataStore.edit { it[KEY_SENDSPIN_STATIC_DELAY_MS] = delayMs.coerceIn(-500, 5000).toString() }
+    override suspend fun setSendspinSyncDelayMs(delayMs: Int) {
+        context.dataStore.edit { it[KEY_SENDSPIN_SYNC_DELAY_MS] = delayMs.coerceIn(-1000, 1000).toString() }
     }
 
     override val sendspinClockOffsetUs: Flow<Long> = safeData.map { prefs ->
@@ -233,12 +233,12 @@ class SettingsRepositoryImpl @Inject constructor(
         context.dataStore.edit { it[KEY_SENDSPIN_SYNC_SYSTEM_VOLUME] = enabled.toString() }
     }
 
-    override val acousticPhoneBaselineUs: Flow<Long> = safeData.map { prefs ->
-        prefs[KEY_ACOUSTIC_PHONE_BASELINE_US]?.toLongOrNull() ?: 0L
+    override val acousticMicPathUs: Flow<Long> = safeData.map { prefs ->
+        prefs[KEY_ACOUSTIC_MIC_PATH_US]?.toLongOrNull() ?: 0L
     }
 
-    override suspend fun setAcousticPhoneBaselineUs(baselineUs: Long) {
-        context.dataStore.edit { it[KEY_ACOUSTIC_PHONE_BASELINE_US] = baselineUs.coerceAtLeast(0L).toString() }
+    override suspend fun setAcousticMicPathUs(valueUs: Long) {
+        context.dataStore.edit { it[KEY_ACOUSTIC_MIC_PATH_US] = valueUs.coerceAtLeast(0L).toString() }
     }
 
     override val acousticRouteCalibrations: Flow<Map<String, AcousticRouteCalibration>> = safeData.map { prefs ->

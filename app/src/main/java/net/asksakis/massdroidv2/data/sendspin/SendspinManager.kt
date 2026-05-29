@@ -452,20 +452,23 @@ class SendspinManager(
         audio.onOutputRouteChanged(reason)
     }
 
-    fun setStaticDelayMs(delayMs: Int) {
-        // Spec range is 0-5000ms; negative values are explicitly unsupported
-        // ("should never be required for any compliant implementation").
-        val clamped = delayMs.coerceIn(0, 5000)
-        val oldDelay = audio.staticDelayMs
+    fun setSyncDelayMs(delayMs: Int) {
+        // Client-side UX nudge: -1000..+1000 ms, positive = play later
+        // (intuitive sign, matches Music Assistant web UI). Not the same as
+        // the Sendspin spec static_delay_ms — that is derived from the
+        // acoustic calibration when reporting client/state to the server.
+        val clamped = delayMs.coerceIn(-1000, 1000)
+        val oldDelay = audio.syncDelayMs
         if (clamped == oldDelay) return
-        audio.staticDelayMs = clamped
-        audio.shiftAnchorForDelayChange(clamped - oldDelay)
-        // Value changes immediately (affects targetLocalPlayUs, late-frame detection).
-        // Full alignment effect at next startup (seek/track change).
-        // No flush: flushing causes buffer storm and desync.
-        // Notify server of new delay so it adjusts buffer headroom
-        sendCurrentState(currentSyncStatePayloadValue())
-        Log.d(TAG, "Static delay: ${oldDelay}ms -> ${clamped}ms")
+        audio.syncDelayMs = clamped
+        audio.shiftAnchorForSyncDelayChange(clamped - oldDelay)
+        // Value changes immediately (affects targetLocalPlayUs, late-frame
+        // detection). Full alignment effect at next startup (seek/track
+        // change). No flush: flushing causes buffer storm and desync.
+        // Note: sync delay is a CLIENT-side UX nudge so it does NOT need to
+        // be reported to the server; client/state only reports the spec
+        // static_delay (derived from acoustic calibration).
+        Log.d(TAG, "Sync delay: ${oldDelay}ms -> ${clamped}ms")
     }
 
     @Volatile private var isCellularTransport = false
@@ -477,14 +480,21 @@ class SendspinManager(
     }
 
     private fun sendCurrentState(syncState: String) {
-        // Send only user-specified delay to server. The hw pipeline latency
-        // is compensated locally in targetLocalPlayUs() and should NOT be
-        // reported to the server (it's internal AudioTrack compensation).
+        // Per the Sendspin spec, static_delay_ms reports the device's known
+        // external delay beyond the audio port so the server can adjust
+        // buffer headroom. The acoustic calibration measures exactly that
+        // (route-specific BT/external speaker latency), so we report it as
+        // the spec field. Clamped to spec range 0..5000. The local UX nudge
+        // (syncDelayMs) does NOT propagate to the server — it is purely a
+        // client-side scheduling adjustment.
+        val specStaticDelayMs = (audio.routeAcousticExtraUs / 1000L)
+            .coerceIn(0L, 5000L)
+            .toInt()
         client.sendClientState(
             volume = currentVolume,
             muted = muted,
             syncState = syncState,
-            staticDelayMs = audio.staticDelayMs
+            staticDelayMs = specStaticDelayMs
         )
     }
 

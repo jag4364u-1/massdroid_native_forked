@@ -29,7 +29,14 @@ interface SendspinAudioEngine {
 
     // Clock sync
     var clockSynchronizer: ClockSynchronizer?
-    var staticDelayMs: Int
+    /**
+     * Client-side UX sync nudge, -1000..+1000 ms. Positive shifts playback
+     * later, negative shifts it sooner — intuitive sign convention matching
+     * the Music Assistant web UI's "Sendspin sync delay" slider. Independent
+     * from the spec field `static_delay_ms` (which the engine derives from
+     * acoustic calibration when reporting client/state to the server).
+     */
+    var syncDelayMs: Int
     var routeAcousticExtraUs: Long
 
     // Correction mode
@@ -68,8 +75,11 @@ interface SendspinAudioEngine {
     fun bufferDurationMs(): Long
     fun bufferedBytes(): Long
 
-    // Sync-specific (no-op in DIRECT mode)
-    fun shiftAnchorForDelayChange(deltaMs: Int)
+    // Sync-specific (no-op in DIRECT mode). Called when the UX sync nudge
+    // changes so the playback anchor shifts immediately without waiting for
+    // a stream boundary. deltaMs is the change in syncDelayMs (positive ms
+    // means user wants playback shifted later, anchor shifts forward).
+    fun shiftAnchorForSyncDelayChange(deltaMs: Int)
 
     // Cleanup
     fun release()

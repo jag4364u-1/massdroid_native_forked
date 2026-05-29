@@ -352,8 +352,8 @@ class SendspinAudioController(
         }
 
         collectorJobs += scope.launch {
-            settingsRepository.sendspinStaticDelayMs.collect { delayMs ->
-                sendspinManager.setStaticDelayMs(delayMs)
+            settingsRepository.sendspinSyncDelayMs.collect { delayMs ->
+                sendspinManager.setSyncDelayMs(delayMs)
             }
         }
 

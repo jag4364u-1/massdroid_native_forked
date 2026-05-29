@@ -54,7 +54,7 @@ internal fun SendspinStatusSheet(
     status: SendspinStatusUi,
     inputAudioFormat: AudioFormatInfo? = null,
     syncHistory: List<SendspinManager.SyncSample> = emptyList(),
-    onStaticDelayChanged: (Int) -> Unit = {},
+    onSyncDelayChanged: (Int) -> Unit = {},
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -92,14 +92,22 @@ internal fun SendspinStatusSheet(
     }
     val routeCorrectionMs = status.acousticCorrectionMs
     val routeExtraMs = (routeCorrectionMs - status.outputLatencyMs).coerceAtLeast(0L)
+    // Sync at the audio port for non-BT routes (per the Sendspin spec): the
+    // AudioTrack pipeline measurement is the one-way port latency, no acoustic
+    // correction is needed. BT routes are the only ones that legitimately
+    // require a chirp-based calibration, so the labels make that explicit
+    // instead of telling phone-speaker users they are missing a calibration
+    // they should never run.
     val latencyPrimary = when {
         routeCorrectionMs > 0L -> "${routeCorrectionMs}ms calibrated"
+        !status.isBtRoute && status.outputLatencyMs > 0L -> "${status.outputLatencyMs}ms port latency"
         status.outputLatencyMs > 0L -> "${status.outputLatencyMs}ms output estimate"
         else -> "Measuring"
     }
     val latencyDetail = when {
         routeCorrectionMs > 0L -> "output ${status.outputLatencyMs}ms + route ${routeExtraMs}ms"
-        status.outputLatencyMs > 0L -> "no acoustic calibration loaded"
+        !status.isBtRoute && status.outputLatencyMs > 0L -> "syncs at the audio port"
+        status.outputLatencyMs > 0L -> "calibrate in player settings for tighter sync"
         else -> "waiting for output timestamp"
     }
     val clockLabel = "${status.clockSamples} samples / ${formatMs(status.clockErrorUs / 1000f)} clock error"
@@ -174,19 +182,20 @@ internal fun SendspinStatusSheet(
             }
 
             HorizontalDivider()
-            var staticDelayMs by remember(status.staticDelayMs) { mutableIntStateOf(status.staticDelayMs) }
+            var syncDelayMs by remember(status.syncDelayMs) { mutableIntStateOf(status.syncDelayMs) }
             SteppedValueRow(
-                label = "Static delay",
-                valueLabel = "${staticDelayMs}ms",
+                label = "Sendspin sync delay",
+                valueLabel = "${syncDelayMs}ms",
                 onDecrement = {
-                    // Spec range 0-5000ms, negatives unsupported. Hold-to-repeat
-                    // covers larger values; realistic offsets are small.
-                    staticDelayMs = (staticDelayMs - 2).coerceAtLeast(0)
-                    onStaticDelayChanged(staticDelayMs)
+                    // Range -1000..+1000 ms. Negative shifts playback sooner,
+                    // positive shifts it later — intuitive sign convention
+                    // matching the MA web UI's Sendspin sync delay slider.
+                    syncDelayMs = (syncDelayMs - 2).coerceAtLeast(-1000)
+                    onSyncDelayChanged(syncDelayMs)
                 },
                 onIncrement = {
-                    staticDelayMs = (staticDelayMs + 2).coerceAtMost(5000)
-                    onStaticDelayChanged(staticDelayMs)
+                    syncDelayMs = (syncDelayMs + 2).coerceAtMost(1000)
+                    onSyncDelayChanged(syncDelayMs)
                 },
                 labelStyle = MaterialTheme.typography.labelMedium
             )

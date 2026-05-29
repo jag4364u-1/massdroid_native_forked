@@ -299,21 +299,44 @@ fun PlayersScreen(
 
                     settingsPlayer?.let { player ->
                         val audioFormat by viewModel.sendspinAudioFormat.collectAsStateWithLifecycle()
-                        val staticDelayMs by viewModel.sendspinStaticDelayMs.collectAsStateWithLifecycle(initialValue = 0)
+                        val syncDelayMs by viewModel.sendspinSyncDelayMs.collectAsStateWithLifecycle(initialValue = 0)
                         val syncHistory by viewModel.sendspinSyncHistory.collectAsStateWithLifecycle()
+                        // Acoustic calibration shares the same coordinator that
+                        // backs the NowPlaying player-settings sheet, so the
+                        // Players screen surfaces an identical Bluetooth row
+                        // and saves are visible to both screens immediately.
+                        // isBtRoute / route name come from the routed AudioTrack
+                        // device (SendspinManager's snapshot), not from a UI
+                        // flag, so they reflect the actual output path.
+                        val isLocal = sendspinClientId != null && player.playerId == sendspinClientId
+                        val isBt = viewModel.acoustic.isBtRoute()
+                        val calibrations by viewModel.acoustic.acousticRouteCalibrations.collectAsStateWithLifecycle(initialValue = emptyMap())
+                        val micPathUs by viewModel.acoustic.acousticMicPathUs.collectAsStateWithLifecycle(initialValue = 0L)
+                        val btRouteKey = viewModel.acoustic.getBtRouteKey()
+                        val acousticCorrectionMs = (calibrations[btRouteKey]?.correctionUs ?: 0L) / 1000
                         if (audioFormat == null) return@let // wait for DataStore
                         net.asksakis.massdroidv2.ui.components.PlayerSettingsDialog(
                             player = player,
                             initialDstmEnabled = dstmStates[player.playerId] ?: false,
                             isSendspinPlayer = player.provider == "sendspin",
-                            isLocalPlayer = sendspinClientId != null && player.playerId == sendspinClientId,
+                            isLocalPlayer = isLocal,
                             initialAudioFormat = net.asksakis.massdroidv2.domain.model.SendspinAudioFormat.fromStored(audioFormat!!),
-                            initialStaticDelayMs = staticDelayMs,
+                            initialSyncDelayMs = syncDelayMs,
                             onLoadConfig = { viewModel.getPlayerConfig(it) },
                             onSave = { id, values -> viewModel.savePlayerConfig(id, values) },
                             onDstmChanged = { viewModel.setDontStopTheMusic(player.playerId, it) },
                             onAudioFormatChanged = { viewModel.setAudioFormat(it) },
-                            onStaticDelayChanged = { viewModel.setSendspinStaticDelayMs(it) },
+                            onSyncDelayChanged = { viewModel.setSendspinSyncDelayMs(it) },
+                            isBtRoute = isBt,
+                            acousticCorrectionMs = acousticCorrectionMs.toInt(),
+                            acoustic = viewModel.acoustic,
+                            micPathCalibratedMs = micPathUs / 1000,
+                            isPlaybackActive = viewModel.acoustic.isPlaybackActive(),
+                            onPausePlayback = { viewModel.acoustic.pauseForCalibration() },
+                            onResumePlayback = { viewModel.acoustic.resumeAfterCalibration() },
+                            btRouteName = viewModel.acoustic.getBtRouteName(),
+                            onResetBtCalibration = { viewModel.acoustic.resetCalibration() },
+                            onResetMicPath = { viewModel.acoustic.resetMicPath() },
                             syncHistory = syncHistory,
                             onDismiss = { settingsPlayer = null }
                         )
