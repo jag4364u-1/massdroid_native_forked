@@ -943,6 +943,15 @@ class SendspinSyncEngine : SendspinAudioEngine {
             )
             hardBoundaryPending = true
             streamGeneration++
+            // Re-arm acceptance at the new generation. Unlike clearBuffer/onStreamEnd
+            // (which are followed by a configure() that re-sets acceptGeneration), the
+            // discontinuity-triggered flush from handleContinuityCheck and the Tier-4
+            // RESYNC have NO subsequent stream/start, so without this every post-flush
+            // frame is enqueue-dropped as "stale (gen=old/new)" and the engine sticks
+            // in REBUFFERING forever (seen on VPN->WiFi handover: server resumes with
+            // a rebased timeline -> DISCONTINUITY -> flush -> all frames rejected).
+            acceptGeneration = streamGeneration
+            generationDropCount = 0
             syncStartupReason = SyncStartupReason.RELOCK_AFTER_SEEK
             clockPreciseForCorrections = false
 
