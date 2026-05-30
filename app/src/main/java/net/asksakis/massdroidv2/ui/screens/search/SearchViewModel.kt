@@ -7,6 +7,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import net.asksakis.massdroidv2.data.websocket.SessionEventBus
+import net.asksakis.massdroidv2.domain.model.MediaType
 import net.asksakis.massdroidv2.domain.model.Track
 import net.asksakis.massdroidv2.domain.repository.MusicRepository
 import net.asksakis.massdroidv2.domain.repository.PlayerRepository
@@ -92,6 +93,84 @@ class SearchViewModel @Inject constructor(
             } catch (e: Exception) {
                 Log.w(TAG, "playTrack failed: ${e.message}")
                 _error.tryEmit("Not connected to server")
+            }
+        }
+    }
+
+    // --- Long-press action sheet support (favorite, library, play, queue, radio) ---
+
+    val players = playerRepository.players
+
+    fun playUri(uri: String) {
+        val queueId = playerRepository.requireSelectedPlayerId() ?: return
+        viewModelScope.launch {
+            try {
+                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.NORMAL)
+                musicRepository.playMedia(queueId, uri)
+            } catch (e: Exception) {
+                Log.w(TAG, "playUri failed: ${e.message}")
+                _error.tryEmit("Not connected to server")
+            }
+        }
+    }
+
+    fun playOnPlayer(uri: String, playerId: String) {
+        viewModelScope.launch {
+            try {
+                playerRepository.setQueueFilterMode(playerId, PlayerRepository.QueueFilterMode.NORMAL)
+                musicRepository.playMedia(playerId, uri)
+            } catch (e: Exception) {
+                Log.w(TAG, "playOnPlayer failed: ${e.message}")
+                _error.tryEmit("Not connected to server")
+            }
+        }
+    }
+
+    fun enqueue(uri: String) {
+        val queueId = playerRepository.requireSelectedPlayerId() ?: return
+        viewModelScope.launch {
+            try {
+                musicRepository.playMedia(queueId, uri, option = "add")
+            } catch (e: Exception) {
+                Log.w(TAG, "enqueue failed: ${e.message}")
+                _error.tryEmit("Not connected to server")
+            }
+        }
+    }
+
+    fun startRadio(uri: String) {
+        val queueId = playerRepository.requireSelectedPlayerId() ?: return
+        viewModelScope.launch {
+            try {
+                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.RADIO_SMART)
+                musicRepository.playMedia(queueId, uri, radioMode = true)
+            } catch (e: Exception) {
+                Log.w(TAG, "startRadio failed: ${e.message}")
+                _error.tryEmit("Not connected to server")
+            }
+        }
+    }
+
+    fun toggleFavorite(uri: String, mediaType: MediaType, itemId: String, currentFavorite: Boolean) {
+        viewModelScope.launch {
+            try {
+                musicRepository.setFavorite(uri, mediaType, itemId, !currentFavorite)
+            } catch (e: Exception) {
+                Log.w(TAG, "toggleFavorite failed: ${e.message}")
+            }
+        }
+    }
+
+    fun toggleLibrary(uri: String, mediaType: MediaType, itemId: String, currentlyInLibrary: Boolean) {
+        viewModelScope.launch {
+            try {
+                if (currentlyInLibrary) {
+                    musicRepository.removeFromLibrary(mediaType, uri, itemId)
+                } else {
+                    musicRepository.addToLibrary(uri)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "toggleLibrary failed: ${e.message}")
             }
         }
     }

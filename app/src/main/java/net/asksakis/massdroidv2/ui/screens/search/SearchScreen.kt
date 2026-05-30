@@ -37,6 +37,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -47,8 +51,11 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import net.asksakis.massdroidv2.domain.model.*
 import net.asksakis.massdroidv2.domain.repository.SearchResult
+import net.asksakis.massdroidv2.ui.components.ActionSheetItem
+import net.asksakis.massdroidv2.ui.components.MediaActionSheet
 import net.asksakis.massdroidv2.ui.components.MediaItemGrid
 import net.asksakis.massdroidv2.ui.components.MediaItemRow
+import net.asksakis.massdroidv2.ui.components.RemoveFromLibraryDialog
 import net.asksakis.massdroidv2.ui.components.LocalProviderManifestCache
 import net.asksakis.massdroidv2.ui.components.formatAlbumTypeYear
 
@@ -68,6 +75,19 @@ fun SearchScreen(
     val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
     var selectedProviders by remember { mutableStateOf(emptySet<String>()) }
     val gridMode by viewModel.gridMode.collectAsStateWithLifecycle()
+    val players by viewModel.players.collectAsStateWithLifecycle()
+    var actionSheetItem by remember { mutableStateOf<ActionSheetItem?>(null) }
+    var pendingLibraryRemove by remember { mutableStateOf<ActionSheetItem?>(null) }
+
+    // Dismiss the soft keyboard once the user starts scrolling the results.
+    val dismissKeyboardOnScroll = remember(focusManager) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (available.y != 0f) focusManager.clearFocus()
+                return Offset.Zero
+            }
+        }
+    }
 
     val providerCache = LocalProviderManifestCache.current
 
@@ -295,21 +315,65 @@ fun SearchScreen(
         }
 
         // Content
-        if (isSearching) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
+        Box(modifier = Modifier.fillMaxSize().nestedScroll(dismissKeyboardOnScroll)) {
+            if (isSearching) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            } else if (gridMode) {
+                SearchResultsGrid(
+                    filtered, providerCache, onArtistClick, onAlbumClick,
+                    onPlaylistClick, { viewModel.playTrack(it) }, { viewModel.playRadio(it) },
+                    onLongPress = { actionSheetItem = it }
+                )
+            } else {
+                SearchResultsList(
+                    filtered, providerCache, onArtistClick, onAlbumClick,
+                    onPlaylistClick, { viewModel.playTrack(it) }, { viewModel.playRadio(it) },
+                    onLongPress = { actionSheetItem = it }
+                )
             }
-        } else if (gridMode) {
-            SearchResultsGrid(
-                filtered, providerCache, onArtistClick, onAlbumClick,
-                onPlaylistClick, { viewModel.playTrack(it) }, { viewModel.playRadio(it) }
-            )
-        } else {
-            SearchResultsList(
-                filtered, providerCache, onArtistClick, onAlbumClick,
-                onPlaylistClick, { viewModel.playTrack(it) }, { viewModel.playRadio(it) }
-            )
         }
+    }
+
+    actionSheetItem?.let { target ->
+        MediaActionSheet(
+            title = target.title,
+            subtitle = target.subtitle,
+            imageUrl = target.imageUrl,
+            players = players,
+            selectedPlayerId = players.firstOrNull()?.playerId,
+            favorite = target.favorite,
+            onToggleFavorite = {
+                viewModel.toggleFavorite(target.uri, target.mediaType, target.itemId, target.favorite)
+            },
+            inLibrary = target.inLibrary,
+            onToggleLibrary = {
+                if (target.inLibrary) {
+                    pendingLibraryRemove = target
+                } else {
+                    viewModel.toggleLibrary(target.uri, target.mediaType, target.itemId, false)
+                }
+                actionSheetItem = null
+            },
+            onPlayNow = { viewModel.playUri(target.uri) },
+            onPlayOnPlayer = { player -> viewModel.playOnPlayer(target.uri, player.playerId) },
+            onAddToQueue = { viewModel.enqueue(target.uri) },
+            onStartRadio = if (target.mediaType == MediaType.RADIO) null else {
+                { viewModel.startRadio(target.uri) }
+            },
+            onDismiss = { actionSheetItem = null }
+        )
+    }
+
+    pendingLibraryRemove?.let { target ->
+        RemoveFromLibraryDialog(
+            itemTitle = target.title,
+            onConfirm = {
+                viewModel.toggleLibrary(target.uri, target.mediaType, target.itemId, true)
+            },
+            onDismiss = { pendingLibraryRemove = null }
+        )
     }
 }
 
@@ -321,7 +385,8 @@ private fun SearchResultsList(
     onAlbumClick: (Album) -> Unit,
     onPlaylistClick: (Playlist) -> Unit,
     onTrackClick: (Track) -> Unit,
-    onRadioClick: (Radio) -> Unit
+    onRadioClick: (Radio) -> Unit,
+    onLongPress: (ActionSheetItem) -> Unit
 ) {
     LazyColumn(modifier = Modifier.fillMaxSize().fadingEdges(), contentPadding = PaddingValues(bottom = LocalMiniPlayerPadding.current)) {
         if (filtered.artists.isNotEmpty()) {
@@ -330,6 +395,8 @@ private fun SearchResultsList(
                 MediaItemRow(
                     title = artist.name, subtitle = "", imageUrl = artist.imageUrl,
                     onClick = { onArtistClick(artist) },
+                    onLongClick = { onLongPress(artist.toActionSheetItem()) },
+                    inLibrary = artist.uri.startsWith("library://"),
                     providerDomains = artist.providerDomains, providerCache = providerCache,
                     fallbackIcon = Icons.Default.Person
                 )
@@ -342,6 +409,8 @@ private fun SearchResultsList(
                     title = album.name,
                     subtitle = formatAlbumTypeYear(album.albumType, album.year).ifBlank { album.artistNames },
                     imageUrl = album.imageUrl, onClick = { onAlbumClick(album) },
+                    onLongClick = { onLongPress(album.toActionSheetItem()) },
+                    inLibrary = album.uri.startsWith("library://"),
                     providerDomains = album.providerDomains, providerCache = providerCache,
                     fallbackIcon = Icons.Default.Album
                 )
@@ -353,6 +422,8 @@ private fun SearchResultsList(
                 MediaItemRow(
                     title = track.name, subtitle = track.artistNames, imageUrl = track.imageUrl,
                     onClick = { onTrackClick(track) },
+                    onLongClick = { onLongPress(track.toActionSheetItem()) },
+                    inLibrary = track.uri.startsWith("library://"),
                     providerDomains = track.providerDomains, providerCache = providerCache,
                     fallbackIcon = Icons.Default.MusicNote
                 )
@@ -392,7 +463,8 @@ private fun SearchResultsGrid(
     onAlbumClick: (Album) -> Unit,
     onPlaylistClick: (Playlist) -> Unit,
     onTrackClick: (Track) -> Unit,
-    onRadioClick: (Radio) -> Unit
+    onRadioClick: (Radio) -> Unit,
+    onLongPress: (ActionSheetItem) -> Unit
 ) {
     LazyVerticalGrid(
         columns = GridCells.Adaptive(minSize = 120.dp),
@@ -407,6 +479,7 @@ private fun SearchResultsGrid(
                 MediaItemGrid(
                     title = artist.name, subtitle = "", imageUrl = artist.imageUrl,
                     onClick = { onArtistClick(artist) },
+                    onLongClick = { onLongPress(artist.toActionSheetItem()) },
                     providerDomains = artist.providerDomains, providerCache = providerCache,
                     fallbackIcon = Icons.Default.Person
                 )
@@ -419,6 +492,7 @@ private fun SearchResultsGrid(
                     title = album.name,
                     subtitle = formatAlbumTypeYear(album.albumType, album.year).ifBlank { album.artistNames },
                     imageUrl = album.imageUrl, onClick = { onAlbumClick(album) },
+                    onLongClick = { onLongPress(album.toActionSheetItem()) },
                     providerDomains = album.providerDomains, providerCache = providerCache,
                     fallbackIcon = Icons.Default.Album
                 )
@@ -430,6 +504,7 @@ private fun SearchResultsGrid(
                 MediaItemGrid(
                     title = track.name, subtitle = track.artistNames, imageUrl = track.imageUrl,
                     onClick = { onTrackClick(track) },
+                    onLongClick = { onLongPress(track.toActionSheetItem()) },
                     providerDomains = track.providerDomains, providerCache = providerCache,
                     fallbackIcon = Icons.Default.MusicNote
                 )
@@ -531,3 +606,23 @@ private fun providerBadgeColors(providers: List<String>): Map<String, Pair<Color
     )
     return providers.mapIndexed { i, p -> p to palette[i % palette.size] }.toMap()
 }
+
+private fun Artist.toActionSheetItem() = ActionSheetItem(
+    title = name, subtitle = "", uri = uri, imageUrl = imageUrl,
+    favorite = favorite, mediaType = MediaType.ARTIST, itemId = itemId,
+    inLibrary = uri.startsWith("library://")
+)
+
+private fun Album.toActionSheetItem() = ActionSheetItem(
+    title = name, subtitle = artistNames, uri = uri, imageUrl = imageUrl,
+    favorite = favorite, mediaType = MediaType.ALBUM, itemId = itemId,
+    inLibrary = uri.startsWith("library://")
+)
+
+private fun Track.toActionSheetItem() = ActionSheetItem(
+    title = name, subtitle = artistNames, uri = uri, imageUrl = imageUrl,
+    favorite = favorite, mediaType = MediaType.TRACK, itemId = itemId,
+    inLibrary = uri.startsWith("library://"),
+    primaryArtistUri = artistUri,
+    primaryArtistName = artistNames.split(",").firstOrNull()?.trim()
+)
