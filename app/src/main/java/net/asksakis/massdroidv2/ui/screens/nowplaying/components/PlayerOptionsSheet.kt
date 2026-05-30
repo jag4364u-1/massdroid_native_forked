@@ -3,6 +3,8 @@ package net.asksakis.massdroidv2.ui.screens.nowplaying.components
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Block
@@ -53,7 +55,11 @@ internal fun PlayerOptionsSheet(
         sheetState = sheetState,
         containerColor = SheetDefaults.containerColor()
     ) {
-        Column(modifier = Modifier.padding(bottom = 24.dp)) {
+        Column(
+            modifier = Modifier
+                .verticalScroll(rememberScrollState())
+                .padding(bottom = 24.dp)
+        ) {
             Column {
                 SheetDefaults.HeaderTitle(
                     text = "Player Options",

@@ -53,7 +53,9 @@ import net.asksakis.massdroidv2.domain.recommendation.MediaIdentity
 import net.asksakis.massdroidv2.ui.components.ActionSheetItem
 import net.asksakis.massdroidv2.ui.components.MediaActionSheet
 import net.asksakis.massdroidv2.ui.components.MediaItemRow
+import net.asksakis.massdroidv2.ui.components.RemoveFromLibraryDialog
 import net.asksakis.massdroidv2.ui.components.SheetDefaults
+import net.asksakis.massdroidv2.ui.components.icons.Bookshelf
 import net.asksakis.massdroidv2.ui.components.formatAlbumTypeYear
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -76,7 +78,10 @@ fun ArtistDetailScreen(
         key != null && key in blockedArtistUris
     } ?: false
 
+    val artistInLibrary by viewModel.artistInLibrary.collectAsStateWithLifecycle()
     var actionSheetItem by remember { mutableStateOf<ActionSheetItem?>(null) }
+    var showRemoveArtistConfirm by remember { mutableStateOf(false) }
+    var pendingLibraryRemove by remember { mutableStateOf<ActionSheetItem?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
@@ -119,6 +124,17 @@ fun ArtistDetailScreen(
                             } else {
                                 MaterialTheme.colorScheme.onSurface
                             }
+                        )
+                    }
+                    MdIconButton(onClick = {
+                        if (artistInLibrary) showRemoveArtistConfirm = true
+                        else viewModel.toggleArtistLibrary()
+                    }) {
+                        Icon(
+                            Icons.Default.Bookshelf,
+                            contentDescription = if (artistInLibrary) "Remove from library" else "Add to library",
+                            tint = if (artistInLibrary) MaterialTheme.colorScheme.primary
+                                   else MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     MdIconButton(onClick = { viewModel.toggleArtistFavorite() }) {
@@ -236,11 +252,38 @@ fun ArtistDetailScreen(
             onToggleArtistBlocked = target.primaryArtistUri?.let { uri ->
                 { viewModel.toggleArtistBlocked(uri, target.primaryArtistName) }
             },
+            inLibrary = target.inLibrary,
+            onToggleLibrary = {
+                if (target.inLibrary) {
+                    pendingLibraryRemove = target
+                } else {
+                    viewModel.toggleLibrary(target.uri, target.mediaType, target.itemId, false)
+                }
+                actionSheetItem = null
+            },
             onPlayNow = { viewModel.playUri(target.uri) },
             onPlayOnPlayer = { player -> viewModel.playOnPlayer(target.uri, player.playerId) },
             onAddToQueue = { viewModel.enqueue(target.uri) },
             onStartRadio = { viewModel.startRadio(target.uri) },
             onDismiss = { actionSheetItem = null }
+        )
+    }
+
+    if (showRemoveArtistConfirm) {
+        RemoveFromLibraryDialog(
+            itemTitle = artistName,
+            onConfirm = { viewModel.toggleArtistLibrary() },
+            onDismiss = { showRemoveArtistConfirm = false }
+        )
+    }
+
+    pendingLibraryRemove?.let { target ->
+        RemoveFromLibraryDialog(
+            itemTitle = target.title,
+            onConfirm = {
+                viewModel.toggleLibrary(target.uri, target.mediaType, target.itemId, true)
+            },
+            onDismiss = { pendingLibraryRemove = null }
         )
     }
 }
@@ -408,6 +451,7 @@ private fun LazyListScope.ArtistContentItems(
                 imageUrl = album.imageUrl,
                 onClick = { onAlbumClick(album) },
                 favorite = album.favorite,
+                inLibrary = album.uri.startsWith("library://"),
                 onLongClick = {
                     onAction(
                         ActionSheetItem(
@@ -418,6 +462,7 @@ private fun LazyListScope.ArtistContentItems(
                             favorite = album.favorite,
                             mediaType = MediaType.ALBUM,
                             itemId = album.itemId,
+                            inLibrary = album.uri.startsWith("library://"),
                             primaryArtistUri = album.artists.firstOrNull()?.uri ?: artist?.uri,
                             primaryArtistName = album.artists.firstOrNull()?.name ?: artistName
                         )
@@ -449,6 +494,7 @@ private fun LazyListScope.ArtistContentItems(
                             favorite = track.favorite,
                             mediaType = MediaType.TRACK,
                             itemId = track.itemId,
+                            inLibrary = track.uri.startsWith("library://"),
                             primaryArtistUri = track.artistUri ?: artist?.uri,
                             primaryArtistName = track.artistNames.split(",").firstOrNull()?.trim().orEmpty().ifBlank { artistName }
                         )
@@ -464,6 +510,7 @@ private fun LazyListScope.ArtistContentItems(
                             favorite = track.favorite,
                             mediaType = MediaType.TRACK,
                             itemId = track.itemId,
+                            inLibrary = track.uri.startsWith("library://"),
                             primaryArtistUri = track.artistUri ?: artist?.uri,
                             primaryArtistName = track.artistNames.split(",").firstOrNull()?.trim().orEmpty().ifBlank { artistName }
                         )

@@ -166,7 +166,8 @@ class DiscoverViewModel @Inject constructor(
     private val appUpdateChecker: net.asksakis.massdroidv2.data.update.AppUpdateChecker,
     private val genreRepository: net.asksakis.massdroidv2.data.genre.GenreRepository,
     private val queueDstmCache: net.asksakis.massdroidv2.data.repository.QueueDstmCache,
-    private val sessionEventBus: SessionEventBus
+    private val sessionEventBus: SessionEventBus,
+    private val providerHealthReporter: net.asksakis.massdroidv2.data.util.ProviderHealthReporter
 ) : ViewModel() {
 
     private val sectionCoordinator = DiscoverSectionCoordinator(
@@ -180,7 +181,8 @@ class DiscoverViewModel @Inject constructor(
         genreRepository = genreRepository,
         recommendationEngine = recommendationEngine,
         lastFmSimilarResolver = lastFmSimilarResolver,
-        lastFmGenreResolver = lastFmGenreResolver
+        lastFmGenreResolver = lastFmGenreResolver,
+        providerHealthReporter = providerHealthReporter
     )
     private val _uiState = MutableStateFlow(DiscoverUiState())
     val sections: StateFlow<List<DiscoverSection>> = _uiState.map { it.sections }

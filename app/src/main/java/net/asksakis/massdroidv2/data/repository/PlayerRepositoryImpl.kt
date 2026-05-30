@@ -450,7 +450,8 @@ class PlayerRepositoryImpl @Inject constructor(
                 EventType.QUEUE_TIME_UPDATED -> {
                     if (event.objectId != effectiveQueueId()) return@collect
                     val elapsed = event.data?.jsonPrimitive?.doubleOrNull ?: return@collect
-                    Log.d("PosDbg", "QUEUE_TIME_UPDATED ${event.objectId} elapsed=$elapsed (prev=${_elapsedTime.value})")
+                    // Fires ~1/sec during playback; commented out to avoid logcat spam in debug.
+                    // Log.d("PosDbg", "QUEUE_TIME_UPDATED ${event.objectId} elapsed=$elapsed (prev=${_elapsedTime.value})")
                     updatePosition(elapsed)
                 }
             }

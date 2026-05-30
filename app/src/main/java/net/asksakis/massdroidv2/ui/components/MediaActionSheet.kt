@@ -18,6 +18,7 @@ import coil.compose.AsyncImage
 import net.asksakis.massdroidv2.domain.model.MediaType
 import net.asksakis.massdroidv2.domain.model.PlaybackState
 import net.asksakis.massdroidv2.domain.model.Player
+import net.asksakis.massdroidv2.ui.components.icons.Bookshelf
 
 data class ActionSheetItem(
     val title: String,
@@ -229,8 +230,9 @@ fun MediaActionSheet(
                     },
                     leadingContent = {
                         Icon(
-                            if (inLibrary) Icons.Default.PlaylistRemove else Icons.Default.PlaylistAdd,
-                            contentDescription = null
+                            Icons.Default.Bookshelf,
+                            contentDescription = null,
+                            tint = if (inLibrary) MaterialTheme.colorScheme.primary else LocalContentColor.current
                         )
                     },
                     modifier = Modifier.clickable {

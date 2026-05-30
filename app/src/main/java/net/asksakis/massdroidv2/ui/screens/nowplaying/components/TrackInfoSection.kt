@@ -34,9 +34,9 @@ internal fun TrackInfoSection(
     onNavigateToAlbum: (String, String, String) -> Unit,
     compact: Boolean = false
 ) {
-    val titleStyle = if (compact) MaterialTheme.typography.titleMedium else MaterialTheme.typography.headlineSmall
-    val artistStyle = if (compact) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleMedium
-    val albumStyle = if (compact) MaterialTheme.typography.bodySmall else MaterialTheme.typography.titleSmall
+    val titleStyle = if (compact) MaterialTheme.typography.titleLarge else MaterialTheme.typography.headlineSmall
+    val artistStyle = MaterialTheme.typography.titleMedium
+    val albumStyle = if (compact) MaterialTheme.typography.bodyMedium else MaterialTheme.typography.titleSmall
     val artistClickable = currentTrack?.artistItemId != null && currentTrack.artistProvider != null
     val albumClickable = currentTrack?.albumItemId != null && currentTrack.albumProvider != null
 

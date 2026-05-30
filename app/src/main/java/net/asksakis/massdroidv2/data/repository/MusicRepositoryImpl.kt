@@ -322,7 +322,8 @@ class MusicRepositoryImpl @Inject constructor(
         )
     }
 
-    override suspend fun removeFromLibrary(mediaType: MediaType, libraryItemId: String) {
+    override suspend fun removeFromLibrary(mediaType: MediaType, uri: String, itemId: String) {
+        val libraryItemId = resolveLibraryItemId(uri, itemId)
         wsClient.sendCommand(
             MaCommands.Music.LIBRARY_REMOVE_ITEM,
             LibraryRemoveItemArgs(mediaType = mediaType.apiValue, libraryItemId = libraryItemId)

@@ -124,10 +124,12 @@ fun ExpandingPlayerSheet(
         val cWidth = parentW - 16f - leftInsetDp - rightInsetDp
         val cHeight = 72f
 
-        // Expanded: near full screen, also clear of side insets.
+        // Expanded: full-bleed so nothing behind (e.g. the landscape side nav rail)
+        // peeks through the side insets. The player content applies the safe-area
+        // insets itself so interactive elements stay clear of system bars/cutouts.
         val eTop = if (isLandscape) 0f else parentH * 0.08f
-        val eLeft = leftInsetDp
-        val eWidth = parentW - leftInsetDp - rightInsetDp
+        val eLeft = 0f
+        val eWidth = parentW
         val eHeight = parentH - eTop
 
         val range = (cTop - eTop).coerceAtLeast(1f)

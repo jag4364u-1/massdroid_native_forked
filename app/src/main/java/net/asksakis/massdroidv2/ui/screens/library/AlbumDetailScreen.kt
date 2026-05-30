@@ -56,6 +56,8 @@ import net.asksakis.massdroidv2.ui.components.AddToPlaylistDialog
 import net.asksakis.massdroidv2.ui.components.EqualizerBars
 import net.asksakis.massdroidv2.ui.components.MediaActionSheet
 import net.asksakis.massdroidv2.ui.components.MediaActionSheetExtraAction
+import net.asksakis.massdroidv2.ui.components.RemoveFromLibraryDialog
+import net.asksakis.massdroidv2.ui.components.icons.Bookshelf
 import net.asksakis.massdroidv2.ui.components.SheetDefaults
 import net.asksakis.massdroidv2.ui.components.formatAlbumTypeYear
 
@@ -73,9 +75,12 @@ fun AlbumDetailScreen(
     val blockedArtistUris by viewModel.blockedArtistUris.collectAsStateWithLifecycle()
     val currentTrackUri by viewModel.currentTrackUri.collectAsStateWithLifecycle()
     val isPlaying by viewModel.isPlaying.collectAsStateWithLifecycle()
+    val albumInLibrary by viewModel.albumInLibrary.collectAsStateWithLifecycle()
 
     var actionSheetItem by remember { mutableStateOf<ActionSheetItem?>(null) }
     var addToPlaylistTrackUri by remember { mutableStateOf<String?>(null) }
+    var showRemoveAlbumConfirm by remember { mutableStateOf(false) }
+    var pendingLibraryRemove by remember { mutableStateOf<ActionSheetItem?>(null) }
 
     Scaffold(
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -95,6 +100,17 @@ fun AlbumDetailScreen(
                     }
                 },
                 actions = {
+                    MdIconButton(onClick = {
+                        if (albumInLibrary) showRemoveAlbumConfirm = true
+                        else viewModel.toggleAlbumLibrary()
+                    }) {
+                        Icon(
+                            Icons.Default.Bookshelf,
+                            contentDescription = if (albumInLibrary) "Remove from library" else "Add to library",
+                            tint = if (albumInLibrary) MaterialTheme.colorScheme.primary
+                                   else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     MdIconButton(onClick = { viewModel.toggleAlbumFavorite() }) {
                         Icon(
                             if (album?.favorite == true) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
@@ -228,6 +244,15 @@ fun AlbumDetailScreen(
             onToggleArtistBlocked = target.primaryArtistUri?.let { uri ->
                 { viewModel.toggleArtistBlocked(uri, target.primaryArtistName) }
             },
+            inLibrary = target.inLibrary,
+            onToggleLibrary = {
+                if (target.inLibrary) {
+                    pendingLibraryRemove = target
+                } else {
+                    viewModel.toggleLibrary(target.uri, target.mediaType, target.itemId, false)
+                }
+                actionSheetItem = null
+            },
             extraActions = if (target.mediaType == MediaType.TRACK) listOf(
                 MediaActionSheetExtraAction(
                     title = "Add to Playlist",
@@ -244,6 +269,24 @@ fun AlbumDetailScreen(
             onAddToQueue = { viewModel.enqueue(target.uri) },
             onStartRadio = { viewModel.startRadio(target.uri) },
             onDismiss = { actionSheetItem = null }
+        )
+    }
+
+    if (showRemoveAlbumConfirm) {
+        RemoveFromLibraryDialog(
+            itemTitle = albumName,
+            onConfirm = { viewModel.toggleAlbumLibrary() },
+            onDismiss = { showRemoveAlbumConfirm = false }
+        )
+    }
+
+    pendingLibraryRemove?.let { target ->
+        RemoveFromLibraryDialog(
+            itemTitle = target.title,
+            onConfirm = {
+                viewModel.toggleLibrary(target.uri, target.mediaType, target.itemId, true)
+            },
+            onDismiss = { pendingLibraryRemove = null }
         )
     }
 
@@ -524,6 +567,7 @@ private fun AlbumTrackItem(
                                 favorite = track.favorite,
                                 mediaType = MediaType.TRACK,
                                 itemId = track.itemId,
+                                inLibrary = track.uri.startsWith("library://"),
                                 primaryArtistUri = track.artistUri ?: album?.artists?.firstOrNull()?.uri,
                                 primaryArtistName = track.artistNames.split(",").firstOrNull()?.trim()
                                     .orEmpty()
@@ -555,6 +599,7 @@ private fun AlbumTrackItem(
                             favorite = track.favorite,
                             mediaType = MediaType.TRACK,
                             itemId = track.itemId,
+                            inLibrary = track.uri.startsWith("library://"),
                             primaryArtistUri = track.artistUri ?: album?.artists?.firstOrNull()?.uri,
                             primaryArtistName = track.artistNames.split(",").firstOrNull()?.trim()
                                 .orEmpty()

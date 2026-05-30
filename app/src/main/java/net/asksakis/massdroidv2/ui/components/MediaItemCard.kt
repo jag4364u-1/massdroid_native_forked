@@ -1,5 +1,6 @@
 package net.asksakis.massdroidv2.ui.components
 
+import net.asksakis.massdroidv2.ui.components.icons.Bookshelf
 import net.asksakis.massdroidv2.ui.components.MdButton
 import net.asksakis.massdroidv2.ui.components.MdFilledTonalButton
 import net.asksakis.massdroidv2.ui.components.MdIconButton
@@ -57,6 +58,7 @@ fun MediaItemRow(
     modifier: Modifier = Modifier,
     titleColor: Color = Color.Unspecified,
     favorite: Boolean = false,
+    inLibrary: Boolean = false,
     onLongClick: (() -> Unit)? = null,
     onMoreClick: (() -> Unit)? = null,
     onPlayClick: (() -> Unit)? = null,
@@ -151,8 +153,17 @@ fun MediaItemRow(
             }
         },
         trailingContent = {
-            if (favorite || onPlayClick != null || onMoreClick != null || dragHandle != null) {
+            if (inLibrary || favorite || onPlayClick != null || onMoreClick != null || dragHandle != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (inLibrary) {
+                        Icon(
+                            Icons.Default.Bookshelf,
+                            contentDescription = "In library",
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                    }
                     if (favorite) {
                         Icon(
                             Icons.Default.Favorite,

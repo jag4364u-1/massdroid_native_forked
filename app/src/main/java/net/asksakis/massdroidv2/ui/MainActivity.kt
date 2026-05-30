@@ -499,7 +499,8 @@ private fun UpdatePrompt(checker: net.asksakis.massdroidv2.data.update.AppUpdate
 
 @Composable
 private fun MassDroidApp(
-    miniPlayerViewModel: MiniPlayerViewModel = hiltViewModel()
+    miniPlayerViewModel: MiniPlayerViewModel = hiltViewModel(),
+    appNoticesViewModel: AppNoticesViewModel = hiltViewModel()
 ) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -537,6 +538,16 @@ private fun MassDroidApp(
             snackbarHostState.showSnackbar(
                 message = "Select a player first",
                 duration = SnackbarDuration.Short
+            )
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        appNoticesViewModel.searchDegraded.collect {
+            snackbarHostState.showSnackbar(
+                message = "Some results couldn't load. A music provider isn't responding " +
+                    "(it may be rate-limited). Check providers in Music Assistant.",
+                duration = SnackbarDuration.Long
             )
         }
     }

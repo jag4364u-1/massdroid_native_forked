@@ -51,6 +51,7 @@ import net.asksakis.massdroidv2.ui.components.ActionSheetItem
 import net.asksakis.massdroidv2.ui.components.MediaActionSheet
 import net.asksakis.massdroidv2.ui.components.MediaActionSheetExtraAction
 import net.asksakis.massdroidv2.ui.components.MediaItemRow
+import net.asksakis.massdroidv2.ui.components.RemoveFromLibraryDialog
 import net.asksakis.massdroidv2.ui.components.SheetDefaults
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -72,6 +73,7 @@ fun PlaylistDetailScreen(
     val isPlaying by viewModel.isPlaying.collectAsStateWithLifecycle()
 
     var actionSheetItem by remember { mutableStateOf<ActionSheetItem?>(null) }
+    var pendingLibraryRemove by remember { mutableStateOf<ActionSheetItem?>(null) }
     var moveTrack by remember { mutableStateOf<Track?>(null) }
     var moveFallbackPosition by remember { mutableStateOf(0) }
     var showSortSheet by remember { mutableStateOf(false) }
@@ -211,6 +213,7 @@ fun PlaylistDetailScreen(
                             favorite = track.favorite,
                             mediaType = MediaType.TRACK,
                             itemId = track.itemId,
+                            inLibrary = track.uri.startsWith("library://"),
                             position = track.position ?: fallbackPosition,
                             primaryArtistUri = track.artistUri,
                             primaryArtistName = track.artistNames.split(",").firstOrNull()?.trim().orEmpty().ifBlank { "Artist" }
@@ -225,6 +228,7 @@ fun PlaylistDetailScreen(
                             favorite = track.favorite,
                             mediaType = MediaType.TRACK,
                             itemId = track.itemId,
+                            inLibrary = track.uri.startsWith("library://"),
                             position = track.position ?: fallbackPosition,
                             primaryArtistUri = track.artistUri,
                             primaryArtistName = track.artistNames.split(",").firstOrNull()?.trim().orEmpty().ifBlank { "Artist" }
@@ -266,6 +270,15 @@ fun PlaylistDetailScreen(
             onToggleArtistBlocked = target.primaryArtistUri?.let { uri ->
                 { viewModel.toggleArtistBlocked(uri, target.primaryArtistName) }
             },
+            inLibrary = target.inLibrary,
+            onToggleLibrary = {
+                if (target.inLibrary) {
+                    pendingLibraryRemove = target
+                } else {
+                    viewModel.toggleLibrary(target.uri, target.mediaType, target.itemId, false)
+                }
+                actionSheetItem = null
+            },
             extraActions = listOf(
                 MediaActionSheetExtraAction(
                     title = "Remove from Playlist",
@@ -290,6 +303,16 @@ fun PlaylistDetailScreen(
             onAddToQueue = { viewModel.enqueue(target.uri) },
             onStartRadio = { viewModel.startRadio(target.uri) },
             onDismiss = { actionSheetItem = null }
+        )
+    }
+
+    pendingLibraryRemove?.let { target ->
+        RemoveFromLibraryDialog(
+            itemTitle = target.title,
+            onConfirm = {
+                viewModel.toggleLibrary(target.uri, target.mediaType, target.itemId, true)
+            },
+            onDismiss = { pendingLibraryRemove = null }
         )
     }
 

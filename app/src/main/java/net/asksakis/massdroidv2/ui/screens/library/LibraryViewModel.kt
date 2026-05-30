@@ -5,6 +5,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -12,6 +13,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.withTimeoutOrNull
+import net.asksakis.massdroidv2.data.util.ProviderHealthReporter
+import net.asksakis.massdroidv2.data.util.mapMaBounded
 import net.asksakis.massdroidv2.data.websocket.ConnectionState
 import net.asksakis.massdroidv2.data.websocket.EventType
 import net.asksakis.massdroidv2.data.websocket.MaWebSocketClient
@@ -935,8 +939,7 @@ class LibraryViewModel @Inject constructor(
     fun removeFromLibrary(mediaType: MediaType, itemId: String, uri: String) {
         viewModelScope.launch {
             try {
-                val libraryItemId = Regex("^library://\\w+/(.+)$").find(uri)?.groupValues?.get(1) ?: itemId
-                musicRepository.removeFromLibrary(mediaType, libraryItemId)
+                musicRepository.removeFromLibrary(mediaType, uri, itemId)
                 when (mediaType) {
                     MediaType.ARTIST -> _artists.update { list -> list.filter { it.itemId != itemId } }
                     MediaType.ALBUM -> _albums.update { list -> list.filter { it.itemId != itemId } }
@@ -982,7 +985,8 @@ class ArtistDetailViewModel @Inject constructor(
     private val lastFmSimilarResolver: LastFmSimilarResolver,
     private val lastFmArtistInfoResolver: LastFmArtistInfoResolver,
     private val lastFmGenreResolver: LastFmGenreResolver,
-    private val dao: PlayHistoryDao
+    private val dao: PlayHistoryDao,
+    private val providerHealthReporter: ProviderHealthReporter
 ) : ViewModel() {
 
     val itemId: String = savedStateHandle["itemId"] ?: ""
@@ -990,6 +994,9 @@ class ArtistDetailViewModel @Inject constructor(
 
     private val _artist = MutableStateFlow<Artist?>(null)
     val artist: StateFlow<Artist?> = _artist.asStateFlow()
+
+    private val _artistInLibrary = MutableStateFlow(false)
+    val artistInLibrary: StateFlow<Boolean> = _artistInLibrary.asStateFlow()
 
     private val _albums = MutableStateFlow<List<Album>>(emptyList())
     val albums: StateFlow<List<Album>> = _albums.asStateFlow()
@@ -1069,6 +1076,7 @@ class ArtistDetailViewModel @Inject constructor(
                     if (refreshed.name.isNotBlank()) _artistName.value = refreshed.name
                 }
             }
+            _artistInLibrary.value = _artist.value.isInLibrary()
         } catch (e: Exception) {
             Log.w(TAG, "Load artist detail failed: ${e.message}")
         }
@@ -1093,47 +1101,71 @@ class ArtistDetailViewModel @Inject constructor(
             val resolveTtl = 7 * 86_400_000L
             val sourceGenres = lastFmGenreResolver.resolve(artistName).toSet()
 
-            val resolved = similar.mapNotNull { sim ->
-                val cachedRow = cached.firstOrNull { it.similarArtist == sim.name }
-                val resolvedAt = cachedRow?.resolvedAt
-                if (resolvedAt != null && now - resolvedAt < resolveTtl) {
-                    return@mapNotNull cachedRow.resolvedUri?.let { uri ->
-                        Artist(
-                            itemId = cachedRow.resolvedItemId.orEmpty(),
-                            provider = cachedRow.resolvedProvider.orEmpty(),
-                            name = cachedRow.resolvedName.orEmpty(),
-                            uri = uri,
-                            imageUrl = cachedRow.resolvedImageUrl
-                        )
-                    }
-                }
-                val searchResult = musicRepository.search(sim.name, listOf(MediaType.ARTIST), limit = 5)
-                val candidates = searchResult.artists.filter { it.name.equals(sim.name, ignoreCase = true) }
-                val matched = if (candidates.isEmpty()) {
-                    null
-                } else if (sourceGenres.isEmpty()) {
-                    candidates.firstOrNull()
-                } else {
-                    candidates.firstNotNullOfOrNull { c ->
-                        val detail = musicRepository.getArtist(c.itemId, c.provider)
-                        val cGenres = detail?.genres?.map { normalizeGenre(it) }?.toSet().orEmpty()
-                        when {
-                            detail == null -> null
-                            cGenres.isEmpty() -> detail
-                            cGenres.any { it in sourceGenres } -> detail
-                            else -> null
+            // Resolve candidates in parallel but globally concurrency-capped (mapMaBounded),
+            // so the artist + Discover bulk resolvers can't burst the shared WS pipeline. Each MA
+            // call has a short timeout: a slow/throttled provider makes `music/search` hang (the
+            // server gathers ALL providers), so without this the row hangs then comes back empty.
+            // On timeout we degrade (skip that candidate, don't poison the cache) and flag the row
+            // as unavailable so the UI can explain why instead of silently showing nothing.
+            val timedOut = java.util.concurrent.atomic.AtomicBoolean(false)
+            val resolved = similar.mapMaBounded { sim ->
+                try {
+                    val cachedRow = cached.firstOrNull { it.similarArtist == sim.name }
+                    val resolvedAt = cachedRow?.resolvedAt
+                    if (resolvedAt != null && now - resolvedAt < resolveTtl) {
+                        cachedRow.resolvedUri?.let { uri ->
+                            Artist(
+                                itemId = cachedRow.resolvedItemId.orEmpty(),
+                                provider = cachedRow.resolvedProvider.orEmpty(),
+                                name = cachedRow.resolvedName.orEmpty(),
+                                uri = uri,
+                                imageUrl = cachedRow.resolvedImageUrl
+                            )
+                        }
+                    } else {
+                        val searchResult = withTimeoutOrNull(SIMILAR_RESOLVE_TIMEOUT_MS) {
+                            musicRepository.search(sim.name, listOf(MediaType.ARTIST), limit = 5)
+                        }
+                        if (searchResult == null) {
+                            timedOut.set(true)
+                            null
+                        } else {
+                            val candidates = searchResult.artists.filter { it.name.equals(sim.name, ignoreCase = true) }
+                            val matched = if (candidates.isEmpty()) {
+                                null
+                            } else if (sourceGenres.isEmpty()) {
+                                candidates.firstOrNull()
+                            } else {
+                                candidates.firstNotNullOfOrNull { c ->
+                                    val detail = withTimeoutOrNull(SIMILAR_RESOLVE_TIMEOUT_MS) {
+                                        musicRepository.getArtist(c.itemId, c.provider)
+                                    } ?: run { timedOut.set(true); return@firstNotNullOfOrNull null }
+                                    val cGenres = detail.genres.map { normalizeGenre(it) }.toSet()
+                                    when {
+                                        cGenres.isEmpty() -> detail
+                                        cGenres.any { it in sourceGenres } -> detail
+                                        else -> null
+                                    }
+                                }
+                            }
+                            dao.updateSimilarArtistResolved(
+                                sourceArtist = key, similarArtist = sim.name,
+                                itemId = matched?.itemId, provider = matched?.provider,
+                                name = matched?.name, imageUrl = matched?.imageUrl, uri = matched?.uri,
+                                resolvedAt = now
+                            )
+                            matched
                         }
                     }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "Resolve similar '${sim.name}' failed: ${e.message}")
+                    null
                 }
-                dao.updateSimilarArtistResolved(
-                    sourceArtist = key, similarArtist = sim.name,
-                    itemId = matched?.itemId, provider = matched?.provider,
-                    name = matched?.name, imageUrl = matched?.imageUrl, uri = matched?.uri,
-                    resolvedAt = now
-                )
-                matched
-            }
+            }.filterNotNull()
             _similarArtists.value = resolved
+            if (resolved.isEmpty() && timedOut.get()) providerHealthReporter.reportSearchTimeout()
         } catch (e: Exception) {
             Log.w(TAG, "Load similar artists failed: ${e.message}")
         }
@@ -1280,6 +1312,37 @@ class ArtistDetailViewModel @Inject constructor(
         }
     }
 
+    fun toggleArtistLibrary() {
+        val a = _artist.value ?: return
+        val inLibrary = _artistInLibrary.value
+        viewModelScope.launch {
+            try {
+                if (inLibrary) {
+                    musicRepository.removeFromLibrary(MediaType.ARTIST, a.uri, a.itemId)
+                } else {
+                    musicRepository.addToLibrary(a.uri)
+                }
+                _artistInLibrary.value = !inLibrary
+            } catch (e: Exception) {
+                Log.w(TAG, "toggleArtistLibrary failed: ${e.message}")
+            }
+        }
+    }
+
+    fun toggleLibrary(uri: String, mediaType: MediaType, itemId: String, currentlyInLibrary: Boolean) {
+        viewModelScope.launch {
+            try {
+                if (currentlyInLibrary) {
+                    musicRepository.removeFromLibrary(mediaType, uri, itemId)
+                } else {
+                    musicRepository.addToLibrary(uri)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "toggleLibrary failed: ${e.message}")
+            }
+        }
+    }
+
     fun toggleArtistBlocked(artistUri: String?, artistName: String?) {
         val uri = MediaIdentity.canonicalArtistKey(uri = artistUri) ?: return
         viewModelScope.launch {
@@ -1304,6 +1367,9 @@ class AlbumDetailViewModel @Inject constructor(
 
     private val _album = MutableStateFlow<Album?>(null)
     val album: StateFlow<Album?> = _album.asStateFlow()
+
+    private val _albumInLibrary = MutableStateFlow(false)
+    val albumInLibrary: StateFlow<Boolean> = _albumInLibrary.asStateFlow()
 
     private val _tracks = MutableStateFlow<List<Track>>(emptyList())
     val tracks: StateFlow<List<Track>> = _tracks.asStateFlow()
@@ -1376,6 +1442,7 @@ class AlbumDetailViewModel @Inject constructor(
                     _tracks.value = musicRepository.getAlbumTracks(itemId, provider)
                 }
             }
+            _albumInLibrary.value = _album.value.isInLibrary()
         } catch (e: Exception) {
             Log.w(TAG, "Load album detail failed: ${e.message}")
         }
@@ -1485,6 +1552,37 @@ class AlbumDetailViewModel @Inject constructor(
                 _album.update { it?.copy(favorite = !a.favorite) }
             } catch (e: Exception) {
                 Log.w(TAG, "toggleAlbumFavorite failed: ${e.message}")
+            }
+        }
+    }
+
+    fun toggleAlbumLibrary() {
+        val a = _album.value ?: return
+        val inLibrary = _albumInLibrary.value
+        viewModelScope.launch {
+            try {
+                if (inLibrary) {
+                    musicRepository.removeFromLibrary(MediaType.ALBUM, a.uri, a.itemId)
+                } else {
+                    musicRepository.addToLibrary(a.uri)
+                }
+                _albumInLibrary.value = !inLibrary
+            } catch (e: Exception) {
+                Log.w(TAG, "toggleAlbumLibrary failed: ${e.message}")
+            }
+        }
+    }
+
+    fun toggleLibrary(uri: String, mediaType: MediaType, itemId: String, currentlyInLibrary: Boolean) {
+        viewModelScope.launch {
+            try {
+                if (currentlyInLibrary) {
+                    musicRepository.removeFromLibrary(mediaType, uri, itemId)
+                } else {
+                    musicRepository.addToLibrary(uri)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "toggleLibrary failed: ${e.message}")
             }
         }
     }
@@ -1932,6 +2030,20 @@ class PlaylistDetailViewModel @Inject constructor(
         }
     }
 
+    fun toggleLibrary(uri: String, mediaType: MediaType, itemId: String, currentlyInLibrary: Boolean) {
+        viewModelScope.launch {
+            try {
+                if (currentlyInLibrary) {
+                    musicRepository.removeFromLibrary(mediaType, uri, itemId)
+                } else {
+                    musicRepository.addToLibrary(uri)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "toggleLibrary failed: ${e.message}")
+            }
+        }
+    }
+
     fun toggleArtistBlocked(artistUri: String?, artistName: String?) {
         val uri = MediaIdentity.canonicalArtistKey(uri = artistUri) ?: return
         viewModelScope.launch {
@@ -1951,3 +2063,22 @@ class PlaylistDetailViewModel @Inject constructor(
         )
     }
 }
+
+/**
+ * Library membership signal, mirroring how the MA web UI gates its add/remove-from-library
+ * actions: an item is in the library when its (resolved) provider is `library`, i.e. its URI
+ * is a `library://` URI. Provider-specific items (spotify, deezer, ...) are not yet in the
+ * library and can be added.
+ */
+/**
+ * Per-call timeout for the MA RPCs that resolve a Last.fm similar-artist name to a playable
+ * MA artist. `music/search` gathers every provider server-side with no per-provider timeout, so
+ * a single slow/throttled provider can hang the call for minutes. We cap it short and degrade.
+ */
+private const val SIMILAR_RESOLVE_TIMEOUT_MS = 7_000L
+
+private fun isLibraryMember(provider: String?, uri: String?): Boolean =
+    provider == "library" || uri?.startsWith("library://") == true
+
+private fun Album?.isInLibrary(): Boolean = isLibraryMember(this?.provider, this?.uri)
+private fun Artist?.isInLibrary(): Boolean = isLibraryMember(this?.provider, this?.uri)

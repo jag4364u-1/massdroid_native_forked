@@ -62,6 +62,7 @@ import net.asksakis.massdroidv2.ui.components.LocalMiniPlayerPadding
 import net.asksakis.massdroidv2.ui.components.fadingEdges
 import net.asksakis.massdroidv2.ui.components.MediaItemGrid
 import net.asksakis.massdroidv2.ui.components.MediaItemRow
+import net.asksakis.massdroidv2.ui.components.RemoveFromLibraryDialog
 
 @Composable
 fun LibraryScreen(
@@ -118,6 +119,7 @@ fun LibraryScreen(
 
     // Action sheet state
     var actionSheetItem by remember { mutableStateOf<ActionSheetItem?>(null) }
+    var pendingLibraryRemove by remember { mutableStateOf<ActionSheetItem?>(null) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
     var deletePlaylistTarget by remember { mutableStateOf<ActionSheetItem?>(null) }
     var addToPlaylistTrackUri by remember { mutableStateOf<String?>(null) }
@@ -347,19 +349,6 @@ fun LibraryScreen(
                                 primaryArtistName = track.artistNames.split(",").firstOrNull()?.trim()
                             )
                         },
-                        onMoreClick = { track ->
-                            actionSheetItem = ActionSheetItem(
-                                title = track.name,
-                                subtitle = track.artistNames,
-                                uri = track.uri,
-                                imageUrl = track.imageUrl,
-                                favorite = track.favorite,
-                                mediaType = MediaType.TRACK,
-                                itemId = track.itemId,
-                                primaryArtistUri = track.artistUri,
-                                primaryArtistName = track.artistNames.split(",").firstOrNull()?.trim()
-                            )
-                        },
                         onPlayClick = { viewModel.quickPlay(it.uri) },
                         providerDomains = { it.providerDomains }
                     )
@@ -545,8 +534,9 @@ fun LibraryScreen(
                             )
                         )
                     } else {
-                        viewModel.removeFromLibrary(target.mediaType, target.itemId, target.uri)
+                        pendingLibraryRemove = target
                     }
+                    actionSheetItem = null
                 }
             },
             extraActions = if (target.mediaType == MediaType.TRACK) listOf(
@@ -591,6 +581,16 @@ fun LibraryScreen(
             onCreatePlaylist = { name -> viewModel.createPlaylistAndAddTrack(name, trackUri) },
             onRemoveFromPlaylist = { playlist -> viewModel.removeTrackFromPlaylist(playlist, trackUri) },
             containsTrack = playlistContainsTrack
+        )
+    }
+
+    pendingLibraryRemove?.let { target ->
+        RemoveFromLibraryDialog(
+            itemTitle = target.title,
+            onConfirm = {
+                viewModel.removeFromLibrary(target.mediaType, target.itemId, target.uri)
+            },
+            onDismiss = { pendingLibraryRemove = null }
         )
     }
 

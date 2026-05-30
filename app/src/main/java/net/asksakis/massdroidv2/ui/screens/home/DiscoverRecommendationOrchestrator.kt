@@ -5,7 +5,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import net.asksakis.massdroidv2.data.lastfm.LastFmGenreResolver
+import net.asksakis.massdroidv2.data.util.mapMaBounded
 import net.asksakis.massdroidv2.data.lastfm.LastFmSimilarResolver
 import net.asksakis.massdroidv2.domain.model.Album
 import net.asksakis.massdroidv2.domain.model.Artist
@@ -29,6 +31,7 @@ private const val DISCOVERY_MMR_LAMBDA = 0.35
 private const val DISCOVERY_PRIMARY_GENRE_CAP = 2
 private const val DISCOVERY_ALBUM_GENRE_CAP = 2
 private const val DISCOVERY_ALBUM_ARTIST_POOL_SIZE = 20
+private const val CANDIDATE_RESOLVE_TIMEOUT_MS = 7_000L
 private const val MIN_DISCOVERY_FOR_RANKING = 10
 private const val DISCOVERY_SEED_RANDOMIZATION_POOL = 3
 private const val DISCOVERY_PAD_RANDOMIZATION_POOL = 20
@@ -48,7 +51,8 @@ class DiscoverRecommendationOrchestrator(
     private val genreRepository: net.asksakis.massdroidv2.data.genre.GenreRepository,
     @Suppress("unused") private val recommendationEngine: RecommendationEngine,
     private val lastFmSimilarResolver: LastFmSimilarResolver,
-    private val lastFmGenreResolver: LastFmGenreResolver
+    private val lastFmGenreResolver: LastFmGenreResolver,
+    private val providerHealthReporter: net.asksakis.massdroidv2.data.util.ProviderHealthReporter
 ) {
 
     suspend fun buildDiscovery(
@@ -152,9 +156,9 @@ class DiscoverRecommendationOrchestrator(
             .sortedByDescending { it.compositeScore() }
             .take(DISCOVERY_RESOLVE_BUDGET)
 
-        val resolved = toResolve.map { candidate ->
-            async { candidate to resolveLastFmCandidate(candidate.name) }
-        }.awaitAll()
+        val resolved = toResolve.mapMaBounded { candidate ->
+            candidate to resolveLastFmCandidate(candidate.name)
+        }
 
         val filtered = resolved
             .mapNotNull { (candidate, artist) -> if (artist != null) candidate to artist else null }
@@ -194,14 +198,10 @@ class DiscoverRecommendationOrchestrator(
             "Albums artist pool: ${capped.size} (cap=$DISCOVERY_ALBUM_GENRE_CAP, max=$DISCOVERY_ALBUM_ARTIST_POOL_SIZE)"
         )
 
-        val albumPairs = coroutineScope {
-            capped.map { (candidate, artist) ->
-                async {
-                    val album = pickBestAlbumForArtist(artist, recentAlbumKeys)
-                    if (album != null) Triple(candidate, artist, album) else null
-                }
-            }.awaitAll().filterNotNull()
-        }
+        val albumPairs = capped.mapMaBounded { (candidate, artist) ->
+            val album = pickBestAlbumForArtist(artist, recentAlbumKeys)
+            if (album != null) Triple(candidate, artist, album) else null
+        }.filterNotNull()
 
         if (albumPairs.isEmpty()) return emptyList()
 
@@ -461,22 +461,35 @@ class DiscoverRecommendationOrchestrator(
     }
 
     @Suppress("TooGenericExceptionCaught")
-    private suspend fun resolveLastFmCandidate(similarName: String): Artist? = try {
-        val results = musicRepository.search(similarName, listOf(MediaType.ARTIST), limit = 5)
-        val match = results.artists.firstOrNull { it.name.equals(similarName, ignoreCase = true) }
-            ?: return null
-        try {
-            musicRepository.getArtist(match.itemId, match.provider) ?: match
+    private suspend fun resolveLastFmCandidate(similarName: String): Artist? {
+        return try {
+            // Short timeout: `music/search` gathers every provider server-side with no per-provider
+            // timeout, so a slow/throttled provider would hang this for minutes. On timeout we skip
+            // the candidate and flag the degraded state so the user gets a single transient notice.
+            val results = withTimeoutOrNull(CANDIDATE_RESOLVE_TIMEOUT_MS) {
+                musicRepository.search(similarName, listOf(MediaType.ARTIST), limit = 5)
+            }
+            if (results == null) {
+                providerHealthReporter.reportSearchTimeout()
+                return null
+            }
+            val match = results.artists.firstOrNull { it.name.equals(similarName, ignoreCase = true) }
+                ?: return null
+            try {
+                withTimeoutOrNull(CANDIDATE_RESOLVE_TIMEOUT_MS) {
+                    musicRepository.getArtist(match.itemId, match.provider)
+                } ?: match
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                match
+            }
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
-            match
+        } catch (e: Exception) {
+            Log.w(ORCHESTRATOR_TAG, "Resolve failed for $similarName: ${e.message}")
+            null
         }
-    } catch (e: CancellationException) {
-        throw e
-    } catch (e: Exception) {
-        Log.w(ORCHESTRATOR_TAG, "Resolve failed for $similarName: ${e.message}")
-        null
     }
 
     private fun buildProviderArtistsFallback(
