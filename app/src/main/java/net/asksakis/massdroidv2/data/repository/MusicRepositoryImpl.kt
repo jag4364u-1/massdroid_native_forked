@@ -73,6 +73,14 @@ class MusicRepositoryImpl @Inject constructor(
         return parseMediaItems(result).mapNotNull { it.toRadio() }
     }
 
+    override suspend fun getAudiobooks(search: String?, limit: Int, offset: Int, orderBy: String?, favoriteOnly: Boolean, providerFilter: List<String>?): List<Track> {
+        val result = wsClient.sendCommand(
+            MaCommands.Music.AUDIOBOOKS_LIBRARY_ITEMS,
+            LibraryItemsArgs(search, limit, offset, orderBy, favoriteOnly, providerFilter)
+        )
+        return parseMediaItems(result).mapNotNull { it.toTrack() }
+    }
+
     override suspend fun getArtist(itemId: String, provider: String, lazy: Boolean): Artist? {
         val result = wsClient.sendCommand(
             MaCommands.Music.ARTISTS_GET,
@@ -608,7 +616,9 @@ class MusicRepositoryImpl @Inject constructor(
     }
 
     private fun ServerMediaItem.toTrack(): Track? {
-        if (mediaType.isNotEmpty() && mediaType != "track") return null
+        // Tracks plus audiobooks (a single playable item with chapters). Library/search track
+        // endpoints only ever return "track"; the audiobook path is the queue's current item.
+        if (mediaType.isNotEmpty() && mediaType != "track" && mediaType != "audiobook") return null
         if (isPlayable == false) {
             Log.w(TAG, "Dropping unplayable track '$name' uri=$uri path=$path")
             return null
@@ -647,7 +657,11 @@ class MusicRepositoryImpl @Inject constructor(
             providerDomains = extractProviderDomains(),
             lyrics = metadata?.lyrics,
             lrcLyrics = metadata?.lrcLyrics,
-            dateAdded = dateAdded
+            dateAdded = dateAdded,
+            mediaType = MediaType.fromApi(mediaType) ?: MediaType.TRACK,
+            chapters = toChapters(),
+            authors = authors ?: emptyList(),
+            narrators = narrators ?: emptyList()
         )
     }
 

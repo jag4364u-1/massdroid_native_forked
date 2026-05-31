@@ -157,12 +157,24 @@ fun NowPlayingScreen(
     val isSendspinPlayer by viewModel.isSendspinPlayer.collectAsStateWithLifecycle()
     val cachedTrackDisplay by viewModel.cachedTrackDisplay.collectAsStateWithLifecycle()
     val adjacentArtwork by viewModel.adjacentArtwork.collectAsStateWithLifecycle()
+    val isAudiobook by viewModel.isAudiobook.collectAsStateWithLifecycle()
+    val chapters by viewModel.chapters.collectAsStateWithLifecycle()
+    val currentChapterIndex by viewModel.currentChapterIndex.collectAsStateWithLifecycle()
     val title = currentTrack?.name ?: player?.currentMedia?.title
         ?: cachedTrackDisplay?.title ?: "No track"
-    val artist = currentTrack?.artistNames ?: player?.currentMedia?.artist
-        ?: cachedTrackDisplay?.artist ?: ""
-    val album = currentTrack?.albumName ?: player?.currentMedia?.album
-        ?: cachedTrackDisplay?.album ?: ""
+    // For an audiobook the artist/album lines carry author + chapter progress.
+    val artist = if (isAudiobook && currentTrack?.authors?.isNotEmpty() == true) {
+        currentTrack.authors.joinToString(", ")
+    } else {
+        currentTrack?.artistNames ?: player?.currentMedia?.artist
+            ?: cachedTrackDisplay?.artist ?: ""
+    }
+    val album = if (isAudiobook && chapters.isNotEmpty() && currentChapterIndex >= 0) {
+        "Chapter ${currentChapterIndex + 1} of ${chapters.size}"
+    } else {
+        currentTrack?.albumName ?: player?.currentMedia?.album
+            ?: cachedTrackDisplay?.album ?: ""
+    }
     val imageUrl = currentTrack?.imageUrl ?: queueState?.currentItem?.imageUrl
         ?: player?.currentMedia?.imageUrl ?: cachedTrackDisplay?.imageUrl
     val duration = currentTrack?.duration ?: queueState?.currentItem?.duration
@@ -393,6 +405,8 @@ fun NowPlayingScreen(
             hasOtherPlayers = otherPlayers.isNotEmpty(),
             sleepTimerActive = sleepTimerActive,
             sleepTimerLabel = sleepTimerLabel,
+            chapterCount = if (isAudiobook) chapters.size else 0,
+            onShowChapters = { showQueueSheet = true },
             onDismiss = { showPlayerMenu = false },
             onPlayerSettings = {
                 showPlayerMenu = false

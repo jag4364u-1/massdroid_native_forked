@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.PersonAdd
@@ -42,6 +43,8 @@ internal fun PlayerOptionsSheet(
     hasOtherPlayers: Boolean,
     sleepTimerActive: Boolean,
     sleepTimerLabel: String,
+    chapterCount: Int,
+    onShowChapters: () -> Unit,
     onDismiss: () -> Unit,
     onPlayerSettings: () -> Unit,
     onTransferQueue: () -> Unit,
@@ -88,6 +91,29 @@ internal fun PlayerOptionsSheet(
                 },
                 modifier = Modifier.clickable(onClick = onPlayerSettings)
             )
+            if (chapterCount > 0) {
+                ListItem(
+                    colors = SheetDefaults.listItemColors(),
+                    headlineContent = { Text("Chapters") },
+                    supportingContent = {
+                        Text(
+                            "Jump to a chapter ($chapterCount)",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    },
+                    leadingContent = {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.MenuBook,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
+                    },
+                    modifier = Modifier.clickable {
+                        onShowChapters()
+                        onDismiss()
+                    }
+                )
+            }
             if (hasOtherPlayers) {
                 ListItem(
                     colors = SheetDefaults.listItemColors(),

@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -76,6 +77,7 @@ internal fun QualityActionRow(
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
+                val isAudiobook by viewModel.isAudiobook.collectAsStateWithLifecycle()
                 val lyricsAvailability by viewModel.lyricsAvailability.collectAsStateWithLifecycle()
                 val lyricsTint = when (lyricsAvailability) {
                     LyricsAvailability.AVAILABLE -> MaterialTheme.colorScheme.primary
@@ -85,29 +87,36 @@ internal fun QualityActionRow(
                 }
                 val lyricsEnabled = lyricsAvailability != LyricsAvailability.LOADING &&
                     lyricsAvailability != LyricsAvailability.UNAVAILABLE
-                MdIconButton(
-                    onClick = {
-                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                        Log.d(
-                            "LyricsDbg",
-                            "icon tap availability=$lyricsAvailability uri=${currentTrack?.uri} title=${currentTrack?.name} enabled=$lyricsEnabled"
+                // Lyrics are meaningless for audiobooks: disable the affordance (the ViewModel
+                // also never resolves lyrics for an audiobook, so no API calls). Keep a same-sized
+                // spacer so the row's icon alignment / centred quality badge stays put.
+                if (isAudiobook) {
+                    Spacer(modifier = Modifier.size(actionButtonSize))
+                } else {
+                    MdIconButton(
+                        onClick = {
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            Log.d(
+                                "LyricsDbg",
+                                "icon tap availability=$lyricsAvailability uri=${currentTrack?.uri} title=${currentTrack?.name} enabled=$lyricsEnabled"
+                            )
+                            when (lyricsAvailability) {
+                                LyricsAvailability.AVAILABLE -> onShowLyrics()
+                                LyricsAvailability.UNKNOWN -> viewModel.loadLyrics()
+                                LyricsAvailability.LOADING,
+                                LyricsAvailability.UNAVAILABLE -> Unit
+                            }
+                        },
+                        modifier = Modifier.size(actionButtonSize),
+                        enabled = lyricsEnabled
+                    ) {
+                        Icon(
+                            Icons.Default.MusicNote,
+                            contentDescription = "Lyrics",
+                            modifier = Modifier.size(actionIconSize),
+                            tint = lyricsTint
                         )
-                        when (lyricsAvailability) {
-                            LyricsAvailability.AVAILABLE -> onShowLyrics()
-                            LyricsAvailability.UNKNOWN -> viewModel.loadLyrics()
-                            LyricsAvailability.LOADING,
-                            LyricsAvailability.UNAVAILABLE -> Unit
-                        }
-                    },
-                    modifier = Modifier.size(actionButtonSize),
-                    enabled = lyricsEnabled
-                ) {
-                    Icon(
-                        Icons.Default.MusicNote,
-                        contentDescription = "Lyrics",
-                        modifier = Modifier.size(actionIconSize),
-                        tint = lyricsTint
-                    )
+                    }
                 }
             }
             AudioQualityBadges(

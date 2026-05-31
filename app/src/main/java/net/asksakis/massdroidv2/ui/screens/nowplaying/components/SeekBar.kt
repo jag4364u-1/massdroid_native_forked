@@ -22,6 +22,8 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import net.asksakis.massdroidv2.ui.util.formatPlaybackTime
+import net.asksakis.massdroidv2.ui.util.isLongFormDuration
 
 /**
  * Slider with a synchronized text label pair (current / total). While the
@@ -97,15 +99,9 @@ internal fun SeekBar(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             val timeStyle = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.bodySmall
-            Text(formatTime(displayValue.toDouble()), style = timeStyle)
-            Text(formatTime(duration), style = timeStyle)
+            val longForm = isLongFormDuration(duration)
+            Text(formatPlaybackTime(displayValue.toDouble(), padToHours = longForm), style = timeStyle)
+            Text(formatPlaybackTime(duration, padToHours = longForm), style = timeStyle)
         }
     }
-}
-
-private fun formatTime(seconds: Double): String {
-    val totalSeconds = seconds.toInt()
-    val mins = totalSeconds / 60
-    val secs = totalSeconds % 60
-    return "%d:%02d".format(mins, secs)
 }

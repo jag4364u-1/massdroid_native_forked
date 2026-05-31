@@ -121,6 +121,10 @@ data class ServerMediaItem(
     val artists: List<ServerMediaItem>? = null,
     val album: ServerMediaItem? = null,
     val metadata: MediaItemMetadata? = null,
+    val authors: List<String>? = null,
+    val narrators: List<String>? = null,
+    @SerialName("fully_played") val fullyPlayed: Boolean? = null,
+    @SerialName("resume_position_ms") val resumePositionMs: Long? = null,
     val sort_name: String? = null,
     val version: String? = null,
     val position: Int? = null,
@@ -164,7 +168,16 @@ data class MediaItemMetadata(
     val label: String? = null,
     val links: List<MediaItemLink>? = null,
     val lyrics: String? = null,
-    @SerialName("lrc_lyrics") val lrcLyrics: String? = null
+    @SerialName("lrc_lyrics") val lrcLyrics: String? = null,
+    val chapters: List<ServerChapter>? = null
+)
+
+@Serializable
+data class ServerChapter(
+    val position: Int = 0,
+    val name: String = "",
+    val start: Double = 0.0,
+    val end: Double? = null
 )
 
 @Serializable

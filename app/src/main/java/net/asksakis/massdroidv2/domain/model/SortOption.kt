@@ -21,7 +21,8 @@ enum class LibraryTabKey(
     TRACKS(index = 2, defaultDisplayMode = LibraryDisplayMode.GRID),
     PLAYLISTS(index = 3, defaultDisplayMode = LibraryDisplayMode.GRID),
     RADIOS(index = 4, defaultDisplayMode = LibraryDisplayMode.GRID),
-    BROWSE(index = 5, defaultDisplayMode = LibraryDisplayMode.LIST);
+    AUDIOBOOKS(index = 5, defaultDisplayMode = LibraryDisplayMode.LIST),
+    BROWSE(index = 6, defaultDisplayMode = LibraryDisplayMode.LIST);
 
     companion object {
         fun fromIndex(index: Int): LibraryTabKey? = entries.firstOrNull { it.index == index }

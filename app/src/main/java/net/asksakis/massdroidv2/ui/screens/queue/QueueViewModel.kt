@@ -8,6 +8,8 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import net.asksakis.massdroidv2.domain.model.Chapter
+import net.asksakis.massdroidv2.domain.model.MediaType
 import net.asksakis.massdroidv2.domain.model.PlaybackState
 import net.asksakis.massdroidv2.domain.model.Player
 import net.asksakis.massdroidv2.domain.model.QueueItem
@@ -41,6 +43,37 @@ class QueueViewModel @Inject constructor(
 
     val players: StateFlow<List<Player>> = playerRepository.players
     val sendspinClientId = settingsRepository.sendspinClientId
+
+    /**
+     * Audiobook chapter state. An audiobook is a single queue item whose chapters
+     * are seek markers, so when the current item is an audiobook the queue surface
+     * renders its chapters instead of the (single-row) item list.
+     */
+    val isAudiobook: StateFlow<Boolean> = playerRepository.queueState
+        .map { it?.currentItem?.track?.mediaType == MediaType.AUDIOBOOK }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    val chapters: StateFlow<List<Chapter>> = playerRepository.queueState
+        .map { it?.currentItem?.track?.chapters ?: emptyList() }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    /** Index into [chapters] of the chapter containing the current position, or -1. */
+    val currentChapterIndex: StateFlow<Int> =
+        combine(playerRepository.elapsedTime, chapters) { elapsed, chs ->
+            if (chs.isEmpty()) -1 else chs.indexOfLast { elapsed + 0.001 >= it.start }.coerceAtLeast(0)
+        }.distinctUntilChanged().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), -1)
+
+    val audiobookTitle: StateFlow<String?> = playerRepository.queueState
+        .map { it?.currentItem?.track?.takeIf { t -> t.mediaType == MediaType.AUDIOBOOK }?.name }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
+
+    val audiobookDurationSec: StateFlow<Double> = playerRepository.queueState
+        .map { it?.currentItem?.let { item -> item.track?.duration ?: item.duration } ?: 0.0 }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0.0)
 
     private val _error = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val error: SharedFlow<String> = _error.asSharedFlow()
@@ -115,6 +148,19 @@ class QueueViewModel @Inject constructor(
                 musicRepository.playQueueIndex(id, index)
             } catch (e: Exception) {
                 Log.w(TAG, "playIndex failed: ${e.message}")
+                _error.tryEmit("Not connected to server")
+            }
+        }
+    }
+
+    /** Jump to a chapter by seeking to its start within the current audiobook item. */
+    fun seekToChapter(chapter: Chapter) {
+        val id = queueId ?: return
+        viewModelScope.launch {
+            try {
+                playerRepository.seek(id, chapter.start)
+            } catch (e: Exception) {
+                Log.w(TAG, "seekToChapter failed: ${e.message}")
                 _error.tryEmit("Not connected to server")
             }
         }

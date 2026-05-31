@@ -92,6 +92,7 @@ import net.asksakis.massdroidv2.ui.components.PlayerNameWithBadge
 import net.asksakis.massdroidv2.ui.components.SheetDefaults
 import net.asksakis.massdroidv2.ui.components.SoundWaveIcon
 import net.asksakis.massdroidv2.ui.screens.home.PlayerIcon
+import net.asksakis.massdroidv2.ui.util.formatPlaybackTime
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 
@@ -114,6 +115,12 @@ fun QueueSheet(
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val isPlaying by viewModel.isPlaying.collectAsStateWithLifecycle()
     val currentQueueItemId by viewModel.currentQueueItemId.collectAsStateWithLifecycle()
+    val isAudiobook by viewModel.isAudiobook.collectAsStateWithLifecycle()
+    val chapters by viewModel.chapters.collectAsStateWithLifecycle()
+    val currentChapterIndex by viewModel.currentChapterIndex.collectAsStateWithLifecycle()
+    val audiobookTitle by viewModel.audiobookTitle.collectAsStateWithLifecycle()
+    val audiobookDurationSec by viewModel.audiobookDurationSec.collectAsStateWithLifecycle()
+    val chapterMode = isAudiobook && chapters.isNotEmpty()
     val players by viewModel.players.collectAsStateWithLifecycle()
     val sendspinClientId by viewModel.sendspinClientId.collectAsStateWithLifecycle(initialValue = null)
     var actionSheetItem by remember { mutableStateOf<QueueActionItem?>(null) }
@@ -180,25 +187,43 @@ fun QueueSheet(
                     Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Close")
                 }
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Queue", style = MaterialTheme.typography.titleLarge)
                     Text(
-                        text = "${items.size} tracks",
+                        text = if (chapterMode) audiobookTitle ?: "Chapters" else "Queue",
+                        style = MaterialTheme.typography.titleLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = if (chapterMode) {
+                            val dur = if (audiobookDurationSec > 0) {
+                                " · " + formatPlaybackTime(audiobookDurationSec)
+                            } else ""
+                            "${chapters.size} chapters$dur"
+                        } else {
+                            "${items.size} tracks"
+                        },
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Row {
-                    MdIconButton(onClick = {
-                        viewModel.getPlaylists()
-                        showSaveQueueDialog = true
-                    }) {
-                        Icon(Icons.Default.PlaylistAdd, contentDescription = "Save queue to playlist")
+                    // Chapters aren't reorderable/save-able, so in audiobook mode only
+                    // the transport-relevant transfer action remains.
+                    if (!chapterMode) {
+                        MdIconButton(onClick = {
+                            viewModel.getPlaylists()
+                            showSaveQueueDialog = true
+                        }) {
+                            Icon(Icons.Default.PlaylistAdd, contentDescription = "Save queue to playlist")
+                        }
                     }
                     MdIconButton(onClick = { showQueueMenu = true }) {
                         Icon(Icons.Default.SwapHoriz, contentDescription = "Transfer queue")
                     }
-                    MdIconButton(onClick = { viewModel.clearQueue() }) {
-                        Icon(Icons.Default.DeleteSweep, contentDescription = "Clear queue")
+                    if (!chapterMode) {
+                        MdIconButton(onClick = { viewModel.clearQueue() }) {
+                            Icon(Icons.Default.DeleteSweep, contentDescription = "Clear queue")
+                        }
                     }
                 }
             }
@@ -216,6 +241,13 @@ fun QueueSheet(
                 ) {
                     CircularProgressIndicator()
                 }
+            } else if (chapterMode) {
+                ChapterList(
+                    chapters = chapters,
+                    currentChapterIndex = currentChapterIndex,
+                    isPlaying = isPlaying,
+                    onChapterClick = { viewModel.seekToChapter(it) }
+                )
             } else {
                 LazyColumn(
                     state = lazyListState,
@@ -505,4 +537,101 @@ private fun <T> MutableList<T>.move(fromIndex: Int, toIndex: Int) {
     if (fromIndex == toIndex || fromIndex !in indices || toIndex !in indices) return
     val item = removeAt(fromIndex)
     add(toIndex, item)
+}
+
+/**
+ * Chapter list for an audiobook (the queue's single item). Each row seeks to the
+ * chapter start. The current chapter is highlighted with the primary color and the
+ * shared EqualizerBars indicator (same pattern as the now-playing queue row); past
+ * chapters are dimmed.
+ */
+@Composable
+private fun ChapterList(
+    chapters: List<net.asksakis.massdroidv2.domain.model.Chapter>,
+    currentChapterIndex: Int,
+    isPlaying: Boolean,
+    onChapterClick: (net.asksakis.massdroidv2.domain.model.Chapter) -> Unit
+) {
+    val lazyListState = rememberLazyListState()
+    var hasScrolled by remember { mutableStateOf(false) }
+    LaunchedEffect(currentChapterIndex, chapters.size) {
+        if (!hasScrolled && currentChapterIndex >= 0 && chapters.isNotEmpty()) {
+            lazyListState.scrollToItem(currentChapterIndex.coerceIn(0, chapters.size - 1), scrollOffset = -200)
+            hasScrolled = true
+        }
+    }
+    LazyColumn(
+        state = lazyListState,
+        modifier = Modifier
+            .fillMaxSize()
+            .windowInsetsPadding(WindowInsets.navigationBars)
+    ) {
+        // Key by list index, not chapter.position: positions are not guaranteed unique
+        // across providers and a collision crashes LazyColumn measure. Index is always unique.
+        itemsIndexed(chapters, key = { index, _ -> index }) { index, chapter ->
+            val isCurrent = index == currentChapterIndex
+            val isPast = currentChapterIndex >= 0 && index < currentChapterIndex
+            ListItem(
+                colors = SheetDefaults.listItemColors(),
+                modifier = Modifier
+                    .clickable { onChapterClick(chapter) }
+                    .then(if (isPast) Modifier.alpha(0.5f) else Modifier),
+                leadingContent = {
+                    Box(
+                        modifier = Modifier.size(40.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (isCurrent && isPlaying) {
+                            net.asksakis.massdroidv2.ui.components.EqualizerBars(
+                                modifier = Modifier.height(16.dp),
+                                barWidth = 2.dp,
+                                spacing = 1.dp,
+                                barCount = 4,
+                                bpm = 90
+                            )
+                        } else {
+                            Text(
+                                text = "${index + 1}",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = if (isCurrent) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                        }
+                    }
+                },
+                headlineContent = {
+                    Text(
+                        text = chapterDisplayName(chapter, index),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        color = if (isCurrent) MaterialTheme.colorScheme.primary else Color.Unspecified
+                    )
+                },
+                supportingContent = {
+                    Text(
+                        text = formatPlaybackTime(chapter.start),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            )
+        }
+    }
+}
+
+private val CHAPTER_SLUG_REGEX = Regex("""^[\w-]+_(?:ch|chapter)_?\d+$""", RegexOption.IGNORE_CASE)
+
+/**
+ * A human chapter title, falling back to "Chapter N" when the provider name is a
+ * slug (e.g. `wonderland_ch_01`) or blank, mirroring the MA web UI presentation.
+ */
+private fun chapterDisplayName(chapter: net.asksakis.massdroidv2.domain.model.Chapter, index: Int): String {
+    val raw = chapter.name.trim()
+    val isSlug = raw.isEmpty() ||
+        CHAPTER_SLUG_REGEX.matches(raw) ||
+        (!raw.contains(' ') && raw.contains('_'))
+    return if (isSlug) "Chapter ${index + 1}" else raw
 }

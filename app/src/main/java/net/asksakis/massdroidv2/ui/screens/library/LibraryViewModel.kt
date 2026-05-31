@@ -73,6 +73,10 @@ class LibraryViewModel @Inject constructor(
     private val _radios = MutableStateFlow<List<Radio>>(emptyList())
     val radios: StateFlow<List<Radio>> = _radios.asStateFlow()
 
+    // Audiobooks are modeled as Track (single playable item; chapters arrive on play).
+    private val _audiobooks = MutableStateFlow<List<Track>>(emptyList())
+    val audiobooks: StateFlow<List<Track>> = _audiobooks.asStateFlow()
+
     private val _editablePlaylists = MutableStateFlow<List<Playlist>>(emptyList())
     val editablePlaylists: StateFlow<List<Playlist>> = _editablePlaylists.asStateFlow()
     private val _isLoadingEditablePlaylists = MutableStateFlow(false)
@@ -148,6 +152,7 @@ class LibraryViewModel @Inject constructor(
     private var hasMoreTracks = true
     private var hasMorePlaylists = true
     private var hasMoreRadios = true
+    private var hasMoreAudiobooks = true
 
     private val _settingsLoaded = MutableStateFlow(false)
     val settingsLoaded: StateFlow<Boolean> = _settingsLoaded.asStateFlow()
@@ -190,6 +195,7 @@ class LibraryViewModel @Inject constructor(
                             2 -> _tracks.value.isEmpty()
                             3 -> _playlists.value.isEmpty()
                             4 -> _radios.value.isEmpty()
+                            5 -> _audiobooks.value.isEmpty()
                             else -> false
                         }
                         if (isEmpty) reloadCurrentTab()
@@ -224,6 +230,7 @@ class LibraryViewModel @Inject constructor(
         _tracks.value = emptyList()
         _playlists.value = emptyList()
         _radios.value = emptyList()
+        _audiobooks.value = emptyList()
         _editablePlaylists.value = emptyList()
         _playlistContainsTrack.value = emptySet()
         _browseItemsRaw.value = emptyList()
@@ -236,6 +243,7 @@ class LibraryViewModel @Inject constructor(
         hasMoreTracks = true
         hasMorePlaylists = true
         hasMoreRadios = true
+        hasMoreAudiobooks = true
         pendingReload = false
         _isLoading.value = false
         _isLoadingMore.value = false
@@ -369,7 +377,8 @@ class LibraryViewModel @Inject constructor(
             2 -> loadTracks()
             3 -> loadPlaylists()
             4 -> loadRadios()
-            5 -> applyBrowseFilterSort()
+            5 -> loadAudiobooks()
+            6 -> applyBrowseFilterSort()
         }
     }
 
@@ -667,6 +676,47 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
+    fun loadAudiobooks() {
+        viewModelScope.launch {
+            _isLoading.value = true
+            try {
+                val items = musicRepository.getAudiobooks(
+                    search = currentSearch,
+                    limit = PAGE_SIZE,
+                    offset = 0,
+                    orderBy = currentOrderBy,
+                    favoriteOnly = currentFavoriteOnly,
+                    providerFilter = providerFilterArgs()
+                )
+                _audiobooks.value = filterBySelectedProviders(items) { it.providerDomains }
+                hasMoreAudiobooks = items.size >= PAGE_SIZE
+            } catch (_: Exception) {}
+            _isLoading.value = false
+        }
+    }
+
+    fun loadMoreAudiobooks() {
+        if (_isLoadingMore.value || !hasMoreAudiobooks) return
+        _isLoadingMore.value = true
+        viewModelScope.launch {
+            try {
+                val items = musicRepository.getAudiobooks(
+                    search = currentSearch,
+                    limit = PAGE_SIZE,
+                    offset = _audiobooks.value.size,
+                    orderBy = currentOrderBy,
+                    favoriteOnly = currentFavoriteOnly,
+                    providerFilter = providerFilterArgs()
+                )
+                _audiobooks.value = _audiobooks.value + filterBySelectedProviders(items) { it.providerDomains }
+                hasMoreAudiobooks = items.size >= PAGE_SIZE
+            } catch (_: Exception) {
+            } finally {
+                _isLoadingMore.value = false
+            }
+        }
+    }
+
     fun loadBrowse(path: String? = null) {
         viewModelScope.launch {
             _isLoading.value = true
@@ -929,6 +979,7 @@ class LibraryViewModel @Inject constructor(
                     MediaType.RADIO -> _radios.update { list ->
                         list.map { if (it.itemId == itemId) it.copy(favorite = !currentFavorite) else it }
                     }
+                    MediaType.AUDIOBOOK -> {}
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "toggleFavorite failed: ${e.message}")
@@ -946,6 +997,7 @@ class LibraryViewModel @Inject constructor(
                     MediaType.TRACK -> _tracks.update { list -> list.filter { it.itemId != itemId } }
                     MediaType.PLAYLIST -> _playlists.update { list -> list.filter { it.itemId != itemId } }
                     MediaType.RADIO -> _radios.update { list -> list.filter { it.itemId != itemId } }
+                    MediaType.AUDIOBOOK -> {}
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "removeFromLibrary failed: ${e.message}")

@@ -72,13 +72,14 @@ fun LibraryScreen(
     viewModel: LibraryViewModel = hiltViewModel()
 ) {
     val selectedTab by viewModel.currentTab.collectAsStateWithLifecycle()
-    val tabs = listOf("Artists", "Albums", "Tracks", "Playlists", "Radios", "Browse")
+    val tabs = listOf("Artists", "Albums", "Tracks", "Playlists", "Radios", "Audiobooks", "Browse")
 
     val artists by viewModel.artists.collectAsStateWithLifecycle()
     val albums by viewModel.albums.collectAsStateWithLifecycle()
     val tracks by viewModel.tracks.collectAsStateWithLifecycle()
     val playlists by viewModel.playlists.collectAsStateWithLifecycle()
     val radios by viewModel.radios.collectAsStateWithLifecycle()
+    val audiobooks by viewModel.audiobooks.collectAsStateWithLifecycle()
     val browseItems by viewModel.browseItems.collectAsStateWithLifecycle()
     val browsePath by viewModel.browsePath.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
@@ -100,7 +101,7 @@ fun LibraryScreen(
     val settingsLoaded by viewModel.settingsLoaded.collectAsStateWithLifecycle()
     val blockedArtistUris by viewModel.blockedArtistUris.collectAsStateWithLifecycle()
     val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
-    val isBrowseTab = selectedTab == 5
+    val isBrowseTab = selectedTab == 6
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     var showControlsSheet by remember { mutableStateOf(false) }
     var landscapeSearchExpanded by remember { mutableStateOf(false) }
@@ -134,7 +135,8 @@ fun LibraryScreen(
             2 -> if (tracks.isEmpty()) viewModel.loadTracks()
             3 -> if (playlists.isEmpty()) viewModel.loadPlaylists()
             4 -> if (radios.isEmpty()) viewModel.loadRadios()
-            5 -> if (browseItems.isEmpty()) viewModel.loadBrowse()
+            5 -> if (audiobooks.isEmpty()) viewModel.loadAudiobooks()
+            6 -> if (browseItems.isEmpty()) viewModel.loadBrowse()
         }
     }
 
@@ -149,6 +151,7 @@ fun LibraryScreen(
                     2 -> "Search tracks..."
                     3 -> "Search playlists..."
                     4 -> "Search radios..."
+                    5 -> "Search audiobooks..."
                     else -> "Search..."
                 },
                 onSearchChange = { viewModel.updateSearch(it) },
@@ -180,6 +183,7 @@ fun LibraryScreen(
                                 2 -> "Search tracks..."
                                 3 -> "Search playlists..."
                                 4 -> "Search radios..."
+                                5 -> "Search audiobooks..."
                                 else -> "Search..."
                             }
                         )
@@ -414,7 +418,33 @@ fun LibraryScreen(
                         onPlayClick = { viewModel.quickPlay(it.uri) },
                         providerDomains = { it.providerDomains }
                     )
-                    5 -> BrowseList(
+                    5 -> MediaList(
+                        items = audiobooks,
+                        displayMode = displayMode,
+                        isLoadingMore = isLoadingMore,
+                        onLoadMore = { viewModel.loadMoreAudiobooks() },
+                        key = { it.uri },
+                        title = { it.name },
+                        subtitle = { it.authors.joinToString(", ") },
+                        imageUrl = { it.imageUrl },
+                        favorite = { it.favorite },
+                        onClick = { viewModel.quickPlay(it.uri) },
+                        onLongClick = { book ->
+                            actionSheetItem = ActionSheetItem(
+                                title = book.name,
+                                subtitle = book.authors.joinToString(", "),
+                                uri = book.uri,
+                                imageUrl = book.imageUrl,
+                                favorite = book.favorite,
+                                mediaType = MediaType.AUDIOBOOK,
+                                itemId = book.itemId,
+                                inLibrary = book.uri.startsWith("library://")
+                            )
+                        },
+                        onPlayClick = { viewModel.quickPlay(it.uri) },
+                        providerDomains = { it.providerDomains }
+                    )
+                    6 -> BrowseList(
                         items = browseItems,
                         isLoading = isLoading,
                         browsePath = browsePath,

@@ -1661,6 +1661,20 @@ fun ServerPlayer.toDomain(
     }
 )
 
+/**
+ * Map MA `metadata.chapters` (audiobook/podcast) to domain [Chapter]s.
+ *
+ * Deduplicated by start time and sorted by start: some files/providers emit each chapter
+ * twice (observed: 12 chapters delivered as 24 with repeated positions/starts), which would
+ * both crash the chapter LazyColumn on duplicate keys and break chapter navigation.
+ */
+fun ServerMediaItem.toChapters(): List<Chapter> =
+    metadata?.chapters
+        ?.map { Chapter(position = it.position, name = it.name, start = it.start, end = it.end) }
+        ?.distinctBy { it.start }
+        ?.sortedBy { it.start }
+        ?: emptyList()
+
 fun ServerQueue.toDomain(wsClient: MaWebSocketClient): QueueState = QueueState(
     queueId = queueId,
     shuffleEnabled = shuffleEnabled,
@@ -1705,7 +1719,11 @@ fun ServerQueue.toDomain(wsClient: MaWebSocketClient): QueueState = QueueState(
                     genres = mi.metadata?.genres ?: emptyList(),
                     year = (mi.album?.year ?: mi.year)?.takeIf { it > 0 },
                     lyrics = mi.metadata?.lyrics,
-                    lrcLyrics = mi.metadata?.lrcLyrics
+                    lrcLyrics = mi.metadata?.lrcLyrics,
+                    mediaType = MediaType.fromApi(mi.mediaType) ?: MediaType.TRACK,
+                    chapters = mi.toChapters(),
+                    authors = mi.authors ?: emptyList(),
+                    narrators = mi.narrators ?: emptyList()
                 )
             },
             imageUrl = item.mediaItem?.resolveImageUrl(wsClient)

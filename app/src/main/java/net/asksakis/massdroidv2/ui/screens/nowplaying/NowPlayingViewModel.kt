@@ -26,6 +26,7 @@ import net.asksakis.massdroidv2.data.lyrics.LyricsProvider
 import net.asksakis.massdroidv2.data.sendspin.SendspinState
 import net.asksakis.massdroidv2.service.SleepTimerBridge
 import net.asksakis.massdroidv2.data.sendspin.SyncState
+import net.asksakis.massdroidv2.domain.model.Chapter
 import net.asksakis.massdroidv2.domain.model.MediaType
 import net.asksakis.massdroidv2.domain.model.Playlist
 import net.asksakis.massdroidv2.domain.model.PlaybackState
@@ -173,7 +174,8 @@ class NowPlayingViewModel @Inject constructor(
         // lyrics ownership, so sticking to it keeps the icon stable
         // while the actual playback path settles.
         queueState
-            .map { it?.currentItem?.track }
+            // Audiobooks are not songs: never resolve/show lyrics for them.
+            .map { it?.currentItem?.track?.takeUnless { t -> t.mediaType == MediaType.AUDIOBOOK } }
             .distinctUntilChanged { old, new -> old?.uri == new?.uri }
             .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
@@ -226,6 +228,26 @@ class NowPlayingViewModel @Inject constructor(
     ) { player, clientId ->
         clientId != null && player?.playerId == clientId
     }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(), false)
+    /**
+     * Audiobook-derived UI state. An audiobook is a single playable queue item
+     * whose chapters are seek markers (see [Chapter]). The screen branches on
+     * these StateFlows; composables stay dumb (no scattered isAudiobook booleans).
+     */
+    val isAudiobook: StateFlow<Boolean> = queueState
+        .map { it?.currentItem?.track?.mediaType == MediaType.AUDIOBOOK }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    val chapters: StateFlow<List<Chapter>> = queueState
+        .map { it?.currentItem?.track?.chapters ?: emptyList() }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Index into [chapters] of the chapter containing the current position, or -1. */
+    val currentChapterIndex: StateFlow<Int> = combine(elapsedTime, chapters) { elapsed, chs ->
+        if (chs.isEmpty()) -1 else chs.indexOfLast { elapsed + 0.001 >= it.start }.coerceAtLeast(0)
+    }.distinctUntilChanged().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), -1)
+
     var cachedSendspinClientId: String? = null; private set
     var cachedSendspinAudioFormat = "SMART"; private set
     private var cachedSendspinSyncDelayMs = 0
@@ -246,6 +268,10 @@ class NowPlayingViewModel @Inject constructor(
     init {
         viewModelScope.launch {
             smartListeningRepository.blockedArtistUris.collect { _blockedArtistUris.value = it }
+        }
+        // Clear the optimistic chapter target once the live position reaches it.
+        viewModelScope.launch {
+            currentChapterIndex.collect { if (it == pendingChapterTarget) pendingChapterTarget = -1 }
         }
         viewModelScope.launch {
             sendspinClientId.collect { cachedSendspinClientId = it }
@@ -549,6 +575,10 @@ class NowPlayingViewModel @Inject constructor(
         // metadata so a user that taps twice quickly doesn't fire two
         // play_index commands back-to-back.
         private const val PREVIOUS_TRACK_COOLDOWN_MS = 400L
+
+        // Seconds into a chapter past which "previous" restarts it instead of
+        // jumping to the prior chapter.
+        private const val PREVIOUS_CHAPTER_RESTART_THRESHOLD_S = 3.0
     }
 
     /**
@@ -573,6 +603,51 @@ class NowPlayingViewModel @Inject constructor(
                 _error.tryEmit("Not connected to server")
             }
         }
+    }
+
+    /** Jump to a chapter by seeking to its start. Chapters are markers within one item. */
+    fun seekToChapter(chapter: Chapter) = seek(chapter.start)
+
+    // Optimistic chapter target: the position ticker (and thus currentChapterIndex)
+    // lags a seek by up to ~500ms + server round-trip, so consecutive prev/next presses
+    // would otherwise re-use a stale index and seek to the same chapter. We base the
+    // next press on the last sought chapter until the live index catches up.
+    @Volatile private var pendingChapterTarget = -1
+
+    private fun chapterNavBaseIndex(chs: List<Chapter>): Int =
+        if (pendingChapterTarget in chs.indices) pendingChapterTarget else currentChapterIndex.value
+
+    /**
+     * Audiobook "next" = next chapter (not next queue item: the book is one item).
+     * No-op past the last chapter.
+     */
+    fun nextChapter() {
+        val chs = chapters.value
+        val base = chapterNavBaseIndex(chs)
+        if (base < 0 || base + 1 >= chs.size) return
+        pendingChapterTarget = base + 1
+        seek(chs[base + 1].start)
+    }
+
+    /**
+     * Audiobook "previous": restart the current chapter if more than a few
+     * seconds in, otherwise jump to the previous chapter. Mirrors standard
+     * audiobook-player behavior.
+     */
+    fun previousChapter() {
+        val chs = chapters.value
+        if (chs.isEmpty()) return
+        val base = chapterNavBaseIndex(chs)
+        if (base < 0) return
+        val current = chs[base]
+        val elapsed = elapsedTime.value
+        val target = if (elapsed - current.start > PREVIOUS_CHAPTER_RESTART_THRESHOLD_S || base == 0) {
+            base
+        } else {
+            base - 1
+        }
+        pendingChapterTarget = target
+        seek(chs[target].start)
     }
 
     fun setSendspinSyncDelayMs(delayMs: Int) {

@@ -1,5 +1,6 @@
 package net.asksakis.massdroidv2.ui.screens.library
 
+import net.asksakis.massdroidv2.ui.util.formatPlaybackTime
 import net.asksakis.massdroidv2.ui.components.MdButton
 import net.asksakis.massdroidv2.ui.components.MdFilledTonalButton
 import net.asksakis.massdroidv2.ui.components.MdIconButton
@@ -412,11 +413,7 @@ private fun AlbumHeader(
 
     if (tracks.isNotEmpty()) {
         val totalSeconds = tracks.mapNotNull { it.duration }.sum()
-        val durationText = if (totalSeconds > 0) {
-            val mins = (totalSeconds / 60).toInt()
-            val secs = (totalSeconds % 60).toInt()
-            "%d:%02d".format(mins, secs)
-        } else null
+        val durationText = if (totalSeconds > 0) formatPlaybackTime(totalSeconds) else null
         val infoParts = mutableListOf("${tracks.size} tracks")
         durationText?.let { infoParts.add(it) }
         Spacer(modifier = Modifier.height(4.dp))
@@ -551,7 +548,7 @@ private fun AlbumTrackItem(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 track.duration?.let { dur ->
                     Text(
-                        "%d:%02d".format((dur / 60).toInt(), (dur % 60).toInt()),
+                        formatPlaybackTime(dur),
                         style = MaterialTheme.typography.bodySmall
                     )
                     Spacer(modifier = Modifier.width(8.dp))

@@ -26,7 +26,24 @@ data class Track(
     val providerDomains: List<String> = emptyList(),
     val lyrics: String? = null,
     val lrcLyrics: String? = null,
-    val dateAdded: String? = null
+    val dateAdded: String? = null,
+    val mediaType: MediaType = MediaType.TRACK,
+    val chapters: List<Chapter> = emptyList(),
+    val authors: List<String> = emptyList(),
+    val narrators: List<String> = emptyList()
+)
+
+/**
+ * A single audiobook (or podcast) chapter marker. The whole audiobook is one playable
+ * item; chapters are seek targets within it (seek to [start] seconds). Mirrors MA's
+ * `MediaItemChapter` (`metadata.chapters`).
+ */
+@Serializable
+data class Chapter(
+    val position: Int,
+    val name: String,
+    val start: Double,
+    val end: Double? = null
 )
 
 @Serializable
@@ -98,12 +115,14 @@ data class BrowseItem(
     val isPlayable: Boolean = false
 )
 
+@Serializable
 enum class MediaType(val apiValue: String) {
     TRACK("track"),
     ALBUM("album"),
     ARTIST("artist"),
     PLAYLIST("playlist"),
-    RADIO("radio");
+    RADIO("radio"),
+    AUDIOBOOK("audiobook");
 
     companion object {
         fun fromApi(value: String): MediaType? = entries.find { it.apiValue == value }

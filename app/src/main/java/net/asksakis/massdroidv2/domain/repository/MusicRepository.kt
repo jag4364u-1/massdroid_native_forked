@@ -9,6 +9,7 @@ interface MusicRepository {
     suspend fun getTracks(search: String? = null, limit: Int = 50, offset: Int = 0, orderBy: String? = null, favoriteOnly: Boolean = false, providerFilter: List<String>? = null): List<Track>
     suspend fun getPlaylists(search: String? = null, limit: Int = 50, offset: Int = 0, orderBy: String? = null, favoriteOnly: Boolean = false, providerFilter: List<String>? = null): List<Playlist>
     suspend fun getRadios(search: String? = null, limit: Int = 50, offset: Int = 0, orderBy: String? = null, favoriteOnly: Boolean = false, providerFilter: List<String>? = null): List<Radio>
+    suspend fun getAudiobooks(search: String? = null, limit: Int = 50, offset: Int = 0, orderBy: String? = null, favoriteOnly: Boolean = false, providerFilter: List<String>? = null): List<Track>
 
     suspend fun getArtist(itemId: String, provider: String, lazy: Boolean = true): Artist?
     suspend fun getAlbum(itemId: String, provider: String, lazy: Boolean = true): Album?
