@@ -36,6 +36,28 @@ class DacDriftValidator(private val tag: String = "AudioStream") {
     @Volatile var prevRawErrorUs = Long.MIN_VALUE
         private set
 
+    // Per-AudioTrack DAC-absolute epoch calibration.
+    // The raw DAC error carries a device-specific CONSTANT bias because it mixes two
+    // AudioTrack frame counters whose epochs are not guaranteed to align across HALs
+    // (AudioTimestamp.framePosition vs getPlaybackHeadPosition / 0). Observed on a clean,
+    // acoustically-aligned startup (absOffset=0, same 25ms pipeline): +18ms on one device,
+    // -62ms on another, -132ms on a third (issue #45). DRIFT cancels this bias; ABSOLUTE
+    // does not. We calibrate it out by capturing the raw error a few samples into the first
+    // aligned stream and subtracting it from every absolute reading thereafter — making the
+    // absolute device-independent (≈0 at the aligned start everywhere) while still measuring
+    // real drift and per-seek cold-start variance. Captured ONCE per AudioTrack (kept across
+    // seeks, since the epoch is a property of the track instance); cleared on resetForNewTrack.
+    @Volatile var epochBaselineUs = Long.MIN_VALUE
+        private set
+    // Raw samples collected to derive the epoch baseline (median, so a transient clock-storm
+    // outlier such as a multi-second raw error can't poison the calibration).
+    private val epochSamples = ArrayList<Long>(EPOCH_CALIBRATION_SAMPLES)
+
+    private companion object {
+        const val EPOCH_CALIBRATION_SAMPLES = 9
+        const val EPOCH_CALIBRATION_SANITY_US = 5_000_000L  // reject |raw| > 5s (clock storm)
+    }
+
     // Divergence state (read/written by engine's checkSync)
     @Volatile var divergenceEma = 0.0
     @Volatile var divergenceSameSignCount = 0
@@ -129,6 +151,20 @@ class DacDriftValidator(private val tag: String = "AudioStream") {
 
         val rawErrorUs = dacServerTimeUs - expectedDacServerTimeUs
 
+        // Epoch calibration window (device-bias removal, once per AudioTrack): collect sane
+        // raw samples and take their median as the absolute baseline. Subtracting it makes the
+        // DAC absolute device-independent (≈0 at the aligned start on every device).
+        if (epochBaselineUs == Long.MIN_VALUE &&
+            kotlin.math.abs(rawErrorUs) < EPOCH_CALIBRATION_SANITY_US
+        ) {
+            epochSamples.add(rawErrorUs)
+            if (epochSamples.size >= EPOCH_CALIBRATION_SAMPLES) {
+                epochBaselineUs = epochSamples.sorted()[epochSamples.size / 2]
+                Log.d(tag, "DacSync: epoch baseline=${epochBaselineUs / 1000}ms " +
+                    "(device bias removed, median of n=${epochSamples.size})")
+            }
+        }
+
         if (prevRawErrorUs == Long.MIN_VALUE) {
             prevRawErrorUs = rawErrorUs
             Log.d(tag, "DacSync: initial raw=${rawErrorUs / 1000}ms pending=$pending")
@@ -152,7 +188,10 @@ class DacDriftValidator(private val tag: String = "AudioStream") {
     fun absoluteErrorMs(maturityThreshold: Int = 20): Double? {
         if (prevRawErrorUs == Long.MIN_VALUE) return null
         if (matureCount < maturityThreshold) return null
-        return prevRawErrorUs.toDouble() / 1000.0
+        // Not yet epoch-calibrated: withhold the absolute (the closed loop falls back to the
+        // anchor) rather than feed the raw, device-biased value into the correction signal.
+        if (epochBaselineUs == Long.MIN_VALUE) return null
+        return (prevRawErrorUs - epochBaselineUs).toDouble() / 1000.0
     }
 
     /** Reset divergence tracking state. */
@@ -192,6 +231,10 @@ class DacDriftValidator(private val tag: String = "AudioStream") {
         totalFramesWritten.set(0)
         lastWrittenServerTimestampUs = 0L
         prevRawErrorUs = Long.MIN_VALUE
+        // New AudioTrack instance = new framePosition epoch, so the device-bias calibration
+        // must be re-derived. (resetTimeline/seek keeps it: same track, same epoch.)
+        epochBaselineUs = Long.MIN_VALUE
+        epochSamples.clear()
         clearCalibrations()
     }
 

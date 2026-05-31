@@ -85,6 +85,18 @@ class SendspinSyncEngine : SendspinAudioEngine {
         // a cold-start offset in ~2s without windup. Kept moderate (not high) so
         // the DAC's occasional ±20ms noise spikes are smoothed out instead of
         // driving a rate excursion (audible wobble).
+        // Master switch for the closed-loop DAC-absolute correction model.
+        // The DAC absolute error used to carry a device-specific constant bias (issue #45:
+        // +18ms / -62ms / -132ms across devices on an identically-aligned startup) because it
+        // mixed two AudioTrack frame counters with non-portable epochs. That bias is now
+        // calibrated out per-AudioTrack in DacDriftValidator (epoch baseline = median of the
+        // first sane raw samples, subtracted from every absolute reading), so the absolute is
+        // device-independent (≈0 at the aligned start everywhere) while still tracking real
+        // drift and per-seek cold-start variance. With a portable absolute, the closed loop is
+        // re-enabled: it gives seek-robust, fixed sync_delay on all devices (the open-loop
+        // anchor is pipeline-blind and re-anchors per seek, so it cannot). BT routes still use
+        // the anchor + acoustic (getTimestamp stops at the A2DP handoff).
+        private const val DAC_CLOSED_LOOP_ENABLED = true
         private const val DAC_ABS_EMA_ALPHA = 0.20
         // Max per-sample change the DAC absolute error may contribute to the
         // smoothed correction signal. Rejects isolated getTimestamp spikes
@@ -1313,7 +1325,8 @@ class SendspinSyncEngine : SendspinAudioEngine {
             // so a one-shot anchor shift is unnecessary and was the cause of the
             // stuck residual — it drove the anchor to 0 while the real DAC stayed
             // at e.g. -12ms with nothing left to close the gap.
-            if (!ffLearnedThisStream
+            if (DAC_CLOSED_LOOP_ENABLED
+                && !ffLearnedThisStream
                 && anchorLocalUs != 0L
                 && !isBtLikeOutput()
                 && dacStable
@@ -1360,7 +1373,7 @@ class SendspinSyncEngine : SendspinAudioEngine {
         // uncorrected pipeline offset) -> spurious correction -> resampling
         // glitch. Instead, transient instability gates whether we APPLY a
         // correction this cycle (dacHold below) — we hold, we do not jump signals.
-        val closedLoop = hasDacAbs && !isBtLikeOutput() && clockPreciseForCorrections
+        val closedLoop = DAC_CLOSED_LOOP_ENABLED && hasDacAbs && !isBtLikeOutput() && clockPreciseForCorrections
         val dacHold = closedLoop && !dacStable
         val rawErrorMs: Double
         if (closedLoop) {
