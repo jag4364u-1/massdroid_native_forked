@@ -68,6 +68,7 @@ class SendspinAudioController(
         private const val WAKE_LOCK_TIMEOUT_MS = 6 * 60 * 60 * 1000L
         private const val GROUP_JOIN_RELOCK_COOLDOWN_MS = 5_000L
         private const val GROUP_SOLO_STARTUP_GRACE_MS = 5_000L
+        private const val GROUPED_SENDSPIN_FORMAT = "flac:48000:16:2"
     }
 
     private val exceptionHandler = CoroutineExceptionHandler { _, e ->
@@ -258,6 +259,7 @@ class SendspinAudioController(
     @Volatile private var localSyncState = SyncState.IDLE
     private var currentTrackUri: String? = null
     private var currentTitle = ""
+    private var lastSavedPreferredFormatKey: String? = null
     private var currentArtist = ""
     private var currentAlbum = ""
     private var currentDurationMs = 0L
@@ -366,6 +368,7 @@ class SendspinAudioController(
                 if (selfInGroup || childOfOther) {
                     lastObservedInGroup = true
                     sendspinManager.setInSyncGroup(true)
+                    applyGroupedSyncFormat(ssId)
                     Log.d(TAG, "Eager group check: inGroup=true before connect")
                 } else if (self != null) {
                     // Our own player IS in the list -> player data is loaded and
@@ -516,6 +519,7 @@ class SendspinAudioController(
                         val joinedGroup = previousGroupState == false && inGroup
                         lastObservedInGroup = inGroup
                         sendspinManager.setInSyncGroup(inGroup)
+                        if (inGroup) applyGroupedSyncFormat(player.playerId)
                         if (joinedGroup) requestGroupJoinRelock(player)
                     }
                     // Playing-state used to be reconciled from player.state
@@ -975,17 +979,57 @@ class SendspinAudioController(
 
     private suspend fun applyPreferredFormatForCurrentNetwork(playerId: String) {
         try {
+            if (lastObservedInGroup == true) {
+                applyGroupedSyncFormat(playerId)
+                return
+            }
             val formatName = settingsRepository.sendspinAudioFormat.first()
             val format = net.asksakis.massdroidv2.domain.model.SendspinAudioFormat.fromStored(formatName)
             val cm = context.getSystemService(android.net.ConnectivityManager::class.java)
             val isWifi = cm?.getNetworkCapabilities(cm.activeNetwork)
                 ?.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) ?: false
             val apiValue = format.toApiValue(isWifi)
-            playerRepository.savePlayerConfig(playerId, mapOf("preferred_sendspin_format" to apiValue))
-            Log.d(TAG, "Applied format $format ($apiValue) for ${if (isWifi) "WiFi" else "Mobile"}")
+            savePreferredFormatIfNeeded(
+                playerId = playerId,
+                apiValue = apiValue,
+                reason = "$format/${if (isWifi) "WiFi" else "Mobile"}",
+            )
         } catch (e: Exception) {
             Log.w(TAG, "Format apply failed: ${e.message}")
         }
+    }
+
+    private suspend fun applyGroupedSyncFormat(playerId: String) {
+        try {
+            savePreferredFormatIfNeeded(
+                playerId = playerId,
+                apiValue = GROUPED_SENDSPIN_FORMAT,
+                reason = "grouped sync",
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Grouped format apply failed: ${e.message}")
+        }
+    }
+
+    private suspend fun savePreferredFormatIfNeeded(
+        playerId: String,
+        apiValue: String,
+        reason: String,
+    ) {
+        val cacheKey = "$playerId:$apiValue"
+        if (lastSavedPreferredFormatKey == cacheKey) {
+            Log.d(TAG, "Sendspin format already applied from cache: $apiValue ($reason)")
+            return
+        }
+        val current = playerRepository.getPlayerConfig(playerId)?.sendspinFormat
+        if (current == apiValue) {
+            lastSavedPreferredFormatKey = cacheKey
+            Log.d(TAG, "Sendspin format already $apiValue ($reason), skipping save")
+            return
+        }
+        playerRepository.savePlayerConfig(playerId, mapOf("preferred_sendspin_format" to apiValue))
+        lastSavedPreferredFormatKey = cacheKey
+        Log.d(TAG, "Applied Sendspin format $apiValue ($reason, was=${current ?: "unknown"})")
     }
 
     // region Sendspin connection helpers

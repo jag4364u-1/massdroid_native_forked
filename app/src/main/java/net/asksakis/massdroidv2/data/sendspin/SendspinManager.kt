@@ -377,7 +377,10 @@ class SendspinManager(
         timeSyncJob?.cancel()
         val previousOffsetUs = clockSynchronizer.currentOffsetUs()
         if (previousOffsetUs != 0L) {
-            clockSynchronizer.softReset(previousOffsetUs)
+            clockSynchronizer.softReset(
+                previousOffsetUs = previousOffsetUs,
+                initialCovariance = 1_000_000_000.0,
+            )
             clockSynced = true
         }
         clockOffsetPersistCount = 0

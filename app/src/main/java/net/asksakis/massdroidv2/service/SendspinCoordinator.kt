@@ -49,6 +49,7 @@ class SendspinCoordinator(
 ) {
     companion object {
         private const val TAG = "SendspinCoord"
+        private const val GROUPED_SENDSPIN_FORMAT = "flac:48000:16:2"
     }
 
     var playerId: String? = null
@@ -63,6 +64,7 @@ class SendspinCoordinator(
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var volumeObserver: ContentObserver? = null
     private var btAudioCallback: AudioDeviceCallback? = null
+    private var lastSavedPreferredFormatKey: String? = null
 
     fun start() {
         createController()
@@ -207,13 +209,17 @@ class SendspinCoordinator(
                     val sendspinPlayerId = settingsRepository.sendspinClientId.first() ?: return@collect
                     if (wsClient.connectionState.value !is ConnectionState.Connected) return@collect
                     val format = SendspinAudioFormat.fromStored(formatName)
-                    val apiValue = format.toApiValue(wifiState.value)
+                    val apiValue = if (isSendspinInGroup(sendspinPlayerId)) {
+                        GROUPED_SENDSPIN_FORMAT
+                    } else {
+                        format.toApiValue(wifiState.value)
+                    }
                     val netType = if (wifiState.value) "WiFi" else "Mobile"
-                    Log.d(TAG, "Audio format preference changed: $format, network=$netType, sending $apiValue")
                     try {
-                        playerRepository.savePlayerConfig(
-                            sendspinPlayerId,
-                            mapOf("preferred_sendspin_format" to apiValue)
+                        savePreferredFormatIfNeeded(
+                            playerId = sendspinPlayerId,
+                            apiValue = apiValue,
+                            reason = "preference $format/$netType",
                         )
                     } catch (e: Exception) {
                         Log.w(TAG, "Failed to update audio format: ${e.message}")
@@ -227,14 +233,22 @@ class SendspinCoordinator(
                 val netType = if (isWifi) "WiFi" else "Mobile"
                 val format = SendspinAudioFormat.fromStored(settingsRepository.sendspinAudioFormat.first())
                 if (lastWifi != null && lastWifi != isWifi && format == SendspinAudioFormat.SMART) {
-                    val activeController = controller
-                    if (activeController != null && activeController.isStreaming) {
-                        val codec = format.toCodec(isWifi)
-                        val bitDepth = format.toBitDepth(isWifi)
-                        Log.d(TAG, "Smart mode network switch: $netType, requesting $codec ${bitDepth}bit")
-                        sendspinManager.requestFormat(codec, bitDepth = bitDepth)
-                    } else {
-                        Log.d(TAG, "Network: $netType (Smart mode, not streaming, skip format request)")
+                    val sendspinPlayerId = settingsRepository.sendspinClientId.first()
+                    if (sendspinPlayerId != null && wsClient.connectionState.value is ConnectionState.Connected) {
+                        val apiValue = if (isSendspinInGroup(sendspinPlayerId)) {
+                            GROUPED_SENDSPIN_FORMAT
+                        } else {
+                            format.toApiValue(isWifi)
+                        }
+                        try {
+                            savePreferredFormatIfNeeded(
+                                playerId = sendspinPlayerId,
+                                apiValue = apiValue,
+                                reason = "network $netType",
+                            )
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to update network format: ${e.message}")
+                        }
                     }
                 } else {
                     Log.d(TAG, "Network: $netType (format $format)")
@@ -242,6 +256,35 @@ class SendspinCoordinator(
                 lastWifi = isWifi
             }
         }
+    }
+
+    private fun isSendspinInGroup(sendspinPlayerId: String): Boolean {
+        val players = playerRepository.players.value
+        val self = players.find { it.playerId == sendspinPlayerId }
+        val selfInGroup = self?.activeGroup != null || self?.groupChilds?.isNotEmpty() == true
+        val childOfOther = players.any { it.playerId != sendspinPlayerId && sendspinPlayerId in it.groupChilds }
+        return selfInGroup || childOfOther
+    }
+
+    private suspend fun savePreferredFormatIfNeeded(
+        playerId: String,
+        apiValue: String,
+        reason: String,
+    ) {
+        val cacheKey = "$playerId:$apiValue"
+        if (lastSavedPreferredFormatKey == cacheKey) {
+            Log.d(TAG, "Sendspin format already applied from cache: $apiValue ($reason)")
+            return
+        }
+        val current = playerRepository.getPlayerConfig(playerId)?.sendspinFormat
+        if (current == apiValue) {
+            lastSavedPreferredFormatKey = cacheKey
+            Log.d(TAG, "Sendspin format already $apiValue ($reason), skipping save")
+            return
+        }
+        playerRepository.savePlayerConfig(playerId, mapOf("preferred_sendspin_format" to apiValue))
+        lastSavedPreferredFormatKey = cacheKey
+        Log.d(TAG, "Applied Sendspin format $apiValue ($reason, was=${current ?: "unknown"})")
     }
 
     private fun observeShortcutActions() {

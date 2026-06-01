@@ -58,14 +58,12 @@ enum class SendspinAudioFormat(val label: String) {
     PCM("PCM");
 
     fun toApiValue(isWifi: Boolean): String = when (this) {
-        // FLAC lossless paths are bumped to 96 kHz so hi-res sources (Qobuz
-        // Sublime, Tidal Master, local 96/24 files) stream bit-perfect.
-        // Lower-rate sources are server-side upsampled losslessly within the
-        // audible band (≤20 kHz). OPUS/PCM stay at 48 kHz — they're either
-        // lossy by design or constrained for bandwidth.
-        SMART -> if (isWifi) "flac:96000:24:2" else "opus:48000:16:2"
+        // Stable Android sync path: local/Wi-Fi playback uses FLAC 48/16.
+        // Higher-rate/24-bit streams add Android decoder and output-conversion
+        // variables while the engine still writes PCM16 to AudioTrack.
+        SMART -> if (isWifi) "flac:48000:16:2" else "opus:48000:16:2"
         OPUS -> "opus:48000:16:2"
-        FLAC -> "flac:96000:24:2"
+        FLAC -> "flac:48000:16:2"
         PCM -> "pcm:48000:16:2"
     }
 
@@ -78,8 +76,8 @@ enum class SendspinAudioFormat(val label: String) {
     }
 
     fun toBitDepth(isWifi: Boolean): Int = when (this) {
-        SMART -> if (isWifi) 24 else 16
-        FLAC -> 24
+        SMART -> 16
+        FLAC -> 16
         else -> 16
     }
 

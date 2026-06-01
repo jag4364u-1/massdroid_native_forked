@@ -72,22 +72,22 @@ data class AudioFormatSpec(
 )
 
 private val defaultFormats = listOf(
+    // FLAC first: it is the canonical Android codec and, crucially, the order
+    // here is the server's fallback when a client has no (or a cleared)
+    // `preferred_sendspin_format` override. Listing opus first made the server
+    // fall back to opus whenever the override was missing/cleared (e.g. after
+    // the server rejected a stale 24-bit override as incompatible), which broke
+    // grouped sync. Keeping everything at 48 kHz / 16-bit also removes any
+    // resample/convert variable from the timing path (AudioTrack is PCM16).
+    AudioFormatSpec(codec = "flac", sampleRate = 48000, bitDepth = 16, channels = 2),
     AudioFormatSpec(codec = "opus", sampleRate = 48000, bitDepth = 16, channels = 2),
-    // FLAC variants for lossless hi-res paths. Both 48k and 96k are declared
-    // so the MA server's player config exposes them as selectable options
-    // (MA filters config options against the client-declared list). 96 kHz is
-    // what SMART-on-WiFi and explicit FLAC now request — server passes through
-    // hi-res sources bit-perfect and upsamples lower sources losslessly within
-    // the audible band.
-    AudioFormatSpec(codec = "flac", sampleRate = 48000, bitDepth = 24, channels = 2),
-    AudioFormatSpec(codec = "flac", sampleRate = 96000, bitDepth = 24, channels = 2),
     AudioFormatSpec(codec = "pcm", sampleRate = 48000, bitDepth = 16, channels = 2)
 )
 
 @Serializable
 data class PlayerV1Support(
     @SerialName("supported_formats") val supportedFormats: List<AudioFormatSpec> = defaultFormats,
-    @SerialName("buffer_capacity") val bufferCapacity: Int = 8000000,
+    @SerialName("buffer_capacity") val bufferCapacity: Int = 1500000,
     @SerialName("supported_commands") val supportedCommands: List<String> = listOf("volume", "mute")
 )
 
