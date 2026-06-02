@@ -94,7 +94,12 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideSendspinEngine(): SendspinSyncEngine = SendspinSyncEngine()
+    fun provideSendspinSyncEngine(): SendspinSyncEngine = SendspinSyncEngine()
+
+    @Provides
+    @Singleton
+    fun provideSendspinDirectEngine(): net.asksakis.massdroidv2.data.sendspin.SendspinDirectEngine =
+        net.asksakis.massdroidv2.data.sendspin.SendspinDirectEngine()
 
     @Provides
     @Singleton
@@ -105,9 +110,10 @@ object AppModule {
     @Singleton
     fun provideSendspinManager(
         client: SendspinClient,
-        engine: SendspinSyncEngine,
+        syncEngine: SendspinSyncEngine,
+        directEngine: net.asksakis.massdroidv2.data.sendspin.SendspinDirectEngine,
         sessionEventBus: net.asksakis.massdroidv2.data.websocket.SessionEventBus,
-    ): SendspinManager = SendspinManager(client, engine, sessionEventBus)
+    ): SendspinManager = SendspinManager(client, syncEngine, directEngine, sessionEventBus)
 
     @Provides
     @Singleton

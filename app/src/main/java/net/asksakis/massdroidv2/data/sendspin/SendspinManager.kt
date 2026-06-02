@@ -17,10 +17,17 @@ import net.asksakis.massdroidv2.data.websocket.SessionEventBus
 
 class SendspinManager(
     private val client: SendspinClient,
-    private val engine: SendspinAudioEngine,
+    private val syncEngine: SendspinSyncEngine,
+    private val directEngine: SendspinDirectEngine,
     sessionEventBus: SessionEventBus,
 ) {
+    // Active engine. Solo (DIRECT) by default; swapped to the grouped engine on
+    // a group join and back on leave. The two are fully separate instances so
+    // neither carries the other's timeline state across a group boundary
+    // (which is already a hard relock).
+    @Volatile private var engine: SendspinAudioEngine = directEngine
     private val audio: SendspinAudioEngine get() = engine
+    private var routingChangedCallback: (() -> Unit)? = null
     companion object {
         private const val TAG = "SendspinMgr"
         private const val HEARTBEAT_INTERVAL_MS = 2000L
@@ -276,7 +283,7 @@ class SendspinManager(
                 // Local playback gain is now STREAM_MUSIC-driven via
                 // LocalSpeakerVolumeBridge, so the engine stays at its default
                 // 1.0 AudioTrack gain. Only the mute state needs to propagate.
-                val engineMuted = (engine as? SendspinSyncEngine)?.syncMuted ?: false
+                val engineMuted = (engine as? SendspinPlaybackEngine)?.syncMuted ?: false
                 if (!engineMuted) {
                     audio.setMuted(muted)
                 }
@@ -437,28 +444,48 @@ class SendspinManager(
     }
 
     fun setInSyncGroup(grouped: Boolean) {
-        val mode = if (grouped) CorrectionMode.SYNC else CorrectionMode.DIRECT
-        val wasSync = engine.correctionMode == CorrectionMode.SYNC
-        engine.setCorrectionMode(mode)
-        if (grouped && !wasSync) {
-            // Clock is already warm (time sync runs in all modes).
-            // Just wire up the synchronizer; don't restart/soft-reset
-            // the Kalman so the converged state is preserved.
-            audio.clockSynchronizer = clockSynchronizer
-            // Safety: start time sync if not running (e.g. after reconnect)
-            if (timeSyncJob?.isActive != true && client.state.value != SendspinState.DISCONNECTED) {
-                startTimeSync()
+        val target: SendspinAudioEngine = if (grouped) syncEngine else directEngine
+        if (engine === target) {
+            // Already on the right engine. Keep the clock wired/running for sync.
+            if (grouped) {
+                audio.clockSynchronizer = clockSynchronizer
+                if (timeSyncJob?.isActive != true && client.state.value != SendspinState.DISCONNECTED) {
+                    startTimeSync()
+                }
             }
-            Log.d(TAG, "Group join: clock already warm, samples=${clockSynchronizer.currentSampleCount()} error=${clockSynchronizer.errorUs()}us")
+            return
         }
-        // DIRECT mode: keep time sync running (warm clock for future group join)
+
+        Log.d(TAG, "Engine swap: ${engine::class.simpleName} -> ${target::class.simpleName} (grouped=$grouped)")
+        // Carry over the user/route settings, tear down the outgoing engine
+        // (stops its playback thread + AudioTrack), then wire up the incoming
+        // one. The next stream/start (configure) sets it up fresh — a group
+        // join/leave is already a hard relock boundary.
+        val carrySyncDelay = engine.syncDelayMs
+        val carryAcoustic = engine.routeAcousticExtraUs
+        engine.onSyncStateChanged = null
+        engine.onSyncSample = null
+        engine.release()
+
+        engine = target
+        target.clockSynchronizer = clockSynchronizer
+        target.syncDelayMs = carrySyncDelay
+        target.routeAcousticExtraUs = carryAcoustic
+        (target as? SendspinPlaybackEngine)?.onRoutingChanged = routingChangedCallback
+        setupSyncStateCallback()
+        _syncState.value = target.syncState
+        if (grouped && timeSyncJob?.isActive != true && client.state.value != SendspinState.DISCONNECTED) {
+            startTimeSync()
+        }
+        Log.d(TAG, "Engine swap done: clock samples=${clockSynchronizer.currentSampleCount()} error=${clockSynchronizer.errorUs()}us")
     }
 
     /** Get the actual routed device type from the AudioTrack, or null if unavailable. */
     fun getRoutedDeviceType(): Int? = audio.getRoutedDeviceType()
 
     fun setOnRoutingChangedCallback(callback: () -> Unit) {
-        (engine as? SendspinSyncEngine)?.onRoutingChanged = callback
+        routingChangedCallback = callback
+        (engine as? SendspinPlaybackEngine)?.onRoutingChanged = callback
     }
 
     fun onOutputRouteChanged(reason: String) {
@@ -534,9 +561,9 @@ class SendspinManager(
 
     fun bufferedAudioMs(): Long = audio.bufferDurationMs()
     fun outputLatencyMs(): Long = audio.measuredOutputLatencyUs / 1000
-    fun dacSyncErrorMs(): Float = (engine as? SendspinSyncEngine)?.smoothedSyncErrorMs?.toFloat() ?: 0f
+    fun dacSyncErrorMs(): Float = (engine as? SendspinPlaybackEngine)?.smoothedSyncErrorMs?.toFloat() ?: 0f
     fun absoluteSyncMs(): Float {
-        val e = engine as? SendspinSyncEngine ?: return 0f
+        val e = engine as? SendspinPlaybackEngine ?: return 0f
         // Prefer the DAC ground-truth absolute error (what the speaker actually
         // outputs) over the open-loop anchor error. The anchor reads ~0 even
         // when the real output is off (cold-start/pipeline latency the anchor is
@@ -551,11 +578,11 @@ class SendspinManager(
      * the status into showing "Locked" before we actually know the real offset.
      * The UI shows "Measuring" while this is false.
      */
-    fun hasSyncTruth(): Boolean = (engine as? SendspinSyncEngine)?.dacGroundTruthErrorMs() != null
-    fun isSyncMuted(): Boolean = (engine as? SendspinSyncEngine)?.syncMuted ?: false
+    fun hasSyncTruth(): Boolean = (engine as? SendspinPlaybackEngine)?.dacGroundTruthErrorMs() != null
+    fun isSyncMuted(): Boolean = (engine as? SendspinPlaybackEngine)?.syncMuted ?: false
     fun clockSampleCount(): Int = clockSynchronizer.currentSampleCount()
     fun clockErrorUs(): Long = clockSynchronizer.errorUs()
-    fun resyncCount(): Int = (engine as? SendspinSyncEngine)?.resyncCount ?: 0
+    fun resyncCount(): Int = (engine as? SendspinPlaybackEngine)?.resyncCount ?: 0
     fun correctionModeName(): String = engine.correctionMode.name
 
     fun bufferedAudioBytes(): Long = audio.bufferedBytes()
