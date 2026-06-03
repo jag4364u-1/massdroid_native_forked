@@ -45,6 +45,10 @@ class PlayerRepositoryImpl @Inject constructor(
         private const val HISTORY_ARTIST_LOOKUP_LIMIT = 3
         private const val RECONNECT_QUEUE_REFRESH_ATTEMPTS = 3
         private const val RECONNECT_QUEUE_REFRESH_DELAY_MS = 450L
+        // Debounce for the authoritative players/all resync after a burst of
+        // PLAYER_ADDED/REMOVED events (e.g. an MA server restart re-registering
+        // players one by one). Long enough to collapse the burst into one refresh.
+        private const val PLAYER_RESYNC_DEBOUNCE_MS = 2_500L
         // Distance from the track end below which we still consider a seek
         // "into the track" rather than "to the end". 1.0 s is plenty:
         // playback always stops short of the very last sample anyway, and
@@ -164,6 +168,14 @@ class PlayerRepositoryImpl @Inject constructor(
     private val blockedQueueCleanupAtByQueue = ConcurrentHashMap<String, Long>()
     private val queueFilterModeByQueue = ConcurrentHashMap<String, PlayerRepository.QueueFilterMode>()
     private var blockedQueueCleanupJob: Job? = null
+    // Debounced authoritative player resync. PLAYER_ADDED/REMOVED events carry
+    // each player's can_group_with as of ITS registration; when players register
+    // at staggered times (notably an MA server restart, where players re-appear
+    // one by one), the cross-references are incomplete and the server does not
+    // re-emit them. After the burst settles, one full players/all refresh rebuilds
+    // authoritative can_group_with for everyone so the group/"sync with" sheet is
+    // correct. Debounced so a registration storm triggers a single refresh.
+    private var playerResyncJob: Job? = null
     @Volatile
     private var blockedArtistUrisSnapshot: Set<String> = emptySet()
     @Volatile
@@ -280,6 +292,8 @@ class PlayerRepositoryImpl @Inject constructor(
         Log.d(TAG, "Session reset: dropping cached player and queue state")
         blockedQueueCleanupJob?.cancel()
         blockedQueueCleanupJob = null
+        playerResyncJob?.cancel()
+        playerResyncJob = null
         stopPositionTicker()
         selectedPlayerId = null
         pendingRestoredPlayerId = null
@@ -373,6 +387,7 @@ class PlayerRepositoryImpl @Inject constructor(
                         pendingRestoredPlayerId = null
                         Log.d(TAG, "Auto-selected late-arriving player: ${player.displayName}")
                     }
+                    scheduleAuthoritativePlayerResync()
                 }
                 EventType.PLAYER_REMOVED -> {
                     Log.d(TAG, "PLAYER_REMOVED event: ${event.objectId}")
@@ -393,6 +408,7 @@ class PlayerRepositoryImpl @Inject constructor(
                         stopPositionTicker()
                         scope.launch { settingsRepository.setSelectedPlayerId(null) }
                     }
+                    scheduleAuthoritativePlayerResync()
                 }
                 EventType.QUEUE_UPDATED -> {
                     val serverQueue = event.data?.let {
@@ -1100,6 +1116,26 @@ class PlayerRepositoryImpl @Inject constructor(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to refresh players: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Debounced full player resync after the player set changes via incremental
+     * events. refreshPlayers() merges the authoritative players/all snapshot
+     * (correct can_group_with for every player) over the event-added entries, so
+     * the group / "sync with" sheet reflects the real server topology even when
+     * players registered at staggered times (e.g. an MA server restart). The
+     * debounce collapses a registration burst into one refresh; refreshPlayers
+     * retains event-added players missing from the snapshot, so a refresh that
+     * lands mid-boot (server still returning a partial list) never drops anyone.
+     */
+    private fun scheduleAuthoritativePlayerResync() {
+        playerResyncJob?.cancel()
+        playerResyncJob = scope.launch {
+            delay(PLAYER_RESYNC_DEBOUNCE_MS)
+            if (wsClient.connectionState.value is ConnectionState.Connected) {
+                refreshPlayers()
+            }
         }
     }
 
