@@ -87,7 +87,11 @@ private val defaultFormats = listOf(
 @Serializable
 data class PlayerV1Support(
     @SerialName("supported_formats") val supportedFormats: List<AudioFormatSpec> = defaultFormats,
-    @SerialName("buffer_capacity") val bufferCapacity: Int = 1500000,
+    // Bytes of compressed audio the server may stream ahead (per Sendspin spec).
+    // Sized for ~30 s of FLAC (Deezer 44.1k/16 ≈ 110 KB/s -> ~36 s; 96k/24 -> ~13 s)
+    // so a cellular/5G throughput dip is ridden out of the buffer instead of
+    // underrunning. MAX_ENCODED_BUFFER_BYTES (engine) stays above this as backstop.
+    @SerialName("buffer_capacity") val bufferCapacity: Int = 4_000_000,
     @SerialName("supported_commands") val supportedCommands: List<String> = listOf("volume", "mute")
 )
 

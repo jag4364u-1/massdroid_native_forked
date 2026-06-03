@@ -85,6 +85,31 @@ Java_net_asksakis_massdroidv2_data_sendspin_SendspinNativeOutput_nativeSetVolume
     if (ptr != 0) reinterpret_cast<SendspinOutputEngine*>(ptr)->setVolume(volume);
 }
 
+JNIEXPORT void JNICALL
+Java_net_asksakis_massdroidv2_data_sendspin_SendspinNativeOutput_nativeSetFrozen(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong ptr, jboolean frozen) {
+    if (ptr != 0) reinterpret_cast<SendspinOutputEngine*>(ptr)->setFrozen(frozen == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_net_asksakis_massdroidv2_data_sendspin_SendspinNativeOutput_nativePauseStream(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong ptr) {
+    if (ptr != 0) reinterpret_cast<SendspinOutputEngine*>(ptr)->pauseStream();
+}
+
+JNIEXPORT void JNICALL
+Java_net_asksakis_massdroidv2_data_sendspin_SendspinNativeOutput_nativeResumeStream(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong ptr) {
+    if (ptr != 0) reinterpret_cast<SendspinOutputEngine*>(ptr)->resumeStream();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_net_asksakis_massdroidv2_data_sendspin_SendspinNativeOutput_nativeIsDisconnected(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong ptr) {
+    if (ptr == 0) return JNI_FALSE;
+    return reinterpret_cast<SendspinOutputEngine*>(ptr)->isDisconnected() ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT jint JNICALL
 Java_net_asksakis_massdroidv2_data_sendspin_SendspinNativeOutput_nativeDeviceId(
     JNIEnv* /*env*/, jobject /*thiz*/, jlong ptr) {

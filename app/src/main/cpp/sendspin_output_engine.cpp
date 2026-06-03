@@ -18,8 +18,12 @@ namespace {
 // and cheap (48 kHz stereo i16 = ~768 KB; 96 kHz = ~1.5 MB).
 constexpr int RING_SECONDS = 4;
 
-// Below this |drift| the rate stays exactly 1.0 (locked).
-constexpr int64_t STEADY_DEADZONE_US = 4000;
+// Below this |drift| the rate stays exactly 1.0 (locked). Kept tight (1 ms) so
+// steady-state lock lands sub-2ms like the old closed loop; the correction here
+// is the gentle resampler (a ~0.06% rate nudge at 1 ms), never the snap, so a
+// small deadzone does not reintroduce the getTimestamp-spike "cough" (that is
+// gated by the outlier-resistant ema + slew limit on the snap path below).
+constexpr int64_t STEADY_DEADZONE_US = 1000;
 
 // At/above this |drift| we SNAP onto the server timeline immediately (integer
 // skip/insert) instead of crawling there — "respect the timestamp", like a
@@ -82,10 +86,20 @@ bool SendspinOutputEngine::start(int32_t sampleRate, int32_t channels, bool drif
     postFlushCallbacks_ = 0;
     appliedVolume_ = 0.0f;
     flushRequested_.store(false);
+    disconnected_.store(false);
 
+    // SYNC (driftCorrection) needs the LowLatency fast path so getTimestamp is
+    // tight enough for the drift anchor. DIRECT (solo) is a pure FIFO with no
+    // peer to phase-lock to: LowLatency's 4 ms real-time callback just risks
+    // missed deadlines (micro-glitches) on a busy device and burns CPU. Use the
+    // normal mixer path there — bigger HAL buffer, far fewer callbacks, robust
+    // under load; the extra output latency is irrelevant when solo.
+    const oboe::PerformanceMode perfMode = driftCorrection
+        ? oboe::PerformanceMode::LowLatency
+        : oboe::PerformanceMode::None;
     oboe::AudioStreamBuilder b;
     b.setDirection(oboe::Direction::Output)
-        ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+        ->setPerformanceMode(perfMode)
         ->setSharingMode(oboe::SharingMode::Shared)
         ->setFormat(oboe::AudioFormat::I16)
         ->setSampleRate(sampleRate)
@@ -100,9 +114,10 @@ bool SendspinOutputEngine::start(int32_t sampleRate, int32_t channels, bool drif
         LOGE("openStream failed: %s", oboe::convertToText(r));
         return false;
     }
-    // Two bursts of buffering keeps the fast path while giving the HAL a touch
-    // of slack; the deep ring (above) is what actually absorbs GC, not this.
-    stream_->setBufferSizeInFrames(stream_->getFramesPerBurst() * 2);
+    // Give the HAL slack: 2 bursts on the LowLatency path, more on the normal
+    // path (bigger bursts, absorbs scheduling jitter). The deep ring (above) is
+    // what actually absorbs GC, not this.
+    stream_->setBufferSizeInFrames(stream_->getFramesPerBurst() * (driftCorrection ? 2 : 4));
     r = stream_->requestStart();
     if (r != oboe::Result::OK) {
         LOGE("requestStart failed: %s", oboe::convertToText(r));
@@ -123,6 +138,26 @@ void SendspinOutputEngine::stop() {
     }
     ring_.reset();
     capacityFrames_ = 0;
+}
+
+void SendspinOutputEngine::pauseStream() {
+    if (!stream_) return;
+    auto state = stream_->getState();
+    if (state == oboe::StreamState::Started || state == oboe::StreamState::Starting) {
+        stream_->requestStop();
+    }
+}
+
+void SendspinOutputEngine::resumeStream() {
+    if (!stream_) return;
+    auto state = stream_->getState();
+    if (state == oboe::StreamState::Started || state == oboe::StreamState::Starting) return;
+    // Re-seat the timestamp anchor: after a stop/start the frame counters and
+    // getTimestamp restart, so the old anchor is stale.
+    anchorFramePosition_.store(-1);
+    anchorTimeUs_.store(0);
+    lastTimestampPollFrame_ = 0;
+    stream_->requestStart();
 }
 
 void SendspinOutputEngine::flush() {
@@ -279,14 +314,28 @@ oboe::DataCallbackResult SendspinOutputEngine::onAudioReady(
     }
 
     // Advance the gain toward the target a little (fade); applied per-sample
-    // below so mute/unmute/volume never jumps mid-waveform.
-    const float target = volume_.load();
+    // below so mute/unmute/volume never jumps mid-waveform. While frozen the
+    // target is 0 so we fade DOWN to silence on real audio (click-free) before
+    // holding the read position.
+    const bool frozen = frozen_.load();
+    const float target = frozen ? 0.0f : volume_.load();
     const float g0 = appliedVolume_;
     const float maxStep = static_cast<float>(numFrames) / (static_cast<float>(sampleRate_) * FADE_SEC);
     float g1 = g0;
     if (target > g0) g1 = std::min(target, g0 + maxStep);
     else if (target < g0) g1 = std::max(target, g0 - maxStep);
     appliedVolume_ = g1;
+
+    // Frozen and fully faded out: HOLD the read position so the buffered audio
+    // survives the interruption. Output silence and return without draining;
+    // when frozen_ clears the gain fades back up from this exact sample, so the
+    // resume is instant and click-free (no flush, no rebuffer). The producer
+    // keeps filling the ring (backpressured), so a quick interruption resumes
+    // from a full buffer.
+    if (frozen && g1 < 0.01f && g0 < 0.01f) {
+        std::memset(out, 0, static_cast<size_t>(numFrames) * ch * sizeof(int16_t));
+        return oboe::DataCallbackResult::Continue;
+    }
 
     int64_t framesWritten = stream->getFramesWritten();
     refreshTimestampAnchor(stream, framesWritten);
@@ -415,9 +464,12 @@ oboe::DataCallbackResult SendspinOutputEngine::onAudioReady(
 }
 
 void SendspinOutputEngine::onErrorAfterClose(oboe::AudioStream* /*stream*/, oboe::Result error) {
-    // Disconnects (e.g. BT route change) close the stream. The Kotlin engine
-    // owns route-change handling and will reconfigure/restart us; just log.
+    // Disconnects (BT route change, or a phone call preempting the route) close
+    // the stream. Flag it so the Kotlin engine reopens us — the AudioManager
+    // device-callback does NOT fire when the device stays connected but is just
+    // preempted (call audio), so we must surface the disconnect ourselves.
     LOGW("stream error after close: %s", oboe::convertToText(error));
+    disconnected_.store(true);
 }
 
 } // namespace sendspin

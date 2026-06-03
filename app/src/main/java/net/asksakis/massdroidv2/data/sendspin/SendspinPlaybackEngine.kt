@@ -62,16 +62,22 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
         private const val TAG = "AudioStream"
         private const val HEADER_SIZE = 9
         private const val TYPE_PLAYER_AUDIO = 4
-        // Hard memory ceiling for the encoded frame queue. The server can send
-        // far ahead (buffer_capacity ~1.5 MB ~= tens of seconds for FLAC), so
+        // Hard memory ceiling for the encoded frame queue. The server streams
+        // ahead up to the requested buffer_capacity (~4 MB ~= 30 s of FLAC), so
         // this must stay well above it; it is only a runaway backstop.
-        private const val MAX_ENCODED_BUFFER_BYTES = 6_000_000L
+        private const val MAX_ENCODED_BUFFER_BYTES = 10_000_000L
         private const val OPUS_MAX_INPUT_SIZE = 64 * 1024
         private const val FLAC_MAX_INPUT_SIZE = 256 * 1024
         // Producer backpressure: keep roughly this much decoded PCM in the
         // native ring and leave everything else encoded in frameQueue. Must
         // stay below the native RING_SECONDS so write() never has to drop.
         private const val RING_TARGET_MS = 2_500L
+        // After playback has been IDLE this long, stop the real-time Oboe output
+        // callback (requestStop, stream stays open) and let the producer thread
+        // exit, so a connected-but-not-playing app draws no audio-HAL / CPU power.
+        // Longer than a normal track transition (stream/end -> stream/start, ~1 s)
+        // so it never churns mid-playlist; the next stream restarts instantly.
+        private const val IDLE_OUTPUT_STOP_GRACE_MS = 5_000L
         // Output is muted across every hard boundary and (re)start so the
         // transient at a skip/seek/relock (ring refill, decoder priming, clock
         // convergence) is never audible. The Oboe stream runs continuously, so
@@ -156,6 +162,17 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
     @Volatile private var configured = false
     @Volatile private var playbackActive = false
     @Volatile protected var playbackStarted = false
+    // True while the Oboe output callback is stopped (requestStop) for idle power
+    // saving. The stream stays open + the ring is preserved, so a stream/start or
+    // resume restarts it quickly.
+    @Volatile private var outputPausedForIdle = false
+    // Guards against posting multiple reopen requests while one is in flight.
+    @Volatile private var reopenInFlight = false
+    // True while the output is frozen for a transient focus loss (solo/DIRECT).
+    // startNativeOutput recreates the native object (which defaults to unfrozen),
+    // so a reopen mid-freeze (phone call) must re-apply it or the preserved
+    // buffer would play out into the still-preempted route and be lost.
+    @Volatile private var outputFrozen = false
     // Set on a local track-change discontinuity (next/previous): the server
     // keeps sending the OLD track's frames until it processes the skip, and
     // those in-flight frames would otherwise be accepted and briefly play the
@@ -254,6 +271,7 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
             bitDepth == activeBitDepth
 
         configureGeneration++
+        cancelIdleStop()
         awaitingFreshStream = false
         startupWaitStartedMs = 0L
         // A stream/start means the server is actively streaming again. Resume
@@ -265,6 +283,8 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
 
         if (sameFormat) {
             Log.d(TAG, "configure ${startType.name} reuse codec=$codecName ${sampleRate}Hz/${bitDepth}bit")
+            // Restart the output/producer if they were stopped for idle power save.
+            ensureOutputRunning()
             flushQueuesAndDecoder()
             playbackStarted = false
             // Keep the output muted from here until the new stream's audio
@@ -347,6 +367,7 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
             transitionSyncState(SyncState.IDLE)
         } else {
             Log.d(TAG, "Resume boundary: waiting for fresh timeline buffer mode=$correctionMode ${clockDebug()}")
+            ensureOutputRunning()
             playbackActive = true
             ensurePlaybackThread()
         }
@@ -472,11 +493,57 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
 
     // ---- Routing ------------------------------------------------------------
 
+    // region Idle power management
+
+    private val idleStopRunnable = Runnable { stopOutputForIdle() }
+
+    private fun scheduleIdleStop() {
+        mainHandler.removeCallbacks(idleStopRunnable)
+        mainHandler.postDelayed(idleStopRunnable, IDLE_OUTPUT_STOP_GRACE_MS)
+    }
+
+    private fun cancelIdleStop() {
+        mainHandler.removeCallbacks(idleStopRunnable)
+    }
+
+    /**
+     * Fired when playback has stayed IDLE past the grace window: stop the
+     * real-time Oboe callback and let the producer thread exit, so a connected
+     * but-not-playing app holds no audio HAL / burns no CPU. The stream stays
+     * open and the ring is preserved; [ensureOutputRunning] restarts it.
+     */
+    private fun stopOutputForIdle() {
+        if (syncState != SyncState.IDLE || playbackStarted || outputPausedForIdle) return
+        Log.d(TAG, "Idle ${IDLE_OUTPUT_STOP_GRACE_MS}ms: stopping native output + producer (power save)")
+        outputPausedForIdle = true
+        playbackActive = false      // producer loop exits
+        nativeOutput.pauseStream()  // real-time HAL callback stops firing
+    }
+
+    /** Restart the output + producer if they were stopped for idle. */
+    private fun ensureOutputRunning() {
+        cancelIdleStop()
+        if (!outputPausedForIdle) return
+        outputPausedForIdle = false
+        nativeOutput.resumeStream()
+        playbackActive = true
+        ensurePlaybackThread()
+        Log.d(TAG, "Output resumed from idle stop")
+    }
+
+    // endregion
+
     private fun startNativeOutput() {
+        outputPausedForIdle = false
         // SYNC aligns to the group timeline; DIRECT (solo) is a pure FIFO.
         if (!nativeOutput.start(activeSampleRate, activeChannels, isSync)) {
             Log.e(TAG, "Native output failed to start ${activeSampleRate}Hz ch=$activeChannels; stream will be silent")
         }
+        // A (re)start recreates the native engine, which defaults to unfrozen. If
+        // we were frozen for a focus loss (e.g. reopen mid phone call), re-apply
+        // it so the preserved buffer is held silent until the focus regain
+        // unfreeze, instead of playing out into the still-preempted route.
+        if (outputFrozen) nativeOutput.setFrozen(true)
         // Oboe getTimestamp/calculateLatency only report the HAL buffer (~tens
         // of ms), missing the DAC/analog/speaker path. The hidden
         // AudioManager.getOutputLatency reports the FULL output latency (what
@@ -526,6 +593,36 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
     }
 
     /**
+     * Reopen the native output after Oboe reported the stream disconnected with
+     * the bound device still present (a phone call / nav prompt preempts the
+     * route without removing the device, so handleDeviceChange does not fire).
+     * Reopens on the current route and relocks under the startup mute.
+     */
+    private fun reopenAfterDisconnect() {
+        if (!configured) {
+            reopenInFlight = false
+            return
+        }
+        // The producer parks on reopenInFlight, so it MUST be cleared on every
+        // exit or the producer (and audio) stalls forever.
+        try {
+            Log.d(TAG, "Native output disconnected (route preempted); reopening")
+            // Reopen ONLY the native Oboe stream — do NOT flush. start() resets the
+            // native ring, but the encoded frameQueue (often a deep buffer preserved
+            // by a freeze across a phone call) stays intact and refills the fresh
+            // ring, so playback resumes from the preserved audio. Flushing here was a
+            // bug: it discarded the preserved buffer (~27 s -> 0), the server then
+            // throttled its feed and playback wedged at the start gate. DIRECT is a
+            // pure FIFO so the stale timeline anchor across the call is harmless.
+            startNativeOutput()        // fresh stream on the current route; clears disconnected_
+            refreshRoutedDevice()
+            onRoutingChanged?.invoke()
+        } finally {
+            reopenInFlight = false
+        }
+    }
+
+    /**
      * Resolve the routed device from the native AAudio device id via
      * AudioManager (Oboe has no routing listener) and notify on change.
      */
@@ -568,11 +665,43 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
                 sleepMs(10)
                 continue
             }
-            if (!startupReady()) {
+            // Oboe disconnected (route preempted by a phone call etc.) but the
+            // device stays present, so the device-callback never fires. Reopen
+            // ourselves, else the dead stream never drains the ring (buffer grows
+            // unbounded) and audio is silent while the UI shows "playing".
+            if (nativeOutput.isDisconnected() && !reopenInFlight) {
+                reopenInFlight = true
+                mainHandler.post { reopenAfterDisconnect() }
+                sleepMs(50)
+                continue
+            }
+            // Park the producer while a reopen is in flight. startNativeOutput
+            // tears down and recreates the native output, so for a window the
+            // native pointer is 0: bufferedFrames() then reports 0 (no
+            // backpressure) and write() drops every frame. Without this guard the
+            // producer spins, draining the encoded frameQueue into the codec and
+            // discarding it (the codec backlog is later flushed past the ring in
+            // one drainDecoder), destroying the deep buffer preserved across a
+            // phone-call freeze and leaving a shallow, underrunning ring.
+            // reopenAfterDisconnect clears the flag once the stream is back.
+            if (reopenInFlight) {
                 sleepMs(10)
                 continue
             }
-            if (!playbackStarted) startTrack()
+            // The start buffer gate applies ONLY before the first startTrack.
+            // Once playing, keep feeding the ring unconditionally — re-gating on
+            // startBufferMs every iteration would BLOCK writes whenever the buffer
+            // dips below the gate (e.g. the server throttling its feed to ~288 ms
+            // after a reopen), starving the ring to a 1-frame trickle -> underrun
+            // and a permanently shallow buffer. Underruns while playing are
+            // handled by the native callback, not by stalling the producer.
+            if (!playbackStarted) {
+                if (!startupReady()) {
+                    sleepMs(10)
+                    continue
+                }
+                startTrack()
+            }
 
             // Backpressure: keep the native ring around RING_TARGET_MS, leaving
             // the rest encoded. Prevents draining a multi-second server burst
@@ -586,7 +715,13 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
             val drained = drainDecoder(generation)
             if (drained) continue
 
-            val frame = frameQueue.poll(10, TimeUnit.MILLISECONDS) ?: continue
+            val frame = try {
+                frameQueue.poll(10, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                // releaseInternal interrupts us to stop (release / format change).
+                // Exit cleanly instead of crashing the producer thread.
+                break
+            } ?: continue
             frameQueueBytes.addAndGet(-frame.length.toLong())
             if (frame.generation != configureGeneration) continue
 
@@ -664,19 +799,29 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
     }
 
     private fun queueCodecInput(frame: EncodedFrame) {
-        val mc = codec ?: return
         synchronized(codecLock) {
-            val inputIndex = mc.dequeueInputBuffer(1_000)
-            if (inputIndex < 0) return
-            val input = mc.getInputBuffer(inputIndex) ?: return
-            input.clear()
-            if (frame.length > input.remaining()) {
-                Log.w(TAG, "Oversized $activeCodec frame dropped: ${frame.length}B")
+            // Read the codec INSIDE the lock: a concurrent format change
+            // (releaseInternal, also under codecLock) releases it and sets it
+            // null, so a ref captured before the lock would be stale/Released.
+            val mc = codec ?: return
+            try {
+                val inputIndex = mc.dequeueInputBuffer(1_000)
+                if (inputIndex < 0) return
+                val input = mc.getInputBuffer(inputIndex) ?: return
+                input.clear()
+                if (frame.length > input.remaining()) {
+                    Log.w(TAG, "Oversized $activeCodec frame dropped: ${frame.length}B")
+                    return
+                }
+                input.put(frame.data, frame.offset, frame.length)
+                decoderMarks.addLast(DecoderMark(frame.serverTimestampUs, frame.generation))
+                mc.queueInputBuffer(inputIndex, 0, frame.length, frame.serverTimestampUs, 0)
+            } catch (e: IllegalStateException) {
+                // Codec reconfigured/released out from under us (defensive: the
+                // join in releaseInternal should normally prevent this).
+                Log.w(TAG, "queueCodecInput skipped: codec not executing (${e.message})")
                 return
             }
-            input.put(frame.data, frame.offset, frame.length)
-            decoderMarks.addLast(DecoderMark(frame.serverTimestampUs, frame.generation))
-            mc.queueInputBuffer(inputIndex, 0, frame.length, frame.serverTimestampUs, 0)
             if (receivedFrameCount <= 8 || receivedFrameCount % 500 == 0L) {
                 Log.d(
                     TAG,
@@ -688,7 +833,7 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
     }
 
     private fun drainDecoder(generation: Long): Boolean {
-        val mc = codec ?: return false
+        if (codec == null) return false
         var wroteAny = false
         val info = MediaCodec.BufferInfo()
         while (true) {
@@ -697,7 +842,14 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
             var chunkLen = 0
             var chunkGen = 0L
             val more = synchronized(codecLock) {
-                val outputIndex = mc.dequeueOutputBuffer(info, 0)
+                // Read inside the lock; a concurrent format change releases it.
+                val mc = codec ?: return@synchronized false
+                val outputIndex = try {
+                    mc.dequeueOutputBuffer(info, 0)
+                } catch (e: IllegalStateException) {
+                    Log.w(TAG, "drainDecoder stop: codec not executing (${e.message})")
+                    return@synchronized false
+                }
                 if (outputIndex < 0) {
                     if (outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                         val fmt = mc.outputFormat
@@ -885,6 +1037,10 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
     }
 
     private fun flushQueuesAndDecoder() {
+        // A flush discards the ring, so any pending freeze is moot; clear it so
+        // the native consumer is not left holding after the ring is reset.
+        outputFrozen = false
+        nativeOutput.setFrozen(false)
         frameQueue.clear()
         frameQueueBytes.set(0)
         decoderMarks.clear()
@@ -895,6 +1051,27 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
         synchronized(codecLock) {
             try { codec?.flush() } catch (_: Exception) {}
         }
+    }
+
+    /**
+     * Freeze the native consumer WITHOUT dropping the ring: fade to silence and
+     * hold the read position so the buffered audio survives a transient
+     * interruption (focus loss) and resumes instantly + click-free, with the
+     * deep buffer intact. Unlike a pause/flush, nothing is discarded and the
+     * producer keeps the ring full. Solo/DIRECT only — the server feeds realtime
+     * after a flush and never rebuilds the deep buffer, so freezing is the only
+     * way to keep it across the gap.
+     */
+    fun freezeOutput() {
+        Log.d(TAG, "Freeze output (preserve buffer) buf=${bufferDurationMs()}ms state=$syncState")
+        outputFrozen = true
+        nativeOutput.setFrozen(true)
+    }
+
+    fun unfreezeOutput() {
+        Log.d(TAG, "Unfreeze output (resume from preserved buffer) buf=${bufferDurationMs()}ms state=$syncState")
+        outputFrozen = false
+        nativeOutput.setFrozen(false)
     }
 
     private fun resetSyncMetrics() {
@@ -908,17 +1085,36 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
         val old = syncState
         syncState = newState
         Log.d(TAG, "Sync: $old -> $newState (buf=${bufferDurationMs()}ms, ${bufferedBytes() / 1000}KB)")
+        // Stop the always-on output after a grace once genuinely idle; cancel the
+        // moment audio is flowing/aligning again so a track transition never
+        // churns the HAL.
+        if (newState == SyncState.IDLE) scheduleIdleStop() else cancelIdleStop()
         onSyncStateChanged?.invoke(newState)
     }
 
     private fun releaseInternal() {
+        cancelIdleStop()
+        outputPausedForIdle = false
+        reopenInFlight = false
+        outputFrozen = false
         playbackActive = false
         paused = false
         playbackStarted = false
         playbackGeneration++
-        synchronized(playbackThreadLock) {
-            playbackThread?.interrupt()
+        // Stop the producer and WAIT for it to exit before releasing the codec.
+        // Without the join the interrupted producer can still be mid
+        // queueInputBuffer/dequeue on the codec we are about to release ->
+        // IllegalStateException ("valid only at Executing states; currently at
+        // Released state") on a format change (e.g. FLAC -> Opus). The producer
+        // catches the interrupt and breaks, so the join returns promptly.
+        val producer = synchronized(playbackThreadLock) {
+            val t = playbackThread
             playbackThread = null
+            t
+        }
+        producer?.interrupt()
+        if (producer != null && producer !== Thread.currentThread()) {
+            try { producer.join(500) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
         }
         flushQueuesAndDecoder()
         synchronized(codecLock) {

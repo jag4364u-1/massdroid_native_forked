@@ -56,6 +56,13 @@ public:
     // Stops and closes the stream and frees the ring.
     void stop();
 
+    // Idle power management: requestStop the Oboe stream so the real-time HAL
+    // callback stops firing (no CPU / no audio hardware held) WITHOUT closing it
+    // or freeing the ring, so resumeStream() restarts quickly. Called when
+    // playback has been idle for a grace period; resumed on the next stream.
+    void pauseStream();
+    void resumeStream();
+
     // Drops all buffered audio + timeline markers (seek / track change).
     // Safe to call from the control thread while the callback runs.
     void flush();
@@ -83,6 +90,20 @@ public:
     int64_t driftEmaUs() const { return driftEmaUs_.load(); }
 
     void setVolume(float v) { volume_.store(v); }
+
+    // Freeze/unfreeze the consumer WITHOUT dropping the ring (transient focus
+    // loss in solo/DIRECT). While frozen the callback fades to silence and then
+    // holds the read position, so the buffered audio survives and resumes
+    // instantly + click-free on unfreeze. Unlike flush(), nothing is discarded.
+    // No-op effect on a fresh stream (empty ring); intended for DIRECT only.
+    void setFrozen(bool f) { frozen_.store(f); }
+
+    // True after Oboe reported the stream disconnected (e.g. a phone call
+    // preempts the route while the device stays "present" in getDevices(), so
+    // the AudioManager device-callback never fires). The Kotlin engine polls
+    // this and reopens the output; otherwise the dead stream never drains the
+    // ring and playback is silent while the UI still shows "playing".
+    bool isDisconnected() const { return disconnected_.load(); }
 
     int32_t bytesPerFrame() const { return channels_ * 2; }
 
@@ -138,6 +159,11 @@ private:
     float appliedVolume_ = 0.0f;
     std::atomic<bool> flushRequested_{false};
     std::atomic<bool> driftCorrection_{true};
+    // Freeze: hold the read position (preserve the ring) across a transient
+    // interruption. Faded in/out via the existing gain ramp so it is click-free.
+    std::atomic<bool> frozen_{false};
+    // Set by onErrorAfterClose when Oboe disconnects the stream; cleared on start.
+    std::atomic<bool> disconnected_{false};
 
     // Output-latency anchor captured from Oboe getTimestamp (CLOCK_MONOTONIC),
     // refreshed periodically inside the callback.

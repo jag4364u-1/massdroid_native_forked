@@ -128,6 +128,41 @@ class SendspinNativeOutput {
         if (p != 0L) nativeSetVolume(p, volume.coerceIn(0f, 1f))
     }
 
+    /**
+     * Freeze (true) or resume (false) the consumer without dropping the ring.
+     * Frozen = fade to silence then hold the read position, preserving the
+     * buffered audio across a transient interruption. Unfreeze fades back in
+     * from the held sample. Used for solo/DIRECT focus interruptions instead of
+     * a flush (the server feeds realtime after a flush and never rebuilds the
+     * deep buffer).
+     */
+    fun setFrozen(frozen: Boolean) {
+        val p = ptr
+        if (p != 0L) nativeSetFrozen(p, frozen)
+    }
+
+    /**
+     * Idle power management: stop/restart the Oboe callback without closing the
+     * stream or freeing the ring. pauseStream halts the real-time HAL thread
+     * (no CPU, no audio hardware held) when playback is idle; resumeStream
+     * restarts it quickly for the next stream.
+     */
+    fun pauseStream() {
+        val p = ptr
+        if (p != 0L) nativePauseStream(p)
+    }
+
+    fun resumeStream() {
+        val p = ptr
+        if (p != 0L) nativeResumeStream(p)
+    }
+
+    /** True if Oboe disconnected the stream (route preempted, e.g. phone call). */
+    fun isDisconnected(): Boolean {
+        val p = ptr
+        return p != 0L && nativeIsDisconnected(p)
+    }
+
     @Synchronized
     fun release() {
         stop()
@@ -142,6 +177,10 @@ class SendspinNativeOutput {
     private external fun nativeOutputLatencyUs(ptr: Long): Long
     private external fun nativeBufferedFrames(ptr: Long): Long
     private external fun nativeSetVolume(ptr: Long, volume: Float)
+    private external fun nativeSetFrozen(ptr: Long, frozen: Boolean)
+    private external fun nativePauseStream(ptr: Long)
+    private external fun nativeResumeStream(ptr: Long)
+    private external fun nativeIsDisconnected(ptr: Long): Boolean
     private external fun nativeDeviceId(ptr: Long): Int
     private external fun nativeDriftEmaUs(ptr: Long): Long
 }
