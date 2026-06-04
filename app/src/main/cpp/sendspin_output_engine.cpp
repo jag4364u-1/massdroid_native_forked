@@ -49,6 +49,13 @@ constexpr int64_t OUTLIER_US = 15000;
 // a sub-ms blip (no freeze-then-jump sawtooth that makes the drift wander).
 constexpr int64_t MAX_SLEW_US = 1000;
 
+// Max the (calcLat-derived) output latency may move per ~100 ms poll. The true
+// HAL latency is ~constant, so slew-clamp it: a one-off calculateLatencyMillis
+// spike moves the value <=1 ms (recovered next poll) instead of perturbing the
+// timeline and triggering a momentary resampler correction. A genuine latency
+// change is rare and re-anchored by a flush/relock anyway.
+constexpr int64_t LAT_SLEW_US = 1000;
+
 // Gain-ramp time: mute/unmute/volume changes reach the target over this long
 // instead of jumping mid-waveform (which clicks).
 constexpr float FADE_SEC = 0.02f;
@@ -288,7 +295,14 @@ void SendspinOutputEngine::refreshTimestampAnchor(oboe::AudioStream* stream, int
         // one-off HAL hiccup never triggers a resampler correction.
         if (latUs > 0 && latUs < 500000) {
             const int64_t prev = latencyUs_.load();
-            latencyUs_.store(prev <= 0 ? latUs : (prev * 3 + latUs) / 4);
+            if (prev <= 0) {
+                latencyUs_.store(latUs);
+            } else {
+                int64_t d = latUs - prev;
+                if (d > LAT_SLEW_US) d = LAT_SLEW_US;
+                else if (d < -LAT_SLEW_US) d = -LAT_SLEW_US;
+                latencyUs_.store(prev + d);
+            }
         }
     }
 }
