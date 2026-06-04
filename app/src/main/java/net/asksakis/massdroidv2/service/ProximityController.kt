@@ -8,7 +8,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import net.asksakis.massdroidv2.R
 import net.asksakis.massdroidv2.data.proximity.DetectResult
 import net.asksakis.massdroidv2.data.proximity.DetectedRoom
@@ -348,8 +350,13 @@ class ProximityController(
 
                 // ── Evaluate state ──
                 val isMoving = motionGate.isMoving.value
-                val highAccuracy = updateHighAccuracyWindow(isMoving) || proximityScanner.uiHighAccuracyRequested
                 val screenOn = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)?.state == android.view.Display.STATE_ON
+                // UI-requested high accuracy (live monitoring) only matters while the screen is on:
+                // the settings UI can't be visible with the screen off, and if its lifecycle fails to
+                // clear the flag (screen times out while still composed) it would otherwise pin the
+                // screen-off motion burst + wakelock loop forever. Gate it on screenOn defensively.
+                val highAccuracy = updateHighAccuracyWindow(isMoving) ||
+                    (screenOn && proximityScanner.uiHighAccuracyRequested)
                 val cooledDown = System.currentTimeMillis() - lastRoomSwitchMs >= COOLDOWN_AFTER_SWITCH_MS
 
                 when {
@@ -376,12 +383,21 @@ class ProximityController(
                         kotlinx.coroutines.delay(MOTION_SCAN_INTERVAL_MS)
                     }
 
-                    // ── Screen OFF + idle ──
-                    // PendingIntent background scan handles detection via bg-receiver.
-                    // No burst scan needed here; just keep persistent scan warm.
+                    // ── Screen OFF + idle (or transient cooldown) ──
+                    // Detection while idle is handled by the PendingIntent bg-receiver and the
+                    // dedicated motion collectors, so the loop need not spin. When truly idle
+                    // (screen off, no motion) wait for motion (instant wake, preserves the fast
+                    // path) or the idle poll interval, instead of waking the CPU every 2s.
+                    // Transient cooldown states keep the short poll so normal cadence resumes fast.
                     else -> {
                         ensurePersistentScan(lowPower = true)
-                        kotlinx.coroutines.delay(2_000)
+                        if (!screenOn && !highAccuracy) {
+                            withTimeoutOrNull(SCREEN_OFF_IDLE_SCAN_INTERVAL_MS) {
+                                motionGate.isMoving.first { it }
+                            }
+                        } else {
+                            kotlinx.coroutines.delay(2_000)
+                        }
                     }
                 }
             }

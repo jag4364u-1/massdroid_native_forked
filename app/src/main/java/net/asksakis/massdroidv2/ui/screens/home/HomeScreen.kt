@@ -216,13 +216,7 @@ fun HomeScreen(
                 },
                 actions = {
                     MdIconButton(onClick = { showConnectionDialog = true }) {
-                        val (icon, tint) = when (connectionState) {
-                            is ConnectionState.Connected -> Icons.Default.Cloud to MaterialTheme.colorScheme.primary
-                            is ConnectionState.Connecting -> Icons.Default.CloudSync to MaterialTheme.colorScheme.tertiary
-                            is ConnectionState.Disconnected -> Icons.Default.CloudOff to MaterialTheme.colorScheme.error
-                            is ConnectionState.Error -> Icons.Default.CloudOff to MaterialTheme.colorScheme.error
-                        }
-                        Icon(icon, contentDescription = "Connection status", tint = tint)
+                        ConnectionStatusIcon(connectionState = connectionState)
                     }
                     MdIconButton(onClick = onNavigateToSettings) {
                         Icon(Icons.Default.Settings, contentDescription = "Settings")
@@ -503,6 +497,101 @@ private fun SmartMixFab(
 
 private const val SMART_MIX_MESSAGE_MS = 3_500L
 
+/**
+ * Connection indicator in the top bar.
+ *
+ * The MA server cannot tell us it is restarting: it emits `core_state_updated status=stopping` but
+ * tears the socket down before that frame is delivered (verified on device, only `status=running`
+ * ever arrives, after reconnect). So the only observable signal is the connection itself. We blink
+ * the cloud red while the server is unreachable *after having been connected once* (a real drop,
+ * which is what a restart looks like from here), and on the way back we flash it green once.
+ *
+ * Animations use the project fixed-step pattern (no infinite transitions); animated values are read
+ * only in the draw phase via `graphicsLayer` (this icon is not elevated, so no offscreen compositing).
+ */
+@Composable
+private fun ConnectionStatusIcon(connectionState: ConnectionState) {
+    val isConnected = connectionState is ConnectionState.Connected
+    val successGreen = Color(0xFF4CAF50)
+
+    // Only react to a drop, never to the first connect on launch.
+    var everConnected by remember { mutableStateOf(false) }
+    var wasDown by remember { mutableStateOf(false) }
+    var returnFlash by remember { mutableStateOf(0) }
+    LaunchedEffect(isConnected) {
+        if (isConnected) {
+            if (everConnected && wasDown) returnFlash++   // came back after a drop
+            everConnected = true
+            wasDown = false
+        } else if (everConnected) {
+            wasDown = true
+        }
+    }
+    val down = everConnected && !isConnected
+
+    // Red blink while unreachable.
+    val pulse = remember { Animatable(1f) }
+    LaunchedEffect(down) {
+        if (down) {
+            val frames = 20              // 20 * 50ms = 1s per cycle, ~20fps
+            val pi = Math.PI.toFloat()
+            while (true) {
+                repeat(frames) { i ->
+                    delay(50)            // Choreographer-independent
+                    pulse.snapTo(1f - kotlin.math.sin(pi * i / frames) * 0.7f)  // 1.0 -> 0.3 -> 1.0
+                }
+            }
+        } else {
+            pulse.snapTo(1f)
+        }
+    }
+
+    // One-shot green "back online" flash when the connection returns after a drop.
+    val flash = remember { Animatable(0f) }
+    LaunchedEffect(returnFlash) {
+        if (returnFlash > 0) {
+            val frames = 12
+            val pi = Math.PI.toFloat()
+            repeat(2) {                  // two quick pulses, ~1.2s total
+                repeat(frames) { i ->
+                    delay(50)
+                    flash.snapTo(kotlin.math.sin(pi * i / frames))   // 0 -> 1 -> 0
+                }
+            }
+            flash.snapTo(0f)
+        }
+    }
+
+    if (down) {
+        Icon(
+            Icons.Default.CloudOff,
+            contentDescription = "Server unreachable",
+            tint = MaterialTheme.colorScheme.error,
+            modifier = Modifier.graphicsLayer { alpha = pulse.value }
+        )
+        return
+    }
+
+    val flashing = flash.value > 0.01f
+    val (icon, tint) = when (connectionState) {
+        is ConnectionState.Connected ->
+            Icons.Default.Cloud to if (flashing) successGreen else MaterialTheme.colorScheme.primary
+        is ConnectionState.Connecting -> Icons.Default.CloudSync to MaterialTheme.colorScheme.tertiary
+        is ConnectionState.Disconnected -> Icons.Default.CloudOff to MaterialTheme.colorScheme.error
+        is ConnectionState.Error -> Icons.Default.CloudOff to MaterialTheme.colorScheme.error
+    }
+    Icon(
+        icon,
+        contentDescription = "Connection status",
+        tint = tint,
+        modifier = Modifier.graphicsLayer {
+            val s = 1f + flash.value * 0.3f   // brief scale pop on the green flash
+            scaleX = s
+            scaleY = s
+        }
+    )
+}
+
 @Composable
 private fun ConnectionStatusDialog(
     connectionState: ConnectionState,
@@ -511,9 +600,13 @@ private fun ConnectionStatusDialog(
 ) {
     val statusText = when (connectionState) {
         is ConnectionState.Connected -> "Connected (v${connectionState.serverInfo.serverVersion})"
-        is ConnectionState.Connecting -> "Connecting..."
-        is ConnectionState.Disconnected -> "Disconnected"
-        is ConnectionState.Error -> "Error: ${connectionState.message}"
+        is ConnectionState.Connecting -> "Reconnecting..."
+        is ConnectionState.Disconnected -> "Server unreachable"
+        is ConnectionState.Error -> "Server unreachable: ${connectionState.message}"
+    }
+    val statusColor = when (connectionState) {
+        is ConnectionState.Connected -> MaterialTheme.colorScheme.onSurface
+        else -> MaterialTheme.colorScheme.error
     }
     val historySamples = probeState.historyMs.filter { it > 0L }
     val avgMs = if (historySamples.isNotEmpty()) historySamples.average().toInt() else null
@@ -524,7 +617,7 @@ private fun ConnectionStatusDialog(
         title = { Text("Connection Status") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(statusText, style = MaterialTheme.typography.bodyMedium)
+                Text(statusText, style = MaterialTheme.typography.bodyMedium, color = statusColor)
 
                 if (hasGraphData) {
                     ConnectionLatencyGraph(samples = probeState.historyMs)

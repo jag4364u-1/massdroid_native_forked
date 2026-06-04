@@ -4,6 +4,8 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -393,12 +395,22 @@ class ProximityViewModel @Inject constructor(
                     }
                     _calibrationError.value = errorMsg
                 } else {
-                    val fingerprints = buildFingerprints(rawScans, validAddresses)
-                    val allNames = nameMap.mapValues { it.value }
-                    val profiles = computeBeaconProfiles(rawScans, validAddresses, allNames, anchorTypes, otherRoomMeans)
                     val warnings = mutableListOf<String>()
                     val room = config.rooms.find { it.id == roomId }
-                    val quality = assessQuality(room?.name ?: roomId, profiles, warnings, room?.detectionPolicy ?: net.asksakis.massdroidv2.data.proximity.DetectionPolicy.STRICT)
+                    val allNames = nameMap.mapValues { it.value }
+                    // Fingerprint/profile math is CPU-bound; keep it off the main thread to avoid
+                    // jank during calibration. RoomDetector calls below stay on Main (they assert it).
+                    val (fingerprints, profiles, quality) = withContext(Dispatchers.Default) {
+                        val fp = buildFingerprints(rawScans, validAddresses)
+                        val pr = computeBeaconProfiles(rawScans, validAddresses, allNames, anchorTypes, otherRoomMeans)
+                        val q = assessQuality(
+                            room?.name ?: roomId,
+                            pr,
+                            warnings,
+                            room?.detectionPolicy ?: net.asksakis.massdroidv2.data.proximity.DetectionPolicy.STRICT
+                        )
+                        Triple(fp, pr, q)
+                    }
 
                     configStore.update { cfg ->
                         val updated = cfg.rooms.map { r ->
@@ -574,22 +586,23 @@ class ProximityViewModel @Inject constructor(
                         .keys
                 }
 
-                configStore.update { config ->
-                    // First pass: compute per-room means for cross-room discrimination
+                val baseRooms = configStore.config.value.rooms
+                // Heavy fingerprint/profile math runs off the main thread and OUTSIDE the config
+                // write lock (calibrateRoom already does it this way). Results are re-mapped onto
+                // the latest rooms by id, so a concurrent config change can't be clobbered.
+                val updatedById = withContext(Dispatchers.Default) {
+                    // First pass: per-room means for cross-room discrimination
                     val roomMeans = allTraining.associate { training ->
                         training.roomId to computeBeaconMeans(training.rawScans, roomValidAddresses(training))
                     }
-
-                    val updatedRooms = config.rooms.map { room ->
-                        val training = allTraining.find { it.roomId == room.id } ?: return@map room
+                    allTraining.mapNotNull { training ->
+                        val room = baseRooms.find { it.id == training.roomId } ?: return@mapNotNull null
                         val validAddrs = roomValidAddresses(training)
-
                         val fingerprints = buildFingerprints(training.rawScans, validAddrs)
                         val otherRoomMeans = roomMeans.filter { it.key != room.id }
                         val profiles = computeBeaconProfiles(
                             training.rawScans, validAddrs, allNames, allAnchorTypes, otherRoomMeans
                         )
-
                         val quality = assessQuality(room.name, profiles, warnings, room.detectionPolicy)
                         roomResults[room.id] = quality
 
@@ -601,15 +614,17 @@ class ProximityViewModel @Inject constructor(
                                 "w=${String.format("%.2f", p.weight)}")
                         }
 
-                        room.copy(
+                        room.id to room.copy(
                             fingerprints = fingerprints,
                             beaconProfiles = profiles,
                             calibrationQuality = quality,
                             connectedBssid = training.connectedBssid ?: room.connectedBssid,
                             connectedSsid = training.connectedSsid ?: room.connectedSsid
                         )
-                    }
-                    config.copy(rooms = updatedRooms)
+                    }.toMap()
+                }
+                configStore.update { config ->
+                    config.copy(rooms = config.rooms.map { updatedById[it.id] ?: it })
                 }
 
                 roomDetector.reset()

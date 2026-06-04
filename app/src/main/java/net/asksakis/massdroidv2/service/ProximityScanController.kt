@@ -15,12 +15,29 @@ class ProximityScanController(
         private const val HIGH_ACCURACY_SNAPSHOT_RETAIN_MS = 30_000L
         private const val HIGH_ACCURACY_FRESH_SNAPSHOT_MS = 8_000L
         private const val BLE_DEBUG_DEVICE_LIMIT = 8
+
+        /**
+         * Floor between BLE scan restarts. Android throttles (and the OS flags battery drain on)
+         * any app that starts a scan more than 5 times per 30s. A mode switch or a scanner recovery
+         * is a stop+start, so we coalesce rapid flips: at most ~1 restart per this interval keeps us
+         * safely under the limit (~3/30s). The device buffer stays warm in the meantime.
+         */
+        private const val MIN_SCAN_RESTART_INTERVAL_MS = 10_000L
     }
 
     private var persistentScanLowPower: Boolean? = null
+    private var lastScanRestartMs = 0L
 
     fun ensurePersistentScan(lowPower: Boolean, config: ProximityConfig) {
         if (persistentScanLowPower == lowPower) return
+        // Defer mode flips that arrive too soon after the last restart. A scan is already running
+        // (persistentScanLowPower != null) so we lose nothing but the higher/lower duty cycle for a
+        // few seconds; the caller (main loop) re-requests and the switch applies once the floor
+        // elapses. This is what keeps us under Android's BLE scan-restart throttle.
+        val now = System.currentTimeMillis()
+        if (persistentScanLowPower != null && now - lastScanRestartMs < MIN_SCAN_RESTART_INTERVAL_MS) {
+            return
+        }
         if (persistentScanLowPower != null) {
             Log.d(
                 TAG,
@@ -54,6 +71,7 @@ class ProximityScanController(
             anchorNames = nameAnchors
         )
         persistentScanLowPower = lowPower
+        lastScanRestartMs = now
     }
 
     fun stopPersistentScan(clearBuffers: Boolean = true) {
@@ -63,6 +81,10 @@ class ProximityScanController(
 
     fun recoverScannerIfNeeded(highAccuracy: Boolean, config: ProximityConfig, roomDetector: RoomDetector) {
         if (proximityScanner.zeroDeviceStreak < 5) return
+        // Recovery is a stop+start; rate-limit it like any restart. Without this, a streak of
+        // zero-device reads (no beacons in range) thrashes the scanner every cycle and trips the
+        // OS scan-restart throttle. Leave the streak intact so we retry once the floor elapses.
+        if (System.currentTimeMillis() - lastScanRestartMs < MIN_SCAN_RESTART_INTERVAL_MS) return
         Log.w(TAG, "Scanner recovery: ${proximityScanner.zeroDeviceStreak} zero-device reads")
         stopPersistentScan()
         ensurePersistentScan(lowPower = !highAccuracy, config = config)
