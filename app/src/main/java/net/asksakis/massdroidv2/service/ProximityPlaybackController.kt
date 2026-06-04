@@ -183,12 +183,16 @@ class ProximityPlaybackController(
         val playingPlayers = players.filter { it.state == PlaybackState.PLAYING }
         val transferCandidates = playingPlayers.filter { it.playerId != targetPlayerId }
 
+        // The player the user is actively controlling disambiguates when several are playing: if it
+        // is playing (and isn't the target), it is the transfer source even with other streams live.
+        // Otherwise a single playing stream is unambiguous; more than one with no selected source
+        // stays ambiguous so we ask instead of guessing.
+        val selectedPlayingSource = selectedAvailablePlayer
+            ?.takeIf { it.playerId != targetPlayerId && it.state == PlaybackState.PLAYING }
+
         val resolvedTransferSource = when {
+            selectedPlayingSource != null -> selectedPlayingSource
             transferCandidates.size == 1 -> transferCandidates.first()
-            transferCandidates.isEmpty() &&
-                selectedAvailablePlayer != null &&
-                selectedAvailablePlayer.playerId != targetPlayerId &&
-                selectedAvailablePlayer.state == PlaybackState.PLAYING -> selectedAvailablePlayer
             else -> null
         }
 
