@@ -89,6 +89,14 @@ public:
     // Surfaced for the sync-error UI; correction itself is internal.
     int64_t driftEmaUs() const { return driftEmaUs_.load(); }
 
+    // Cumulative ring-underrun frames (callback ran dry within a buffer): the
+    // real audible-dropout counter for the quality readout. 0 = clean.
+    int64_t underrunFrames() const { return underrunFrames_.load(); }
+
+    // Last applied resampler rate, in micro-units (1000000 = 1.0). 1.0 = locked
+    // passthrough; off-1.0 = actively correcting drift (SYNC only).
+    int64_t resampleRateMicros() const { return lastRateMicros_.load(); }
+
     void setVolume(float v) { volume_.store(v); }
 
     // Freeze/unfreeze the consumer WITHOUT dropping the ring (transient focus
@@ -175,6 +183,7 @@ private:
     // Diagnostics
     std::atomic<int64_t> driftEmaUs_{0};
     std::atomic<int64_t> underrunFrames_{0};
+    std::atomic<int64_t> lastRateMicros_{1000000}; // applied resampler rate * 1e6
     int64_t callbackCount_ = 0;
     // When >0, log every callback (decremented). Armed when a flush is acked so
     // we can see exactly what the callback emits across a skip/seek boundary.

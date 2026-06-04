@@ -480,6 +480,16 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
 
     override fun bufferedBytes(): Long = frameQueueBytes.get()
 
+    /** Decoded PCM cushion currently in the native ring (ms); the real underrun margin. */
+    fun ringBufferedMs(): Long =
+        nativeOutput.bufferedFrames() * 1000L / activeSampleRate.coerceAtLeast(1)
+
+    /** Cumulative native ring-underrun frames (audible dropouts since the last (re)start). */
+    fun underrunFrames(): Long = nativeOutput.underrunFrames()
+
+    /** Last applied resampler rate (1.0 locked; off-1.0 = actively correcting, SYNC only). */
+    fun resampleRate(): Double = nativeOutput.resampleRate()
+
     override fun shiftAnchorForSyncDelayChange(deltaMs: Int) {
         resetSyncMetrics()
     }

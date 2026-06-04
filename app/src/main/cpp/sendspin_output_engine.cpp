@@ -82,21 +82,22 @@ bool SendspinOutputEngine::start(int32_t sampleRate, int32_t channels, bool drif
     lastTimestampPollFrame_ = 0;
     driftEmaUs_.store(0);
     underrunFrames_.store(0);
+    lastRateMicros_.store(1000000);
     callbackCount_ = 0;
     postFlushCallbacks_ = 0;
     appliedVolume_ = 0.0f;
     flushRequested_.store(false);
     disconnected_.store(false);
 
-    // SYNC (driftCorrection) needs the LowLatency fast path so getTimestamp is
-    // tight enough for the drift anchor. DIRECT (solo) is a pure FIFO with no
-    // peer to phase-lock to: LowLatency's 4 ms real-time callback just risks
-    // missed deadlines (micro-glitches) on a busy device and burns CPU. Use the
-    // normal mixer path there — bigger HAL buffer, far fewer callbacks, robust
-    // under load; the extra output latency is irrelevant when solo.
-    const oboe::PerformanceMode perfMode = driftCorrection
-        ? oboe::PerformanceMode::LowLatency
-        : oboe::PerformanceMode::None;
+    // BOTH modes use LowLatency (MMAP) so getTimestamp stays tight. Using
+    // PerformanceMode::None for solo/DIRECT was a CPU/glitch optimisation, but a
+    // None (normal-mixer, non-MMAP) stream that runs first does NOT cleanly hand
+    // the MMAP-exclusive output path back: the LowLatency stream opened right
+    // after (the DIRECT->SYNC swap on a group join, or a launch already grouped)
+    // then gets a degraded, sawtoothing getTimestamp and SYNC never locks. Solo
+    // robustness instead comes from the deeper HAL buffer below; the deep PCM
+    // ring absorbs the rest. Do NOT reintroduce None for DIRECT.
+    const oboe::PerformanceMode perfMode = oboe::PerformanceMode::LowLatency;
     oboe::AudioStreamBuilder b;
     b.setDirection(oboe::Direction::Output)
         ->setPerformanceMode(perfMode)
@@ -271,20 +272,33 @@ void SendspinOutputEngine::refreshTimestampAnchor(oboe::AudioStream* stream, int
         anchorFramePosition_.store(newPos);
         anchorTimeUs_.store(predictedTimeUs + deltaUs);
     }
-    const int64_t inflight = framesWritten - newPos;
-    if (inflight >= 0) {
-        latencyUs_.store(inflight * 1000000LL / sampleRate_);
+    // Output latency from Oboe's calculateLatencyMillis, NOT the raw getTimestamp
+    // inflight (framesWritten - position). On some HALs (seen on Samsung MMAP)
+    // the raw position sawtooths wildly (tens of ms, ~10 s period) even though
+    // the true latency is a stable ~13 ms; feeding that into the drift made the
+    // resampler over-correct continuously (audible glitches) while the audio was
+    // actually in sync. calculateLatencyMillis stays stable, so the drift only
+    // reflects real, sustained clock drift.
+    auto calcLat = stream->calculateLatencyMillis();
+    if (calcLat) {
+        const int64_t latUs = static_cast<int64_t>(calcLat.value() * 1000.0);
+        // Sane bound + EMA smoothing: the true HAL+DAC latency is ~constant, so
+        // ignore absurd readings and let an occasional spike move the value only
+        // a little. Keeps the timeline (and the displayed latency) steady so a
+        // one-off HAL hiccup never triggers a resampler correction.
+        if (latUs > 0 && latUs < 500000) {
+            const int64_t prev = latencyUs_.load();
+            latencyUs_.store(prev <= 0 ? latUs : (prev * 3 + latUs) / 4);
+        }
     }
 }
 
-int64_t SendspinOutputEngine::dacPresentationUsForNextWrite(int64_t framesWritten) const {
-    int64_t pos = anchorFramePosition_.load();
-    if (pos < 0) {
-        // No timestamp yet: presentation of the next frame ~= now + buffer lag.
-        return monotonicNowUs() + latencyUs_.load();
-    }
-    int64_t t = anchorTimeUs_.load();
-    return t + (framesWritten - pos) * 1000000LL / sampleRate_;
+int64_t SendspinOutputEngine::dacPresentationUsForNextWrite(int64_t /*framesWritten*/) const {
+    // out[0] reaches the DAC after the (stable) output latency. Anchoring on the
+    // raw getTimestamp position instead made dac0 sawtooth on flaky HALs and the
+    // resampler over-correct; a stable latency keeps the drift steady so only
+    // real, sustained clock drift is corrected (the resampler still tracks that).
+    return monotonicNowUs() + latencyUs_.load();
 }
 
 int64_t SendspinOutputEngine::outputLatencyUs() const {
@@ -413,6 +427,8 @@ oboe::DataCallbackResult SendspinOutputEngine::onAudioReady(
             rate = 1.0 - dev;
         }
     }
+    // Publish the applied rate for the quality readout (1e6 = 1.0 = locked).
+    lastRateMicros_.store(static_cast<int64_t>(rate * 1000000.0));
 
     // --- Resampled fill with gain fade ----------------------------------
     // Linear interpolation between ring[i0] and ring[i0+1] at the fractional

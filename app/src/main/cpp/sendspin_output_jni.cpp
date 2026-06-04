@@ -124,4 +124,18 @@ Java_net_asksakis_massdroidv2_data_sendspin_SendspinNativeOutput_nativeDriftEmaU
     return reinterpret_cast<SendspinOutputEngine*>(ptr)->driftEmaUs();
 }
 
+JNIEXPORT jlong JNICALL
+Java_net_asksakis_massdroidv2_data_sendspin_SendspinNativeOutput_nativeUnderrunFrames(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong ptr) {
+    if (ptr == 0) return 0;
+    return reinterpret_cast<SendspinOutputEngine*>(ptr)->underrunFrames();
+}
+
+JNIEXPORT jlong JNICALL
+Java_net_asksakis_massdroidv2_data_sendspin_SendspinNativeOutput_nativeResampleRateMicros(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong ptr) {
+    if (ptr == 0) return 1000000;
+    return reinterpret_cast<SendspinOutputEngine*>(ptr)->resampleRateMicros();
+}
+
 } // extern "C"

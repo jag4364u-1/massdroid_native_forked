@@ -123,6 +123,18 @@ class SendspinNativeOutput {
         return if (p == 0L) 0L else nativeDriftEmaUs(p)
     }
 
+    /** Cumulative ring-underrun frames (audible dropouts); 0 = clean. */
+    fun underrunFrames(): Long {
+        val p = ptr
+        return if (p == 0L) 0L else nativeUnderrunFrames(p)
+    }
+
+    /** Last applied resampler rate (1.0 = locked passthrough; off-1.0 = correcting). */
+    fun resampleRate(): Double {
+        val p = ptr
+        return if (p == 0L) 1.0 else nativeResampleRateMicros(p) / 1_000_000.0
+    }
+
     fun setVolume(volume: Float) {
         val p = ptr
         if (p != 0L) nativeSetVolume(p, volume.coerceIn(0f, 1f))
@@ -183,4 +195,6 @@ class SendspinNativeOutput {
     private external fun nativeIsDisconnected(ptr: Long): Boolean
     private external fun nativeDeviceId(ptr: Long): Int
     private external fun nativeDriftEmaUs(ptr: Long): Long
+    private external fun nativeUnderrunFrames(ptr: Long): Long
+    private external fun nativeResampleRateMicros(ptr: Long): Long
 }
