@@ -94,6 +94,11 @@ data class SendspinStatusUi(
     // Hz, `outputBitDepth` is 0 for lossy codecs that don't report it.
     val outputSampleRate: Int = 0,
     val outputBitDepth: Int = 0,
+    // Native output health (real-time callback): the decoded ring cushion, the
+    // cumulative underrun (audible-dropout) count, and the live resampler rate.
+    val ringBufferedMs: Long = 0L,
+    val underrunFrames: Long = 0L,
+    val resampleRate: Double = 1.0,
 )
 
 data class AdjacentArtworkUi(
@@ -456,6 +461,9 @@ class NowPlayingViewModel @Inject constructor(
                     correctionMode = sendspinManager.correctionModeName(),
                     outputSampleRate = fmt?.sampleRate ?: 0,
                     outputBitDepth = fmt?.bitDepth ?: 0,
+                    ringBufferedMs = sendspinManager.ringBufferedMs(),
+                    underrunFrames = sendspinManager.underrunFrames(),
+                    resampleRate = sendspinManager.resampleRate(),
                 ).also { maybeLogSendspinUiStatus(it) }
             }
                 .distinctUntilChanged()

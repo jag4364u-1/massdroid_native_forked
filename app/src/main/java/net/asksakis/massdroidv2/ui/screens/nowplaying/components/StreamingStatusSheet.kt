@@ -172,6 +172,23 @@ internal fun SendspinStatusSheet(
                     String.format(java.util.Locale.US, "%.1fs  /  %d KB", bufferSeconds, status.bufferBytes / 1000),
                     smallStyle, dimColor, valueColor,
                 )
+                // Native real-time output health, compact: decoded ring cushion,
+                // live resampler rate (SYNC only; DIRECT is a fixed 1.0 FIFO), and
+                // cumulative underruns (audible dropouts) as elapsed dropped time.
+                val underrunMs = if (status.outputSampleRate > 0) {
+                    status.underrunFrames * 1000L / status.outputSampleRate
+                } else {
+                    status.underrunFrames
+                }
+                val healthLabel = buildString {
+                    append(String.format(java.util.Locale.US, "ring %.1fs", status.ringBufferedMs / 1000f))
+                    if (isSyncMode) {
+                        append(String.format(java.util.Locale.US, "  ·  rate %.3f", status.resampleRate))
+                    }
+                    append("  ·  ")
+                    append(if (status.underrunFrames == 0L) "0 drops" else "${underrunMs}ms dropped")
+                }
+                SmallStatusLine("Output health", healthLabel, smallStyle, dimColor, valueColor)
             }
 
             Box(

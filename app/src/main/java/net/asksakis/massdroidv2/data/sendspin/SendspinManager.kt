@@ -111,6 +111,12 @@ class SendspinManager(
         private set
     private var muted = false
     @Volatile private var hasActiveProtocolStream = false
+    // Last stream/start format, kept so an engine swap (DIRECT<->SYNC) that lands
+    // while a stream is already active can re-configure the incoming engine. The
+    // server does not re-send stream/start for the still-running stream, so
+    // without this the swapped-in engine sits unconfigured (no output, stuck
+    // "measuring") — notably at launch while already grouped.
+    @Volatile private var lastStreamInfo: StreamStartPlayerInfo? = null
     @Volatile private var lastSentSyncState = ""
     @Volatile private var lastCallbackSentAtMs = 0L
     private var clientId: String = ""
@@ -282,6 +288,7 @@ class SendspinManager(
                 val startType = if (hasActiveProtocolStream) ProtocolStartType.CONTINUATION else ProtocolStartType.NEW_STREAM
                 Log.d("sendspindbg", ">>> stream/start $startType ${info.codec} ${info.sampleRate}Hz buf=${audio.bufferDurationMs()}ms sync=${audio.syncState}")
                 hasActiveProtocolStream = true
+                lastStreamInfo = info
                 audio.configure(info.codec, info.sampleRate, info.channels, info.bitDepth, info.codecHeader, startType)
                 // Local playback gain is now STREAM_MUSIC-driven via
                 // LocalSpeakerVolumeBridge, so the engine stays at its default
@@ -303,6 +310,7 @@ class SendspinManager(
             is SendspinIncoming.StreamEnd -> {
                 Log.d("sendspindbg", ">>> stream/end proto_active=$hasActiveProtocolStream buf=${audio.bufferDurationMs()}ms sync=${audio.syncState}")
                 hasActiveProtocolStream = false
+                lastStreamInfo = null
                 audio.onStreamEnd()
             }
 
@@ -504,6 +512,22 @@ class SendspinManager(
         if (grouped && timeSyncJob?.isActive != true && client.state.value != SendspinState.DISCONNECTED) {
             startTimeSync()
         }
+        // If a stream is already active (e.g. the swap landed right after the
+        // server's stream/start configured the OUTGOING engine, as at launch
+        // while already grouped), the server will NOT re-send stream/start, so
+        // configure the incoming engine here from the cached format as a
+        // CONTINUATION. Otherwise it stays unconfigured: no output, no playback
+        // thread, stuck "measuring" while frames pile up unconsumed.
+        val active = lastStreamInfo
+        if (hasActiveProtocolStream && active != null) {
+            Log.d(TAG, "Engine swap: re-configuring ${target::class.simpleName} for the in-progress stream")
+            target.configure(
+                active.codec, active.sampleRate, active.channels, active.bitDepth,
+                active.codecHeader, ProtocolStartType.CONTINUATION,
+            )
+            val engineMuted = (target as? SendspinPlaybackEngine)?.syncMuted ?: false
+            if (!engineMuted) target.setMuted(muted)
+        }
         Log.d(TAG, "Engine swap done: clock samples=${clockSynchronizer.currentSampleCount()} error=${clockSynchronizer.errorUs()}us")
     }
 
@@ -607,6 +631,11 @@ class SendspinManager(
 
     fun bufferedAudioBytes(): Long = audio.bufferedBytes()
 
+    /** Native output health for the quality readout. */
+    fun ringBufferedMs(): Long = (engine as? SendspinPlaybackEngine)?.ringBufferedMs() ?: 0L
+    fun underrunFrames(): Long = (engine as? SendspinPlaybackEngine)?.underrunFrames() ?: 0L
+    fun resampleRate(): Double = (engine as? SendspinPlaybackEngine)?.resampleRate() ?: 1.0
+
     fun setupSyncStateCallback() {
         audio.onSyncSample = { errorMs, outLatMs, filterErrMs, dacAbsoluteMs ->
             val sample = SyncSample(errorMs, outLatMs, filterErrMs, dacAbsoluteMs)
@@ -666,6 +695,7 @@ class SendspinManager(
 
     fun stop() {
         hasActiveProtocolStream = false
+        lastStreamInfo = null
         _enabled.value = false
         heartbeatJob?.cancel()
         timeSyncJob?.cancel()
