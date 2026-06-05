@@ -1125,6 +1125,29 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
         nativeOutput.setFrozen(false)
     }
 
+    /**
+     * Stop the Oboe output stream so an acoustic speaker calibration chirp gets a
+     * CLEAN, exclusive audio path. Freezing (setFrozen) keeps the stream OPEN and
+     * the chirp shares the mixer, which collapsed the measured round trip
+     * (~150ms -> ~62ms). pauseStream requestStops the stream while preserving the
+     * ring; resume restarts it and, when grouped, re-mutes so the native
+     * correction skips forward to the live group position (the timeline advanced
+     * during the chirp) inaudibly.
+     */
+    fun pauseOutputForCalibration() {
+        Log.d(TAG, "Pause output for calibration (clean chirp path) state=$syncState")
+        nativeOutput.pauseStream()
+    }
+
+    fun resumeOutputAfterCalibration() {
+        Log.d(TAG, "Resume output after calibration isSync=$isSync")
+        nativeOutput.resumeStream()
+        if (isSync) {
+            beginStartupMute()
+            resetSyncMetrics()
+        }
+    }
+
     private fun resetSyncMetrics() {
         smoothedSyncErrorMs = 0.0
         startupOffsetMs = 0.0

@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import net.asksakis.massdroidv2.data.sendspin.AcousticCalibrationCoordinator
 import net.asksakis.massdroidv2.data.sendspin.SendspinManager
 import net.asksakis.massdroidv2.data.sendspin.SendspinState
 import net.asksakis.massdroidv2.data.sendspin.SyncState
@@ -203,17 +204,22 @@ class SendspinAudioController(
 
     private suspend fun resolveAcousticCorrectionForRoute(route: String): Long {
         return when (route) {
-            // Phone speaker: NO acoustic compensation. The Sendspin spec syncs at
-            // the audio port, and the reference client (sendspin-js) uses only the
-            // platform's one-way output latency (baseLatency + outputLatency) — our
-            // equivalent is the pipeline measurement from AudioTrack.getTimestamp.
-            // The acoustic chirp measures a speaker->mic ROUND TRIP; applying that
-            // full value as a one-way output delay double-counts the microphone
-            // input path and pushes playback ~half the round trip early ("locked
-            // 0.1ms but audibly out of sync"). The phone baseline stays stored as a
-            // REFERENCE for computing BT route deltas (btRoundTrip - phoneBaseline);
-            // it is not a compensation for the phone-speaker route itself.
-            "speaker" -> 0L
+            // Phone speaker: normally the in-device sync model trusts the
+            // platform's reported output latency (getOutputLatency), which is
+            // correct on honest HALs. But some HALs (e.g. Xiaomi/MIUI) under-report
+            // it by omitting the analog/speaker stage, leaving playback tens of ms
+            // late with no software way to detect it. If a built-in-speaker
+            // acoustic calibration was run (auto on group join, or manual), it
+            // stored ONLY that under-reported shortfall; apply it here. 0 when not
+            // calibrated or on honest HALs. NOTE: we store the shortfall ABOVE
+            // getOutputLatency, not the full round trip, so this does not
+            // reintroduce the old "locked but audibly out of sync" double-count.
+            "speaker" -> {
+                val calibrations = settingsRepository.acousticRouteCalibrations.first()
+                val correctionUs = calibrations[AcousticCalibrationCoordinator.SPEAKER_ROUTE_KEY]?.correctionUs ?: 0L
+                if (correctionUs > 0L) Log.d(TAG, "Speaker acoustic correction: ${correctionUs / 1000}ms")
+                correctionUs
+            }
             "wired", "usb" -> 0L
             "bt" -> {
                 val productName = sendspinManager.getRoutedDeviceProductName() ?: "unknown"

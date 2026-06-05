@@ -9,6 +9,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import net.asksakis.massdroidv2.domain.model.PlaybackState
@@ -103,6 +106,24 @@ class AcousticCalibrationCoordinator @Inject constructor(
         settingsRepository.acousticRouteCalibrations
 
     val acousticMicPathUs: Flow<Long> = settingsRepository.acousticMicPathUs
+
+    // One-time-per-session prompt: when this device joins a group and has no
+    // stored built-in-speaker calibration, suggest running one (the UI shows a
+    // confirm-to-calibrate dialog; the user opts in, never silent).
+    @Volatile private var speakerCalSuggestedThisSession = false
+    private val _speakerCalSuggested = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val speakerCalSuggested: SharedFlow<Unit> = _speakerCalSuggested.asSharedFlow()
+
+    init {
+        scope.launch {
+            sendspinManager.groupJoined.collect {
+                if (!speakerCalSuggestedThisSession && !hasSpeakerCalibration()) {
+                    speakerCalSuggestedThisSession = true
+                    _speakerCalSuggested.tryEmit(Unit)
+                }
+            }
+        }
+    }
 
     /**
      * True when the current AudioTrack output is routed to a Bluetooth sink.
@@ -321,6 +342,138 @@ class AcousticCalibrationCoordinator @Inject constructor(
     }
 
     /**
+     * Run a short calibration for the phone's BUILT-IN SPEAKER and persist a
+     * correction under [SPEAKER_ROUTE_KEY].
+     *
+     * Why this exists: the in-device sync model trusts the platform's
+     * `AudioManager.getOutputLatency`, which on some HALs (e.g. Xiaomi/MIUI)
+     * under-reports the true output latency by omitting the analog/speaker
+     * stage. There is no software API that exposes that gap, so we measure it
+     * acoustically: chirp out the built-in speaker, hear it back on the mic.
+     *
+     * Derivation. The acoustic round trip is `output_oneway + air + mic_path`.
+     * Air (~5-15 cm, same device) is sub-millisecond. We estimate `mic_path`
+     * with Oboe's reported input latency (HAL buffer); it under-counts mic DSP,
+     * so this is approximate and recalibratable, like [runLegacyBtCalibration].
+     * The sync model ALREADY compensates `getOutputLatency`, so we store only
+     * the SHORTFALL it under-reports: `(roundTrip - inputLatency) -
+     * getOutputLatency`. On an honest HAL (Samsung) that is ~0; on one that
+     * omits the analog stage (Xiaomi) it is the missing tens of ms.
+     *
+     * The caller must ensure the speaker is free of music (pause first) and set
+     * a usable media volume; the chirp is scaled by STREAM_MUSIC.
+     */
+    suspend fun runSpeakerCalibration(
+        onProgress: (toneIndex: Int, total: Int) -> Unit
+    ): CalibrationOutcome {
+        val builtInId = findBuiltInSpeakerId()
+            ?: return CalibrationOutcome.Failure("No built-in speaker on this device.")
+
+        // Single pass. A multi-pass median made it WORSE: this HAL returns garbage
+        // (~50 ms false onsets) on rapid consecutive measureRoundTrip calls, so
+        // only the first measurement on a freshly-idle audio path is trustworthy.
+        // The native already medians 6 internal tone bursts per pass.
+        val platformLatencyUs = queryOutputLatencyUs()
+        // Reject only implausibly-SHORT round trips (false early onsets, ~50ms,
+        // from reverb/stream churn). A FIXED floor; do NOT gate on platformLatency
+        // -> on devices that report a high getOutputLatency (e.g. Samsung 129ms) a
+        // perfectly valid sub-getOutputLatency round trip was wrongly rejected.
+        val floorUs = SPEAKER_CAL_MIN_ROUNDTRIP_US
+
+        // The chirp needs a CLEAN audio path. Freezing the Sendspin output kept
+        // its stream OPEN and the chirp shared the mixer -> the round trip
+        // collapsed (~150ms -> ~62ms). pauseOutputForCalibration requestStops the
+        // Sendspin Oboe stream (ring preserved) so the chirp owns the speaker;
+        // resume restarts it and re-locks when grouped.
+        calibrator.onProgress = { idx, total -> onProgress(idx, total) }
+        sendspinManager.pauseOutputForCalibration()
+        val r = try {
+            runCatching {
+                calibrator.measureRoundTrip(maxDelayMs = 200, outputDeviceId = builtInId)
+            }.getOrNull()
+        } finally {
+            sendspinManager.resumeOutputAfterCalibration()
+            calibrator.onProgress = null
+        }
+
+        if (r == null || r.quality == NativeAcousticCalibrator.Quality.FAILED) {
+            return CalibrationOutcome.Failure("Speaker calibration failed.")
+        }
+        if (r.routedOutputDeviceId != builtInId) {
+            Log.w(TAG, "Speaker routing override ignored: requested=$builtInId actual=${r.routedOutputDeviceId}")
+            return CalibrationOutcome.Failure("Could not route the chirp to the built-in speaker.")
+        }
+        if (r.roundTripUs < floorUs) {
+            return CalibrationOutcome.Failure(
+                "Measurement looked implausible (${r.roundTripUs / 1000}ms); keep the room quiet and try again."
+            )
+        }
+
+        val oneWayOutputUs = (r.roundTripUs - r.inputLatencyUs).coerceAtLeast(0L)
+        val correction = (oneWayOutputUs - platformLatencyUs).coerceIn(0L, MAX_COMPENSATION_US)
+        Log.d(
+            TAG,
+            "Speaker cal: correction=${correction / 1000}ms " +
+                "(roundTrip=${r.roundTripUs / 1000}ms inputLat=${r.inputLatencyUs / 1000}ms " +
+                "oneWayOut=${oneWayOutputUs / 1000}ms platformLat=${platformLatencyUs / 1000}ms snr=${r.snrDb}dB)"
+        )
+
+        settingsRepository.setAcousticRouteCalibration(
+            SPEAKER_ROUTE_KEY,
+            AcousticRouteCalibration(
+                correctionUs = correction,
+                quality = r.quality.name,
+                updatedAt = System.currentTimeMillis(),
+            )
+        )
+        // Apply immediately if the speaker is the live output route.
+        if (!isBtRoute()) sendspinManager.setRouteAcousticExtraUs(correction)
+
+        return CalibrationOutcome.Success(
+            compensationUs = correction,
+            quality = r.quality.name,
+            micPathUs = r.inputLatencyUs,
+            btRoundTripUs = r.roundTripUs,
+            micPathFreshlyMeasured = true,
+        )
+    }
+
+    /** True when a built-in-speaker calibration has been stored. */
+    suspend fun hasSpeakerCalibration(): Boolean =
+        settingsRepository.acousticRouteCalibrations.first().containsKey(SPEAKER_ROUTE_KEY)
+
+    /** Stored built-in-speaker correction (0 if none). */
+    suspend fun speakerCalibration(): AcousticRouteCalibration? =
+        settingsRepository.acousticRouteCalibrations.first()[SPEAKER_ROUTE_KEY]
+
+    fun resetSpeakerCalibration() {
+        scope.launch {
+            settingsRepository.removeAcousticRouteCalibration(SPEAKER_ROUTE_KEY)
+            if (!isBtRoute()) sendspinManager.setRouteAcousticExtraUs(0L)
+        }
+    }
+
+    /**
+     * Hidden `AudioManager.getOutputLatency(STREAM_MUSIC)` (full reported output
+     * latency) in microseconds, or 0 when unavailable. Same value the engine
+     * uses for the in-device latency compensation; mirrored here so the speaker
+     * calibration stores only the under-reported shortfall above it.
+     */
+    private fun queryOutputLatencyUs(): Long = try {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        if (am == null) {
+            0L
+        } else {
+            val method = AudioManager::class.java.getMethod("getOutputLatency", Int::class.javaPrimitiveType)
+            val ms = method.invoke(am, AudioManager.STREAM_MUSIC) as? Int ?: 0
+            if (ms > 0) ms * 1000L else 0L
+        }
+    } catch (e: ReflectiveOperationException) {
+        Log.w(TAG, "getOutputLatency reflection failed: ${e.message}")
+        0L
+    }
+
+    /**
      * Persist a one-way BT correction directly. Kept for backwards
      * compatibility with the previous dialog flow.
      */
@@ -376,5 +529,11 @@ class AcousticCalibrationCoordinator @Inject constructor(
         private const val MAX_MIC_PATH_US = 150_000L    // 150 ms
         /** Storage cap on a single route correction, matches dialog clamp. */
         private const val MAX_COMPENSATION_US = 500_000L // 500 ms
+
+        /** Storage key for the built-in speaker acoustic correction (per phone). */
+        const val SPEAKER_ROUTE_KEY = "speaker"
+
+        /** Absolute floor for a plausible speaker->mic round trip (false-onset guard). */
+        private const val SPEAKER_CAL_MIN_ROUNDTRIP_US = 60_000L // 60 ms
     }
 }

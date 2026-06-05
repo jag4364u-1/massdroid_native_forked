@@ -448,6 +448,20 @@ class SendspinManager(
         (engine as? SendspinPlaybackEngine)?.unfreezeOutput()
     }
 
+    /** Stop/restart the Oboe output for a clean acoustic-calibration chirp path. */
+    fun pauseOutputForCalibration() {
+        (engine as? SendspinPlaybackEngine)?.pauseOutputForCalibration()
+    }
+
+    fun resumeOutputAfterCalibration() {
+        (engine as? SendspinPlaybackEngine)?.resumeOutputAfterCalibration()
+    }
+
+    // Emits when THIS device joins a sync group (DIRECT->SYNC swap). Used to
+    // offer a one-time built-in-speaker acoustic calibration if none is stored.
+    private val _groupJoined = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val groupJoined: SharedFlow<Unit> = _groupJoined.asSharedFlow()
+
     private fun perceptualGain(volume: Int): Float {
         val linear = (volume.coerceIn(0, 100)) / 100f
         return linear * linear
@@ -525,6 +539,9 @@ class SendspinManager(
         if (grouped && timeSyncJob?.isActive != true && client.state.value != SendspinState.DISCONNECTED) {
             startTimeSync()
         }
+        // Real DIRECT->SYNC swap = this device just joined a group. Signal it so
+        // a one-time speaker calibration can be offered if none is stored.
+        if (grouped) _groupJoined.tryEmit(Unit)
         // If a stream is already active (e.g. the swap landed right after the
         // server's stream/start configured the OUTGOING engine, as at launch
         // while already grouped), the server will NOT re-send stream/start, so

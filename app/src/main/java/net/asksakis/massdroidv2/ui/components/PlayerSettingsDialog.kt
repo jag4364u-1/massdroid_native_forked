@@ -49,6 +49,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -453,6 +454,50 @@ fun PlayerSettingsDialog(
                     if (isLocalPlayer && acoustic != null) {
                         var showBtCalibrationDialog by remember { mutableStateOf(false) }
                         val btDeviceName = btRouteName.ifBlank { "Bluetooth speaker" }
+
+                        // Built-in speaker self-calibration. Measures the true
+                        // acoustic output delay to correct HALs that under-report
+                        // getOutputLatency (e.g. Xiaomi). Auto-runs on group join
+                        // when missing; also tunable here.
+                        val speakerCalibrations by acoustic.acousticRouteCalibrations
+                            .collectAsStateWithLifecycle(initialValue = emptyMap())
+                        val speakerCal = speakerCalibrations[
+                            net.asksakis.massdroidv2.data.sendspin.AcousticCalibrationCoordinator.SPEAKER_ROUTE_KEY
+                        ]
+                        val speakerCorrectionMs = ((speakerCal?.correctionUs ?: 0L) / 1000L).toInt()
+                        var showSpeakerCalibrationDialog by remember { mutableStateOf(false) }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Speaker calibration", style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    if (speakerCal != null) "This phone: ${speakerCorrectionMs}ms (${speakerCal.quality.lowercase()})"
+                                    else "Not calibrated (runs automatically on group join)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (speakerCal != null) {
+                                    MdTextButton(onClick = { acoustic.resetSpeakerCalibration() }) {
+                                        Text("Reset")
+                                    }
+                                }
+                                MdTextButton(onClick = { showSpeakerCalibrationDialog = true }) {
+                                    Text(if (speakerCal != null) "Recalibrate" else "Calibrate")
+                                }
+                            }
+                        }
+                        if (showSpeakerCalibrationDialog) {
+                            SpeakerCalibrationDialog(
+                                coordinator = acoustic,
+                                onDismiss = { showSpeakerCalibrationDialog = false }
+                            )
+                        }
 
                         Row(
                             verticalAlignment = Alignment.CenterVertically,

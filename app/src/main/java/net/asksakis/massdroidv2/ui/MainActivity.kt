@@ -116,6 +116,7 @@ class MainActivity : ComponentActivity() {
     @Inject lateinit var sendspinVolumeCoordinator: net.asksakis.massdroidv2.data.sendspin.SendspinVolumeCoordinator
     @Inject lateinit var oauthCallbackBus: net.asksakis.massdroidv2.data.websocket.OAuthCallbackBus
     @Inject lateinit var maAuthRepository: net.asksakis.massdroidv2.domain.repository.MaAuthRepository
+    @Inject lateinit var acousticCalibrationCoordinator: net.asksakis.massdroidv2.data.sendspin.AcousticCalibrationCoordinator
 
     private val volumeStep = 5
     @Volatile private var cachedSsClientId: String? = null
@@ -214,6 +215,7 @@ class MainActivity : ComponentActivity() {
                     net.asksakis.massdroidv2.ui.components.VolumeOsdOverlay(
                         flow = playerRepository.volumeOsd
                     )
+                    SpeakerCalibrationPrompt(acousticCalibrationCoordinator)
                     if (showNotificationPermissionDialog) {
                         PermissionRationaleDialog(
                             spec = AppPermissionRationales.notifications,
@@ -443,6 +445,27 @@ class MainActivity : ComponentActivity() {
             }
             .setNegativeButton("Skip", null)
             .show()
+    }
+}
+
+/**
+ * Top-level one-time offer to calibrate this phone's speaker output delay when
+ * it joins a sync group uncalibrated. The dialog's Start button is the user
+ * confirmation; Cancel skips (not re-offered again this session).
+ */
+@Composable
+private fun SpeakerCalibrationPrompt(
+    coordinator: net.asksakis.massdroidv2.data.sendspin.AcousticCalibrationCoordinator
+) {
+    var show by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        coordinator.speakerCalSuggested.collect { show = true }
+    }
+    if (show) {
+        net.asksakis.massdroidv2.ui.components.SpeakerCalibrationDialog(
+            coordinator = coordinator,
+            onDismiss = { show = false }
+        )
     }
 }
 
