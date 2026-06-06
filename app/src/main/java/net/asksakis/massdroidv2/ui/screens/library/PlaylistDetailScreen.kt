@@ -201,24 +201,8 @@ fun PlaylistDetailScreen(
                     imageUrl = track.imageUrl,
                     titleColor = if (isCurrent) MaterialTheme.colorScheme.primary else Color.Unspecified,
                     onClick = { viewModel.playTrack(track) },
-                    onPlayClick = { viewModel.playTrack(track) },
                     favorite = track.favorite,
                     showEqualizer = isCurrent && isPlaying,
-                    onMoreClick = {
-                        actionSheetItem = ActionSheetItem(
-                            title = track.name,
-                            subtitle = track.artistNames,
-                            uri = track.uri,
-                            imageUrl = track.imageUrl,
-                            favorite = track.favorite,
-                            mediaType = MediaType.TRACK,
-                            itemId = track.itemId,
-                            inLibrary = track.uri.startsWith("library://"),
-                            position = track.position ?: fallbackPosition,
-                            primaryArtistUri = track.artistUri,
-                            primaryArtistName = track.artistNames.split(",").firstOrNull()?.trim().orEmpty().ifBlank { "Artist" }
-                        )
-                    },
                     onLongClick = {
                         actionSheetItem = ActionSheetItem(
                             title = track.name,
