@@ -17,6 +17,8 @@ import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import net.asksakis.massdroidv2.auto.AaMetrics
+import net.asksakis.massdroidv2.domain.model.Chapter
+import net.asksakis.massdroidv2.domain.model.displayName
 
 /**
  * Synchronous BitmapLoader that decodes artwork immediately.
@@ -77,6 +79,10 @@ data class AutoPlaybackSnapshot(
     val volumeLevel: Int,
     val isMuted: Boolean,
     val isRemotePlayback: Boolean,
+    // Non-empty only for the current audiobook: chapters are seek targets within
+    // the single playable item, surfaced to AA as the queue/timeline so the user
+    // can see and jump between them.
+    val chapters: List<Chapter> = emptyList(),
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -93,6 +99,7 @@ data class AutoPlaybackSnapshot(
             volumeLevel == other.volumeLevel &&
             isMuted == other.isMuted &&
             isRemotePlayback == other.isRemotePlayback &&
+            chapters == other.chapters &&
             ((artworkData == null && other.artworkData == null) ||
                 (artworkData != null && other.artworkData != null &&
                     artworkData.contentEquals(other.artworkData)))
@@ -112,6 +119,7 @@ data class AutoPlaybackSnapshot(
         r = 31 * r + volumeLevel
         r = 31 * r + isMuted.hashCode()
         r = 31 * r + isRemotePlayback.hashCode()
+        r = 31 * r + chapters.hashCode()
         return r
     }
 
@@ -121,6 +129,7 @@ data class AutoPlaybackSnapshot(
             title = "", artist = "", album = "",
             durationMs = 0L, currentIndex = 0, artworkData = null,
             volumeLevel = 0, isMuted = false, isRemotePlayback = true,
+            chapters = emptyList(),
         )
     }
 }
@@ -184,8 +193,32 @@ class RemoteControlPlayer(
         this.positionMs = positionMs.coerceAtLeast(0L)
     }
 
+    /**
+     * For an audiobook the AA timeline is the chapter list, so "current item" is
+     * the chapter containing the whole-book position (positionMs), not the MA
+     * queue index. Falls back to the queue index when there are no chapters.
+     */
+    private fun activeChapterIndex(): Int {
+        val chapters = playback.chapters
+        if (chapters.isEmpty()) return playback.currentIndex
+        val posSec = positionMs / 1000.0
+        return chapters.indexOfLast { posSec + CHAPTER_EPSILON_S >= it.start }.coerceAtLeast(0)
+    }
+
     override fun getState(): State {
-        val effectiveIndex = playback.currentIndex.coerceIn(0, (playlist.size - 1).coerceAtLeast(0))
+        val chaptered = playback.chapters.isNotEmpty()
+        val rawIndex = if (chaptered) activeChapterIndex() else playback.currentIndex
+        val effectiveIndex = rawIndex.coerceIn(0, (playlist.size - 1).coerceAtLeast(0))
+        // AA renders the progress bar as position-within-current-item. With a
+        // chapter timeline the current item is one chapter, so report the
+        // position relative to that chapter's start (the per-item duration in
+        // buildPlaylist is the chapter length); otherwise the whole-book position.
+        val contentPosition = if (chaptered) {
+            val startMs = ((playback.chapters.getOrNull(effectiveIndex)?.start ?: 0.0) * 1000).toLong()
+            (positionMs - startMs).coerceAtLeast(0L)
+        } else {
+            positionMs
+        }
         val playbackType = if (playback.isRemotePlayback) {
             DeviceInfo.PLAYBACK_TYPE_REMOTE
         } else {
@@ -240,7 +273,7 @@ class RemoteControlPlayer(
             .setAvailableCommands(commandsBuilder.build())
             .setPlayWhenReady(playback.isPlaying, PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
             .setPlaybackState(effectiveState)
-            .setContentPositionMs(positionMs)
+            .setContentPositionMs(contentPosition)
             .setPlaylist(playlist)
             .setCurrentMediaItemIndex(effectiveIndex)
             .setDeviceInfo(DeviceInfo.Builder(playbackType).setMinVolume(0).setMaxVolume(20).build())
@@ -262,6 +295,35 @@ class RemoteControlPlayer(
                 playback.artworkData?.let { b.setArtworkData(it, MediaMetadata.PICTURE_TYPE_FRONT_COVER) }
             }
             .build()
+
+        // Audiobook: the timeline IS the chapter list (one playable item, many
+        // seek targets). Each chapter is a row with its own length so the AA bar
+        // scales per chapter (getState reports chapter-relative position). The
+        // book cover (shared byte[]) rides every row.
+        val chapters = playback.chapters
+        if (chapters.isNotEmpty()) {
+            val bookDurationMs = playback.durationMs
+            return ImmutableList.copyOf(chapters.mapIndexed { i, ch ->
+                val startMs = (ch.start * 1000).toLong()
+                val endMs = ch.end?.let { (it * 1000).toLong() }
+                    ?: chapters.getOrNull(i + 1)?.let { (it.start * 1000).toLong() }
+                    ?: bookDurationMs
+                val durMs = (endMs - startMs).coerceAtLeast(0L)
+                val title = ch.displayName(i)
+                val meta = MediaMetadata.Builder()
+                    .setTitle(title)
+                    .setArtist(playback.title.ifEmpty { null })
+                    .also { b -> playback.artworkData?.let { b.setArtworkData(it, MediaMetadata.PICTURE_TYPE_FRONT_COVER) } }
+                    .build()
+                val id = "${playback.trackUri.orEmpty()}#ch$i".toStableLongId()
+                val item = MediaItem.Builder().setMediaId(id.toString()).setMediaMetadata(meta).build()
+                MediaItemData.Builder(id)
+                    .setMediaItem(item)
+                    .setMediaMetadata(meta)
+                    .setDurationUs(if (durMs > 0) durMs * 1000 else C_TIME_UNSET)
+                    .build()
+            })
+        }
 
         val entries = queue.entries
         // The now-playing metadata (currentMetadata) is the single source of truth for
@@ -322,6 +384,7 @@ class RemoteControlPlayer(
             album != other.album ||
             durationMs != other.durationMs ||
             currentIndex != other.currentIndex ||
+            chapters != other.chapters ||
             !artworkData.sameContentAs(other.artworkData)
     }
 
@@ -391,5 +454,8 @@ class RemoteControlPlayer(
         private const val C_TIME_UNSET = Long.MIN_VALUE + 1
         internal const val VOLUME_SCALE = 5
         internal const val MAX_VOLUME = 100
+        // Tolerance so a position sampled at a chapter boundary resolves to that
+        // chapter, not the one before it.
+        private const val CHAPTER_EPSILON_S = 0.001
     }
 }

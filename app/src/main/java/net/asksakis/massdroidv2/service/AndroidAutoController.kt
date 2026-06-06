@@ -38,6 +38,7 @@ import net.asksakis.massdroidv2.domain.repository.PlayerSelectionLock
 import net.asksakis.massdroidv2.domain.repository.PlayerRepository
 import net.asksakis.massdroidv2.ui.MainActivity
 import okhttp3.Request
+import java.util.concurrent.TimeUnit
 
 class AndroidAutoController(
     private val service: MediaLibraryService,
@@ -262,9 +263,34 @@ class AndroidAutoController(
     }
 
     private fun playQueueIndex(index: Int, reason: String) {
-        val queueState = playerRepository.queueState.value ?: return
         if (index < 0) return
-        if (isSendspinActive() && playerRepository.selectedPlayer.value?.playerId == sendspinPlayerId()) {
+        // An audiobook is ONE queue item; its AA "queue rows" are chapters, so a
+        // row tap is a chapter selection, not a queue-index jump. A raw
+        // play_media index on the single item bypasses the discontinuity signal
+        // and wedges the Sendspin gate (same class as the next/previous freeze).
+        // Route it to a seek (which emits the SEEK discontinuity itself and gets
+        // a fresh stream), consistent with PlayerRepositoryImpl.audiobookChapterSkip.
+        val track = playerRepository.queueState.value?.currentItem?.track
+        if (track?.mediaType == MediaType.AUDIOBOOK) {
+            val target = track.chapters.getOrNull(index) ?: return
+            val id = if (shouldRouteToSendspin()) sendspinPlayerId() else activePlayerId()
+            id ?: return
+            scope.launch {
+                try {
+                    playerRepository.seek(id, target.start)
+                } catch (e: Exception) {
+                    Log.e(TAG, "AA chapter seek failed: index=$index start=${target.start}", e)
+                }
+            }
+            return
+        }
+        val queueState = playerRepository.queueState.value ?: return
+        // Warn Sendspin of the discontinuity whenever it is the active output
+        // (directly selected OR BT-routed), not only when it is the selected
+        // player — otherwise a routed queue jump leaves the gate un-warned.
+        if (isSendspinActive() &&
+            (shouldRouteToSendspin() || playerRepository.selectedPlayer.value?.playerId == sendspinPlayerId())
+        ) {
             sendspinManager.expectDiscontinuity(reason)
         }
         scope.launch(Dispatchers.IO) {
@@ -356,6 +382,7 @@ class AndroidAutoController(
                     applyAaState(lastAaState, newState)
                     lastAaState = newState
                     lastPlaybackSnapshot = newState.playback
+                    clearExpiredVolumeOverride()
                 }
         }
     }
@@ -404,6 +431,7 @@ class AndroidAutoController(
             volumeLevel = volumeLevel,
             isMuted = player.volumeMuted,
             isRemotePlayback = !isSendspinSelected,
+            chapters = if (currentTrack?.mediaType == MediaType.AUDIOBOOK) currentTrack.chapters else emptyList(),
         )
         return AaCompleteState(
             playback = playback,
@@ -442,13 +470,18 @@ class AndroidAutoController(
 
     private fun effectiveVolume(serverVolume: Int, override: Pair<Int, Long>?): Int {
         if (override == null) return serverVolume
-        if (System.currentTimeMillis() > override.second) {
-            // Override expired — let it auto-clear so the next combine emission
-            // settles back to the server-reported value cleanly.
-            volumeOverride.value = null
-            return serverVolume
-        }
+        // Pure read: an expired override is simply ignored. Clearing it is a side
+        // effect that belongs in the collector (clearExpiredVolumeOverride), not
+        // in this combine transform.
+        if (System.currentTimeMillis() > override.second) return serverVolume
         return override.first
+    }
+
+    /** Clear an expired optimistic volume override so the combine re-settles to
+     *  the server value. Runs in the state collector, never inside the mapper. */
+    private fun clearExpiredVolumeOverride() {
+        val ov = volumeOverride.value ?: return
+        if (System.currentTimeMillis() > ov.second) volumeOverride.value = null
     }
 
     private fun toggleFavorite() {
@@ -593,7 +626,12 @@ class AndroidAutoController(
     private fun downloadArtwork(url: String) {
         try {
             val request = Request.Builder().url(url).build()
-            val rawBytes = wsClient.getImageClient().newCall(request).execute().use { response ->
+            val call = wsClient.getImageClient().newCall(request).apply {
+                // Bound the blocking fetch so a slow/stuck image server cannot pin
+                // this IO thread indefinitely on a track change.
+                timeout().timeout(ARTWORK_FETCH_TIMEOUT_S, TimeUnit.SECONDS)
+            }
+            val rawBytes = call.execute().use { response ->
                 response.body?.bytes()
             }
             if (url != cachedArtworkUrl || rawBytes == null || rawBytes.isEmpty()) return
@@ -655,6 +693,7 @@ class AndroidAutoController(
         private const val TAG = "AndroidAutoController"
         private const val VOLUME_STEP = RemoteControlPlayer.VOLUME_SCALE
         private const val VOLUME_OVERRIDE_MS = 15_000L
+        private const val ARTWORK_FETCH_TIMEOUT_S = 8L
     }
 
     /**

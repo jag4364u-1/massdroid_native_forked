@@ -22,13 +22,17 @@ object AutoBrowseExtras {
      */
     fun rootExtras(): Bundle = Bundle().apply {
         putBoolean(MediaConstants.BROWSER_SERVICE_EXTRAS_KEY_SEARCH_SUPPORTED, true)
+        // Root as a single LIST, not a category grid: the gearhead grid caps the
+        // root at ~4 tiles and folds the rest into an auto-generated "More",
+        // which then wraps our own entries (a confusing nested "More"). A list
+        // has no such cap, so every category shows in one logical sequence.
         putInt(
             MediaConstants.DESCRIPTION_EXTRAS_KEY_CONTENT_STYLE_BROWSABLE,
-            MediaConstants.DESCRIPTION_EXTRAS_VALUE_CONTENT_STYLE_CATEGORY_GRID_ITEM,
+            MediaConstants.DESCRIPTION_EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM,
         )
         putInt(
             MediaConstants.DESCRIPTION_EXTRAS_KEY_CONTENT_STYLE_PLAYABLE,
-            MediaConstants.DESCRIPTION_EXTRAS_VALUE_CONTENT_STYLE_GRID_ITEM,
+            MediaConstants.DESCRIPTION_EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM,
         )
     }
 

@@ -85,6 +85,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import net.asksakis.massdroidv2.domain.model.Player
 import net.asksakis.massdroidv2.domain.model.PlayerType
+import net.asksakis.massdroidv2.domain.model.displayName
 import net.asksakis.massdroidv2.domain.model.PlaybackState
 import net.asksakis.massdroidv2.domain.model.QueueItem
 import net.asksakis.massdroidv2.ui.components.MediaItemRow
@@ -622,16 +623,5 @@ private fun ChapterList(
     }
 }
 
-private val CHAPTER_SLUG_REGEX = Regex("""^[\w-]+_(?:ch|chapter)_?\d+$""", RegexOption.IGNORE_CASE)
-
-/**
- * A human chapter title, falling back to "Chapter N" when the provider name is a
- * slug (e.g. `wonderland_ch_01`) or blank, mirroring the MA web UI presentation.
- */
-private fun chapterDisplayName(chapter: net.asksakis.massdroidv2.domain.model.Chapter, index: Int): String {
-    val raw = chapter.name.trim()
-    val isSlug = raw.isEmpty() ||
-        CHAPTER_SLUG_REGEX.matches(raw) ||
-        (!raw.contains(' ') && raw.contains('_'))
-    return if (isSlug) "Chapter ${index + 1}" else raw
-}
+private fun chapterDisplayName(chapter: net.asksakis.massdroidv2.domain.model.Chapter, index: Int): String =
+    chapter.displayName(index)

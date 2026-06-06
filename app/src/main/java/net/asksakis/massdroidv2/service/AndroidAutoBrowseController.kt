@@ -48,7 +48,9 @@ class AndroidAutoBrowseController(
     private val sendspinController: () -> SendspinAudioController?,
     private val onCustomCommand: (String) -> Boolean,
 ) {
-    private var cachedSearchResults: SearchResult? = null
+    // Keyed by the query that produced it: onGetSearchResult must never serve a
+    // previous query's results when the host requests a newer one.
+    private var cachedSearch: Pair<String, SearchResult>? = null
 
     // Tracks parentIds the AA host has ever queried or subscribed to during this
     // session. Used by AndroidAutoController to broadcast notifyChildrenChanged
@@ -165,13 +167,18 @@ class AndroidAutoBrowseController(
                 knownParentIds.add(parentId)
                 val effectivePageSize = if (pageSize > 0) pageSize else PAGE_SIZE_DEFAULT
                 return scope.future(Dispatchers.IO) {
-                    val items = try {
-                        children(parentId, page, effectivePageSize)
+                    try {
+                        val items = children(parentId, page, effectivePageSize)
+                        LibraryResult.ofItemList(ImmutableList.copyOf(items), params)
                     } catch (e: Exception) {
+                        // Return an error, NOT an empty list: the AA host caches a
+                        // successful empty result and never re-queries, so a
+                        // transient RPC failure (timeout, one provider poisoning
+                        // music/search) while the WS is still connected would leave
+                        // the tab permanently blank. An error lets the host retry.
                         Log.e(TAG, "onGetChildren($parentId) failed", e)
-                        emptyList()
+                        LibraryResult.ofError(LibraryResult.RESULT_ERROR_IO)
                     }
-                    LibraryResult.ofItemList(ImmutableList.copyOf(items), params)
                 }
             }
 
@@ -194,7 +201,7 @@ class AndroidAutoBrowseController(
                 scope.launch(Dispatchers.IO) {
                     try {
                         val result = musicRepository.search(query)
-                        cachedSearchResults = result
+                        cachedSearch = query to result
                         val totalCount = result.artists.size + result.albums.size +
                             result.tracks.size + result.playlists.size
                         session.notifySearchResultChanged(browser, query, totalCount, params)
@@ -214,7 +221,8 @@ class AndroidAutoBrowseController(
                 params: MediaLibraryService.LibraryParams?
             ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
                 return scope.future(Dispatchers.IO) {
-                    val result = cachedSearchResults ?: runCatching { musicRepository.search(query) }
+                    val cached = cachedSearch?.takeIf { it.first == query }?.second
+                    val result = cached ?: runCatching { musicRepository.search(query) }
                         .onFailure { Log.e(TAG, "onGetSearchResult($query) failed", it) }
                         .getOrDefault(SearchResult())
                     val grouped = buildList {
@@ -250,12 +258,12 @@ class AndroidAutoBrowseController(
     private suspend fun children(parentId: String, page: Int, pageSize: Int): List<MediaItem> {
         return when (parentId) {
             ROOT -> buildRootCategories()
-            "more" -> buildMoreCategories()
             "recently_played" -> loadAlbums(page, pageSize, "last_played")
             "artists" -> loadArtists(page, pageSize)
             "albums" -> loadAlbums(page, pageSize)
             "playlists" -> loadPlaylists(page, pageSize)
             "tracks" -> loadTracks(page, pageSize)
+            "audiobooks" -> loadAudiobooks(page, pageSize)
             "genres" -> buildGenreList()
             "genre_radio" -> buildGenreRadioList()
             "browse" -> loadServerBrowse(null)
@@ -326,50 +334,36 @@ class AndroidAutoBrowseController(
         return "$provider://$type/$itemId"
     }
 
+    // Flat root list in one logical order (no "More" folder): library content
+    // first, then the generators. Rendered as a list (see rootExtras) so every
+    // entry is visible without the gearhead grid's 4-tile cap + auto-"More".
     private fun buildRootCategories(): List<MediaItem> = listOf(
         browseFolder(
             "playlists",
             "Playlists",
             MediaMetadata.MEDIA_TYPE_FOLDER_PLAYLISTS,
             net.asksakis.massdroidv2.auto.R.drawable.ic_tab_playlists,
-            groupTitle = "Browse"
+            listItem = true
         ),
         browseFolder(
             "albums",
             "Albums",
             MediaMetadata.MEDIA_TYPE_FOLDER_ALBUMS,
             net.asksakis.massdroidv2.auto.R.drawable.ic_tab_albums,
-            groupTitle = "Browse"
+            listItem = true
         ),
         browseFolder(
             "artists",
             "Artists",
             MediaMetadata.MEDIA_TYPE_FOLDER_ARTISTS,
             net.asksakis.massdroidv2.auto.R.drawable.ic_tab_artists,
-            groupTitle = "Browse"
-        ),
-        browseFolder(
-            "more",
-            "More",
-            MediaMetadata.MEDIA_TYPE_FOLDER_MIXED,
-            net.asksakis.massdroidv2.auto.R.drawable.ic_tab_more,
-            groupTitle = "Browse"
-        ),
-    )
-
-    private fun buildMoreCategories(): List<MediaItem> = listOf(
-        playableItem(
-            "smart_mix",
-            "Smart Mix",
-            MediaMetadata.MEDIA_TYPE_PLAYLIST,
-            net.asksakis.massdroidv2.auto.R.drawable.ic_tab_smart_mix,
             listItem = true
         ),
         browseFolder(
-            "genre_radio",
-            "Genre Radio",
-            MediaMetadata.MEDIA_TYPE_FOLDER_PLAYLISTS,
-            net.asksakis.massdroidv2.auto.R.drawable.ic_tab_genre_radio,
+            "audiobooks",
+            "Audiobooks",
+            MediaMetadata.MEDIA_TYPE_FOLDER_MIXED,
+            net.asksakis.massdroidv2.auto.R.drawable.ic_tab_audiobooks,
             listItem = true
         ),
         browseFolder(
@@ -384,6 +378,20 @@ class AndroidAutoBrowseController(
             "Browse",
             MediaMetadata.MEDIA_TYPE_FOLDER_MIXED,
             net.asksakis.massdroidv2.auto.R.drawable.ic_tab_browse,
+            listItem = true
+        ),
+        playableItem(
+            "smart_mix",
+            "Smart Mix",
+            MediaMetadata.MEDIA_TYPE_PLAYLIST,
+            net.asksakis.massdroidv2.auto.R.drawable.ic_tab_smart_mix,
+            listItem = true
+        ),
+        browseFolder(
+            "genre_radio",
+            "Genre Radio",
+            MediaMetadata.MEDIA_TYPE_FOLDER_PLAYLISTS,
+            net.asksakis.massdroidv2.auto.R.drawable.ic_tab_genre_radio,
             listItem = true
         ),
     )
@@ -540,6 +548,37 @@ class AndroidAutoBrowseController(
         return musicRepository.getTracks(limit = pageSize, offset = page * pageSize, orderBy = "last_played")
             .map { it.toPlayableMediaItem() }
     }
+
+    private suspend fun loadAudiobooks(page: Int, pageSize: Int): List<MediaItem> {
+        // Each audiobook is one playable item; tapping it starts the book via
+        // its real URI, so play goes through playMedia (NEW_STREAM) and never
+        // hits the single-item next/previous wedge.
+        return musicRepository.getAudiobooks(limit = pageSize, offset = page * pageSize, orderBy = "name")
+            .map { it.toAudiobookMediaItem() }
+    }
+
+    // The AA host (gearhead) frequently re-sends only the mediaId on
+    // onAddMediaItems, stripping requestMetadata.mediaUri. The generic
+    // "track|provider|itemId" id used for music then resolves to
+    // "provider://track/itemId" — WRONG for an audiobook (type is "track", not
+    // "audiobook"), so MA plays a different item. Encode the real URI as the
+    // mediaId (it contains "/", so handleAddMediaItem uses it verbatim) so the
+    // book resolves correctly even when the host drops the request metadata.
+    private fun Track.toAudiobookMediaItem(): MediaItem = MediaItem.Builder()
+        .setMediaId(uri)
+        .setMediaMetadata(
+            MediaMetadata.Builder()
+                .setTitle(name)
+                .setArtist(artistNames.ifEmpty { null })
+                .setArtworkUri(imageUrl?.let { android.net.Uri.parse(it) } ?: AutoBrowseExtras.placeholderArtworkUri(context, name))
+                .setIsBrowsable(false)
+                .setIsPlayable(true)
+                .setMediaType(MediaMetadata.MEDIA_TYPE_AUDIO_BOOK)
+                .setExtras(AutoBrowseExtras.listItemExtras())
+                .build()
+        )
+        .setRequestMetadata(MediaItem.RequestMetadata.Builder().setMediaUri(android.net.Uri.parse(uri)).build())
+        .build()
 
     private suspend fun loadSubItems(parentId: String, page: Int, pageSize: Int): List<MediaItem> {
         val parts = parentId.split("|")

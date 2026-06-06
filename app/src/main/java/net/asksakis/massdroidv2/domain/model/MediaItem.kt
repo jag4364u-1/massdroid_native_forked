@@ -46,6 +46,21 @@ data class Chapter(
     val end: Double? = null
 )
 
+private val CHAPTER_SLUG_REGEX = Regex("""^[\w-]+_(?:ch|chapter)_?\d+$""", RegexOption.IGNORE_CASE)
+
+/**
+ * A human chapter title, falling back to "Chapter N" when the provider name is a
+ * slug (e.g. `wonderland_ch_01`) or blank, mirroring the MA web UI presentation.
+ * Shared by the in-app queue and the Android Auto chapter timeline.
+ */
+fun Chapter.displayName(index: Int): String {
+    val raw = name.trim()
+    val isSlug = raw.isEmpty() ||
+        CHAPTER_SLUG_REGEX.matches(raw) ||
+        (!raw.contains(' ') && raw.contains('_'))
+    return if (isSlug) "Chapter ${index + 1}" else raw
+}
+
 @Serializable
 data class Album(
     val itemId: String,
