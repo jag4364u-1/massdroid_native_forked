@@ -14,13 +14,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.RepeatOne
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
-import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.VolumeDown
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -46,97 +51,137 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.tv.material3.Icon
 import androidx.tv.material3.IconButton
+import androidx.tv.material3.LocalContentColor
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
 import net.asksakis.massdroidv2.domain.model.PlaybackState
+import net.asksakis.massdroidv2.domain.model.RepeatMode
 
 @Composable
 fun TvNowPlayingScreen(
+    onOpenQueue: () -> Unit = {},
     viewModel: TvNowPlayingViewModel = hiltViewModel(),
     settingsViewModel: TvSettingsViewModel = hiltViewModel()
 ) {
     val player by viewModel.player.collectAsStateWithLifecycle()
     val elapsed by viewModel.elapsed.collectAsStateWithLifecycle()
+    val queue by viewModel.queueState.collectAsStateWithLifecycle()
     val syncDelay by settingsViewModel.syncDelayMs.collectAsStateWithLifecycle()
     var showOptions by remember { mutableStateOf(false) }
     val media = player?.currentMedia
     val duration = media?.duration ?: 0.0
     val playing = player?.state == PlaybackState.PLAYING
+    val shuffleOn = queue?.shuffleEnabled == true
+    val repeatMode = queue?.repeatMode ?: RepeatMode.OFF
+    val accent = MaterialTheme.colorScheme.primary
 
     Surface(modifier = Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier.fillMaxSize().padding(64.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(48.dp)
-        ) {
-            AsyncImage(
-                model = media?.imageUrl,
-                contentDescription = media?.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.size(360.dp)
-            )
-
-            Column(modifier = Modifier.width(720.dp)) {
-                Text(
-                    player?.displayName ?: "Player",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    media?.title?.takeIf { it.isNotBlank() } ?: "Nothing playing",
-                    style = MaterialTheme.typography.headlineMedium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    media?.artist.orEmpty(),
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+        Box(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier.fillMaxSize().padding(64.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(48.dp)
+            ) {
+                AsyncImage(
+                    model = media?.imageUrl,
+                    contentDescription = media?.title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.size(360.dp)
                 )
 
-                Spacer(Modifier.height(28.dp))
-                SeekBar(
-                    elapsed = elapsed,
-                    duration = duration,
-                    enabled = duration > 0.0,
-                    onSeekBy = viewModel::seekBy
-                )
-
-                Spacer(Modifier.height(24.dp))
-                val playFocus = remember { FocusRequester() }
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TransportIcon(Icons.Filled.SkipPrevious, "Previous") { viewModel.previous() }
-                    TransportIcon(
-                        if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                        if (playing) "Pause" else "Play",
-                        modifier = Modifier.focusRequester(playFocus)
-                    ) { viewModel.playPause() }
-                    TransportIcon(Icons.Filled.SkipNext, "Next") { viewModel.next() }
-                    Spacer(Modifier.width(24.dp))
-                    TransportIcon(Icons.Filled.VolumeDown, "Volume down") { viewModel.volumeDown() }
-                    TransportIcon(Icons.Filled.VolumeUp, "Volume up") { viewModel.volumeUp() }
+                Column(modifier = Modifier.width(720.dp)) {
                     Text(
-                        "${player?.volumeLevel ?: 0}%",
-                        style = MaterialTheme.typography.bodyLarge,
+                        player?.displayName ?: "Player",
+                        style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(Modifier.width(24.dp))
-                    TransportIcon(Icons.Filled.Tune, "Audio options") { showOptions = !showOptions }
-                }
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        media?.title?.takeIf { it.isNotBlank() } ?: "Nothing playing",
+                        style = MaterialTheme.typography.headlineMedium,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        media?.artist.orEmpty(),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
 
-                if (showOptions) {
+                    Spacer(Modifier.height(28.dp))
+                    SeekBar(
+                        elapsed = elapsed,
+                        duration = duration,
+                        enabled = duration > 0.0,
+                        onSeekBy = viewModel::seekBy
+                    )
+
                     Spacer(Modifier.height(24.dp))
-                    SyncDelayControl(valueMs = syncDelay, onChange = settingsViewModel::setSyncDelay)
+                    val playFocus = remember { FocusRequester() }
+                    // Row 1: transport (centered) with shuffle + repeat
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterHorizontally),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TransportIcon(
+                            Icons.Filled.Shuffle,
+                            "Shuffle",
+                            tint = if (shuffleOn) accent else LocalContentColor.current
+                        ) { viewModel.toggleShuffle() }
+                        TransportIcon(Icons.Filled.SkipPrevious, "Previous") { viewModel.previous() }
+                        TransportIcon(
+                            if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            if (playing) "Pause" else "Play",
+                            modifier = Modifier.focusRequester(playFocus)
+                        ) { viewModel.playPause() }
+                        TransportIcon(Icons.Filled.SkipNext, "Next") { viewModel.next() }
+                        TransportIcon(
+                            if (repeatMode == RepeatMode.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
+                            "Repeat",
+                            tint = if (repeatMode != RepeatMode.OFF) accent else LocalContentColor.current
+                        ) { viewModel.cycleRepeat() }
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    // Row 2: volume (centered)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterHorizontally),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TransportIcon(Icons.Filled.VolumeDown, "Volume down") { viewModel.volumeDown() }
+                        Text(
+                            "${player?.volumeLevel ?: 0}%",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        TransportIcon(Icons.Filled.VolumeUp, "Volume up") { viewModel.volumeUp() }
+                    }
+
+                    if (showOptions) {
+                        Spacer(Modifier.height(24.dp))
+                        SyncDelayControl(valueMs = syncDelay, onChange = settingsViewModel::setSyncDelay)
+                    }
+                    LaunchedEffect(Unit) { runCatching { playFocus.requestFocus() } }
                 }
-                LaunchedEffect(Unit) { runCatching { playFocus.requestFocus() } }
+            }
+
+            // Top-right actions: the active queue, then audio options (3-dots),
+            // like the phone's player settings entry point.
+            Row(
+                modifier = Modifier.align(Alignment.TopEnd).padding(28.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                IconButton(onClick = onOpenQueue) {
+                    Icon(Icons.AutoMirrored.Filled.QueueMusic, contentDescription = "Queue")
+                }
+                IconButton(onClick = { showOptions = !showOptions }) {
+                    Icon(Icons.Filled.MoreVert, contentDescription = "Audio options")
+                }
             }
         }
     }
@@ -147,10 +192,11 @@ private fun TransportIcon(
     icon: ImageVector,
     description: String,
     modifier: Modifier = Modifier,
+    tint: Color = LocalContentColor.current,
     onClick: () -> Unit
 ) {
     IconButton(onClick = onClick, modifier = modifier) {
-        Icon(icon, contentDescription = description)
+        Icon(icon, contentDescription = description, tint = tint)
     }
 }
 

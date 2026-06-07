@@ -16,6 +16,7 @@ import net.asksakis.massdroidv2.domain.model.Player
 import net.asksakis.massdroidv2.domain.model.Playlist
 import net.asksakis.massdroidv2.domain.repository.MusicRepository
 import net.asksakis.massdroidv2.domain.repository.PlayerRepository
+import net.asksakis.massdroidv2.domain.repository.SettingsRepository
 import javax.inject.Inject
 
 /**
@@ -26,10 +27,15 @@ import javax.inject.Inject
 class TvHomeViewModel @Inject constructor(
     private val musicRepository: MusicRepository,
     private val playerRepository: PlayerRepository,
+    settingsRepository: SettingsRepository,
 ) : ViewModel() {
 
     val players: StateFlow<List<Player>> = playerRepository.players
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** MA player id of this device's own Sendspin player (the local "MassDroid TV"). */
+    val localPlayerId: StateFlow<String?> = settingsRepository.sendspinClientId
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     val selectedPlayerId: StateFlow<String?> = playerRepository.selectedPlayer
         .map { it?.playerId }

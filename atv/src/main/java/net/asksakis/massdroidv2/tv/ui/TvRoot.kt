@@ -38,8 +38,9 @@ fun TvRoot(viewModel: TvRootViewModel = hiltViewModel()) {
                     route = "nowplaying/{playerId}",
                     arguments = listOf(navArgument("playerId") { type = NavType.StringType })
                 ) {
-                    TvNowPlayingScreen()
+                    TvNowPlayingScreen(onOpenQueue = { nav.navigate("queue") })
                 }
+                composable("queue") { TvQueueScreen() }
                 composable("settings") { TvSettingsScreen() }
             }
         }

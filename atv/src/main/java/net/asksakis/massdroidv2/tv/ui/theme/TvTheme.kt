@@ -5,18 +5,25 @@ import androidx.compose.ui.graphics.Color
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.darkColorScheme
 
+// Aligned with the phone app's grayscale dark scheme (see app Theme.kt) so the
+// TV front-end shares the same monochrome brand look.
 private val MassDroidTvColors = darkColorScheme(
-    primary = Color(0xFF7C9CFF),
-    onPrimary = Color(0xFF0A0A14),
-    background = Color(0xFF14141F),
-    onBackground = Color(0xFFECECF4),
-    surface = Color(0xFF22223A),
-    onSurface = Color(0xFFECECF4),
-    surfaceVariant = Color(0xFF2C2C46),
-    onSurfaceVariant = Color(0xFFB9B9CC),
+    primary = Color(0xFFCCCCCC),
+    onPrimary = Color(0xFF222222),
+    primaryContainer = Color(0xFF3A3A3A),
+    onPrimaryContainer = Color(0xFFDDDDDD),
+    secondary = Color(0xFFAAAAAA),
+    onSecondary = Color(0xFF222222),
+    background = Color(0xFF121212),
+    onBackground = Color(0xFFE0E0E0),
+    surface = Color(0xFF121212),
+    onSurface = Color(0xFFE0E0E0),
+    surfaceVariant = Color(0xFF2A2A2A),
+    onSurfaceVariant = Color(0xFFAAAAAA),
+    border = Color(0xFF666666),
 )
 
-/** Dark, 10-foot color scheme so text reads clearly on the TV background. */
+/** Dark grayscale theme matching the phone app. */
 @Composable
 fun MassDroidTvTheme(content: @Composable () -> Unit) {
     MaterialTheme(colorScheme = MassDroidTvColors, content = content)

@@ -10,6 +10,9 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import net.asksakis.massdroidv2.domain.model.Player
+import net.asksakis.massdroidv2.domain.model.QueueState
+import net.asksakis.massdroidv2.domain.model.RepeatMode
+import net.asksakis.massdroidv2.domain.repository.MusicRepository
 import net.asksakis.massdroidv2.domain.repository.PlayerRepository
 import javax.inject.Inject
 
@@ -21,6 +24,7 @@ import javax.inject.Inject
 @HiltViewModel
 class TvNowPlayingViewModel @Inject constructor(
     private val playerRepository: PlayerRepository,
+    private val musicRepository: MusicRepository,
     savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
 
@@ -34,8 +38,29 @@ class TvNowPlayingViewModel @Inject constructor(
     val elapsed: StateFlow<Double> = playerRepository.elapsedTime
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0.0)
 
+    /** Selected queue state (shuffle/repeat live here, per MA). */
+    val queueState: StateFlow<QueueState?> = playerRepository.queueState
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
     init {
         playerRepository.selectPlayer(playerId)
+    }
+
+    fun toggleShuffle() {
+        val queue = queueState.value ?: return
+        viewModelScope.launch {
+            runCatching { musicRepository.shuffleQueue(queue.queueId, !queue.shuffleEnabled) }
+        }
+    }
+
+    fun cycleRepeat() {
+        val queue = queueState.value ?: return
+        val next = when (queue.repeatMode) {
+            RepeatMode.OFF -> RepeatMode.ALL
+            RepeatMode.ALL -> RepeatMode.ONE
+            RepeatMode.ONE -> RepeatMode.OFF
+        }
+        viewModelScope.launch { runCatching { musicRepository.repeatQueue(queue.queueId, next) } }
     }
 
     fun playPause() = viewModelScope.launch { playerRepository.playPause(playerId) }
