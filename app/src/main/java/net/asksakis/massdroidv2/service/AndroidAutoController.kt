@@ -1,5 +1,7 @@
 package net.asksakis.massdroidv2.service
 
+import net.asksakis.massdroidv2.playback.SendspinAudioController
+
 import android.app.PendingIntent
 import android.content.Intent
 import android.graphics.Bitmap

@@ -56,8 +56,8 @@ import net.asksakis.massdroidv2.domain.repository.PlayHistoryRepository
 import net.asksakis.massdroidv2.domain.repository.PlayerRepository
 import net.asksakis.massdroidv2.domain.repository.SettingsRepository
 import net.asksakis.massdroidv2.domain.repository.SmartListeningRepository
-import net.asksakis.massdroidv2.ui.ShortcutAction
-import net.asksakis.massdroidv2.ui.ShortcutActionDispatcher
+import net.asksakis.massdroidv2.domain.shortcut.ShortcutAction
+import net.asksakis.massdroidv2.domain.shortcut.ShortcutActionDispatcher
 import javax.inject.Inject
 import java.time.LocalTime
 import kotlin.math.abs

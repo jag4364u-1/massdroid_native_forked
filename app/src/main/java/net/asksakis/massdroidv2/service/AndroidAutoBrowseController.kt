@@ -1,5 +1,7 @@
 package net.asksakis.massdroidv2.service
 
+import net.asksakis.massdroidv2.playback.SendspinAudioController
+
 import android.content.Context
 import android.content.Intent
 import android.os.Build
@@ -33,8 +35,8 @@ import net.asksakis.massdroidv2.domain.model.Track
 import net.asksakis.massdroidv2.domain.repository.MusicRepository
 import net.asksakis.massdroidv2.domain.repository.PlayerRepository
 import net.asksakis.massdroidv2.domain.repository.SearchResult
-import net.asksakis.massdroidv2.ui.ShortcutAction
-import net.asksakis.massdroidv2.ui.ShortcutActionDispatcher
+import net.asksakis.massdroidv2.domain.shortcut.ShortcutAction
+import net.asksakis.massdroidv2.domain.shortcut.ShortcutActionDispatcher
 
 class AndroidAutoBrowseController(
     private val context: Context,

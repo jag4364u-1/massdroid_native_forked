@@ -1,4 +1,4 @@
-package net.asksakis.massdroidv2.service
+package net.asksakis.massdroidv2.playback
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow

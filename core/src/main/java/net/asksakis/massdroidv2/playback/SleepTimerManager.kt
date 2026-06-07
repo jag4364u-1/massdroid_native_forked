@@ -1,4 +1,4 @@
-package net.asksakis.massdroidv2.service
+package net.asksakis.massdroidv2.playback
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -15,12 +15,15 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import net.asksakis.massdroidv2.R
+import androidx.annotation.DrawableRes
 
 class SleepTimerManager(
     private val context: Context,
     private val scope: CoroutineScope,
     private val bridge: SleepTimerBridge,
+    // Notification icon is injected by the host app so this core manager stays
+    // resource-agnostic (each app/atv provides its own R.drawable).
+    @DrawableRes private val notificationIcon: Int,
     private val onFadeFraction: (Float, String) -> Unit,
     private val onStop: suspend (String) -> Unit,
 ) {
@@ -200,13 +203,13 @@ class SleepTimerManager(
         }
 
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_notification)
+            .setSmallIcon(notificationIcon)
             .setContentTitle("Sleep Timer")
             .setContentText(text)
             .setOngoing(true)
             .setSilent(true)
             .setContentIntent(openPending)
-            .addAction(R.drawable.ic_notification, "Cancel", cancelPending)
+            .addAction(notificationIcon, "Cancel", cancelPending)
             .build()
 
         notificationManager.notify(NOTIFICATION_ID, notification)

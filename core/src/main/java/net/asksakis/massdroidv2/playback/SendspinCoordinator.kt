@@ -1,4 +1,4 @@
-package net.asksakis.massdroidv2.service
+package net.asksakis.massdroidv2.playback
 
 import android.content.Context
 import android.database.ContentObserver
@@ -29,8 +29,8 @@ import net.asksakis.massdroidv2.data.websocket.sendCommand
 import net.asksakis.massdroidv2.domain.model.SendspinAudioFormat
 import net.asksakis.massdroidv2.domain.repository.PlayerRepository
 import net.asksakis.massdroidv2.domain.repository.SettingsRepository
-import net.asksakis.massdroidv2.ui.ShortcutAction
-import net.asksakis.massdroidv2.ui.ShortcutActionDispatcher
+import net.asksakis.massdroidv2.domain.shortcut.ShortcutAction
+import net.asksakis.massdroidv2.domain.shortcut.ShortcutActionDispatcher
 
 class SendspinCoordinator(
     private val context: Context,

@@ -1,4 +1,4 @@
-package net.asksakis.massdroidv2.service
+package net.asksakis.massdroidv2.playback
 
 import android.content.BroadcastReceiver
 import android.content.Context

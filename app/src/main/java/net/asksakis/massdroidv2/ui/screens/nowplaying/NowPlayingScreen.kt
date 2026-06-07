@@ -96,7 +96,7 @@ import net.asksakis.massdroidv2.ui.screens.nowplaying.components.SendspinStatusS
 import net.asksakis.massdroidv2.ui.screens.nowplaying.components.TrackInfoSection
 import net.asksakis.massdroidv2.ui.screens.nowplaying.components.TransportControls
 import net.asksakis.massdroidv2.data.sendspin.SendspinState
-import net.asksakis.massdroidv2.service.SleepTimerBridge
+import net.asksakis.massdroidv2.playback.SleepTimerBridge
 import net.asksakis.massdroidv2.ui.components.SleepTimerSheet
 import androidx.compose.material.icons.filled.Bedtime
 import net.asksakis.massdroidv2.data.sendspin.SyncState

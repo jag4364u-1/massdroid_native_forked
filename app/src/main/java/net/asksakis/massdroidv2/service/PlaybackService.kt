@@ -1,5 +1,9 @@
 package net.asksakis.massdroidv2.service
 
+import net.asksakis.massdroidv2.playback.SleepTimerBridge
+import net.asksakis.massdroidv2.playback.SleepTimerManager
+import net.asksakis.massdroidv2.playback.SendspinCoordinator
+
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -27,7 +31,7 @@ import net.asksakis.massdroidv2.domain.repository.MusicRepository
 import net.asksakis.massdroidv2.domain.repository.PlayerRepository
 import net.asksakis.massdroidv2.domain.repository.SettingsRepository
 import net.asksakis.massdroidv2.ui.MainActivity
-import net.asksakis.massdroidv2.ui.ShortcutActionDispatcher
+import net.asksakis.massdroidv2.domain.shortcut.ShortcutActionDispatcher
 import javax.inject.Inject
 
 @AndroidEntryPoint
@@ -155,6 +159,7 @@ class PlaybackService : MediaLibraryService() {
             context = this,
             scope = scope,
             bridge = sleepTimerBridge,
+            notificationIcon = R.drawable.ic_notification,
             onFadeFraction = { fraction, targetPlayerId ->
                 // Snapshot the target player's original volume on the
                 // first fade tick, restore it when fraction returns to

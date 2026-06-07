@@ -1,4 +1,4 @@
-package net.asksakis.massdroidv2.ui
+package net.asksakis.massdroidv2.domain.shortcut
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow

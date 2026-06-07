@@ -15,7 +15,7 @@ import kotlinx.coroutines.withContext
 import net.asksakis.massdroidv2.data.repository.QueueDstmCache
 import net.asksakis.massdroidv2.data.websocket.ConnectionState
 import net.asksakis.massdroidv2.data.websocket.MaWebSocketClient
-import net.asksakis.massdroidv2.service.SleepTimerBridge
+import net.asksakis.massdroidv2.playback.SleepTimerBridge
 import net.asksakis.massdroidv2.data.proximity.RoomDetector
 import net.asksakis.massdroidv2.auto.AaProjectionObserver
 import net.asksakis.massdroidv2.domain.model.GroupProviderOption
