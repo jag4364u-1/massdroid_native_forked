@@ -30,6 +30,10 @@ class TvNowPlayingViewModel @Inject constructor(
         .map { list -> list.firstOrNull { it.playerId == playerId } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    /** Live playback position (seconds), interpolated by the :core ticker. */
+    val elapsed: StateFlow<Double> = playerRepository.elapsedTime
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0.0)
+
     init {
         playerRepository.selectPlayer(playerId)
     }
@@ -37,6 +41,14 @@ class TvNowPlayingViewModel @Inject constructor(
     fun playPause() = viewModelScope.launch { playerRepository.playPause(playerId) }
     fun next() = viewModelScope.launch { playerRepository.next(playerId) }
     fun previous() = viewModelScope.launch { playerRepository.previous(playerId) }
+
+    /** Seek by a relative delta (seconds), clamped to the track. */
+    fun seekBy(deltaSec: Double) {
+        val duration = player.value?.currentMedia?.duration ?: return
+        if (duration <= 0.0) return
+        val target = (elapsed.value + deltaSec).coerceIn(0.0, duration)
+        viewModelScope.launch { playerRepository.seek(playerId, target) }
+    }
 
     fun volumeUp() = changeVolume(VOLUME_STEP)
     fun volumeDown() = changeVolume(-VOLUME_STEP)

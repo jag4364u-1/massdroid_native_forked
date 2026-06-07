@@ -49,9 +49,13 @@ fun TvHomeScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(start = 48.dp, end = 48.dp, top = 40.dp, bottom = 48.dp)
+                .padding(top = 40.dp, bottom = 48.dp)
         ) {
-            Text("MassDroid TV", style = MaterialTheme.typography.headlineMedium)
+            Text(
+                "MassDroid TV",
+                style = MaterialTheme.typography.headlineMedium,
+                modifier = Modifier.padding(horizontal = EDGE)
+            )
             Spacer(Modifier.height(28.dp))
 
             if (players.isNotEmpty()) {
@@ -92,15 +96,24 @@ private fun ContentShelf(
 @Composable
 private fun Shelf(title: String, content: LazyListScope.() -> Unit) {
     Column(modifier = Modifier.padding(bottom = 28.dp)) {
-        Text(title, style = MaterialTheme.typography.titleLarge)
+        Text(
+            title,
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.padding(horizontal = EDGE)
+        )
         Spacer(Modifier.height(12.dp))
+        // Overscan-safe inset lives in the row's contentPadding (not the parent),
+        // so focused edge cards can scale without being clipped at the screen edge.
         LazyRow(
             horizontalArrangement = Arrangement.spacedBy(16.dp),
-            contentPadding = PaddingValues(end = 48.dp),
+            contentPadding = PaddingValues(horizontal = EDGE),
             content = content
         )
     }
 }
+
+/** Overscan-safe horizontal inset for 10-foot layout. */
+private val EDGE = 56.dp
 
 @Composable
 private fun PlayerCard(player: Player, onClick: () -> Unit) {
