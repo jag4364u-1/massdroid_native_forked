@@ -3,6 +3,7 @@ package net.asksakis.massdroidv2.tv.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -22,6 +23,10 @@ import javax.inject.Inject
 /**
  * Connected home content, ATV style: live players plus library shelves pulled
  * straight from the shared :core repositories and rendered as D-pad card rows.
+ *
+ * Albums and Artists are paginated so the whole library is reachable: each row
+ * fetches the next page as you scroll near its end, with no fixed cap. Recently
+ * Played and Playlists stay as bounded previews.
  */
 @HiltViewModel
 class TvHomeViewModel @Inject constructor(
@@ -46,21 +51,31 @@ class TvHomeViewModel @Inject constructor(
     private val _recentlyPlayed = MutableStateFlow<List<Album>>(emptyList())
     val recentlyPlayed: StateFlow<List<Album>> = _recentlyPlayed.asStateFlow()
 
-    private val _albums = MutableStateFlow<List<Album>>(emptyList())
-    val albums: StateFlow<List<Album>> = _albums.asStateFlow()
+    private val albumsPager = Pager<Album>(viewModelScope, { it.uri }) { limit, offset ->
+        musicRepository.getAlbums(limit = limit, offset = offset, orderBy = "name")
+    }
+    val albums: StateFlow<List<Album>> = albumsPager.items
 
-    private val _artists = MutableStateFlow<List<Artist>>(emptyList())
-    val artists: StateFlow<List<Artist>> = _artists.asStateFlow()
+    private val artistsPager = Pager<Artist>(viewModelScope, { it.uri }) { limit, offset ->
+        musicRepository.getArtists(limit = limit, offset = offset, orderBy = "name")
+    }
+    val artists: StateFlow<List<Artist>> = artistsPager.items
 
     private val _playlists = MutableStateFlow<List<Playlist>>(emptyList())
     val playlists: StateFlow<List<Playlist>> = _playlists.asStateFlow()
 
     init {
-        load(_recentlyPlayed) { musicRepository.getAlbums(limit = 20, orderBy = "last_played") }
-        load(_albums) { musicRepository.getAlbums(limit = 20, orderBy = "name") }
-        load(_artists) { musicRepository.getArtists(limit = 20, orderBy = "name") }
-        load(_playlists) { musicRepository.getPlaylists(limit = 20) }
+        load(_recentlyPlayed) { musicRepository.getAlbums(limit = 25, orderBy = "last_played") }
+        load(_playlists) { musicRepository.getPlaylists(limit = 100) }
+        albumsPager.loadMore()
+        artistsPager.loadMore()
     }
+
+    /** Fetch the next page of albums when the row nears its end. */
+    fun loadMoreAlbums() = albumsPager.loadMore()
+
+    /** Fetch the next page of artists when the row nears its end. */
+    fun loadMoreArtists() = artistsPager.loadMore()
 
     /** Play a library item on the selected player (or the first available one). */
     fun playMedia(uri: String) {
@@ -75,5 +90,43 @@ class TvHomeViewModel @Inject constructor(
 
     private fun <T> load(target: MutableStateFlow<List<T>>, block: suspend () -> List<T>) {
         viewModelScope.launch { runCatching { block() }.onSuccess { target.value = it } }
+    }
+
+    /**
+     * Offset-based forward pager over a :core library endpoint. De-duplicates by
+     * [key] when appending so the LazyRow never sees a duplicate stable key, and
+     * stops once a short/empty page signals the end.
+     */
+    private class Pager<T>(
+        private val scope: CoroutineScope,
+        private val key: (T) -> Any,
+        private val fetch: suspend (limit: Int, offset: Int) -> List<T>,
+    ) {
+        private val _items = MutableStateFlow<List<T>>(emptyList())
+        val items: StateFlow<List<T>> = _items.asStateFlow()
+
+        private var offset = 0
+        private var endReached = false
+        private var loading = false
+
+        fun loadMore() {
+            if (loading || endReached) return
+            loading = true
+            scope.launch {
+                val page = runCatching { fetch(PAGE_SIZE, offset) }.getOrDefault(emptyList())
+                if (page.size < PAGE_SIZE) endReached = true
+                if (page.isNotEmpty()) {
+                    offset += page.size
+                    val seen = _items.value.mapTo(HashSet(), key)
+                    val fresh = page.filter { seen.add(key(it)) }
+                    if (fresh.isNotEmpty()) _items.value = _items.value + fresh
+                }
+                loading = false
+            }
+        }
+
+        private companion object {
+            const val PAGE_SIZE = 50
+        }
     }
 }

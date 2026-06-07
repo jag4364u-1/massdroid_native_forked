@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.BorderStroke
@@ -31,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -139,8 +141,19 @@ fun TvHomeScreen(
                 }
             }
             ContentShelf("Recently Played", recentlyPlayed.map { MediaCardData(it.uri, it.imageUrl, it.name, it.artistNames) }, viewModel::playMedia)
-            ContentShelf("Albums", albums.map { MediaCardData(it.uri, it.imageUrl, it.name, it.artistNames) }, viewModel::playMedia)
-            ContentShelf("Artists", artists.map { MediaCardData(it.uri, it.imageUrl, it.name, null) }, viewModel::playMedia, circular = true)
+            ContentShelf(
+                "Albums",
+                albums.map { MediaCardData(it.uri, it.imageUrl, it.name, it.artistNames) },
+                viewModel::playMedia,
+                onLoadMore = viewModel::loadMoreAlbums
+            )
+            ContentShelf(
+                "Artists",
+                artists.map { MediaCardData(it.uri, it.imageUrl, it.name, null) },
+                viewModel::playMedia,
+                circular = true,
+                onLoadMore = viewModel::loadMoreArtists
+            )
             ContentShelf("Playlists", playlists.map { MediaCardData(it.uri, it.imageUrl, it.name, null) }, viewModel::playMedia)
         }
     }
@@ -158,18 +171,35 @@ private fun ContentShelf(
     title: String,
     items: List<MediaCardData>,
     onClick: (String) -> Unit,
-    circular: Boolean = false
+    circular: Boolean = false,
+    onLoadMore: (() -> Unit)? = null
 ) {
     if (items.isEmpty()) return
-    Shelf(title) {
+    val state = rememberLazyListState()
+    // Paginate: pull the next page as focus/scroll nears the end of the row.
+    if (onLoadMore != null) {
+        LaunchedEffect(state, items.size) {
+            snapshotFlow { state.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
+                .collect { lastVisible ->
+                    if (lastVisible >= items.size - LOAD_MORE_THRESHOLD) onLoadMore()
+                }
+        }
+    }
+    Shelf(title, state) {
         items(items, key = { it.uri }) { item ->
             MediaCard(item, circular) { onClick(item.uri) }
         }
     }
 }
 
+private const val LOAD_MORE_THRESHOLD = 10
+
 @Composable
-private fun Shelf(title: String, content: LazyListScope.() -> Unit) {
+private fun Shelf(
+    title: String,
+    state: LazyListState = rememberLazyListState(),
+    content: LazyListScope.() -> Unit
+) {
     Column(modifier = Modifier.padding(bottom = 28.dp)) {
         Text(
             title,
@@ -180,6 +210,7 @@ private fun Shelf(title: String, content: LazyListScope.() -> Unit) {
         // Overscan-safe inset lives in the row's contentPadding (not the parent),
         // so focused edge cards can scale without being clipped at the screen edge.
         LazyRow(
+            state = state,
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             contentPadding = PaddingValues(horizontal = EDGE),
             content = content
