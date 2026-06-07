@@ -13,6 +13,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import net.asksakis.massdroidv2.data.sendspin.SendspinManager
 import net.asksakis.massdroidv2.data.sendspin.SendspinVolumeCoordinator
 import net.asksakis.massdroidv2.data.websocket.MaWebSocketClient
@@ -64,6 +66,25 @@ class TvPlaybackService : Service() {
             onWifiConnected = {},
         )
         coordinator.start()
+        defaultPlayerIcon()
+    }
+
+    /**
+     * Default this device's MA player icon to a television glyph once it has
+     * registered, so the Shield shows as a TV (not a generic speaker) in Music
+     * Assistant. MA persists it as the per-player CONF_ENTRY_PLAYER_ICON.
+     */
+    private fun defaultPlayerIcon() {
+        scope.launch {
+            repeat(ICON_WAIT_TICKS) {
+                val playerId = coordinator.playerId
+                if (playerId != null) {
+                    runCatching { playerRepository.savePlayerConfig(playerId, mapOf("icon" to "mdi-television")) }
+                    return@launch
+                }
+                delay(1_000)
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
@@ -103,6 +124,7 @@ class TvPlaybackService : Service() {
     companion object {
         private const val CHANNEL_ID = "tv_playback"
         private const val NOTIFICATION_ID = 1
+        private const val ICON_WAIT_TICKS = 30
 
         fun start(context: android.content.Context) {
             val intent = Intent(context, TvPlaybackService::class.java)

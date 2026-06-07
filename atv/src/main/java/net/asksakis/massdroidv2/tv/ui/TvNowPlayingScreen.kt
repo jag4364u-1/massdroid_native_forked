@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VolumeDown
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.runtime.Composable
@@ -51,9 +52,14 @@ import androidx.tv.material3.Text
 import net.asksakis.massdroidv2.domain.model.PlaybackState
 
 @Composable
-fun TvNowPlayingScreen(viewModel: TvNowPlayingViewModel = hiltViewModel()) {
+fun TvNowPlayingScreen(
+    viewModel: TvNowPlayingViewModel = hiltViewModel(),
+    settingsViewModel: TvSettingsViewModel = hiltViewModel()
+) {
     val player by viewModel.player.collectAsStateWithLifecycle()
     val elapsed by viewModel.elapsed.collectAsStateWithLifecycle()
+    val syncDelay by settingsViewModel.syncDelayMs.collectAsStateWithLifecycle()
+    var showOptions by remember { mutableStateOf(false) }
     val media = player?.currentMedia
     val duration = media?.duration ?: 0.0
     val playing = player?.state == PlaybackState.PLAYING
@@ -122,6 +128,13 @@ fun TvNowPlayingScreen(viewModel: TvNowPlayingViewModel = hiltViewModel()) {
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Spacer(Modifier.width(24.dp))
+                    TransportIcon(Icons.Filled.Tune, "Audio options") { showOptions = !showOptions }
+                }
+
+                if (showOptions) {
+                    Spacer(Modifier.height(24.dp))
+                    SyncDelayControl(valueMs = syncDelay, onChange = settingsViewModel::setSyncDelay)
                 }
                 LaunchedEffect(Unit) { runCatching { playFocus.requestFocus() } }
             }
