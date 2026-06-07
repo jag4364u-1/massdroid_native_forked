@@ -3,6 +3,7 @@ package net.asksakis.massdroidv2.tv.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,8 +18,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
@@ -28,6 +32,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import androidx.tv.material3.Card
+import androidx.tv.material3.Icon
+import androidx.tv.material3.IconButton
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
@@ -36,6 +42,7 @@ import net.asksakis.massdroidv2.domain.model.Player
 @Composable
 fun TvHomeScreen(
     onOpenPlayer: (String) -> Unit,
+    onOpenSettings: () -> Unit,
     viewModel: TvHomeViewModel = hiltViewModel()
 ) {
     val players by viewModel.players.collectAsStateWithLifecycle()
@@ -51,11 +58,16 @@ fun TvHomeScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(top = 40.dp, bottom = 48.dp)
         ) {
-            Text(
-                "MassDroid TV",
-                style = MaterialTheme.typography.headlineMedium,
-                modifier = Modifier.padding(horizontal = EDGE)
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = EDGE),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("MassDroid TV", style = MaterialTheme.typography.headlineMedium)
+                IconButton(onClick = onOpenSettings) {
+                    Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                }
+            }
             Spacer(Modifier.height(28.dp))
 
             if (players.isNotEmpty()) {

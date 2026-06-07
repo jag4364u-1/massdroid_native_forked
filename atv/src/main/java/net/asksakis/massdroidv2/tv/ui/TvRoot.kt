@@ -29,7 +29,10 @@ fun TvRoot(viewModel: TvRootViewModel = hiltViewModel()) {
             val nav = rememberNavController()
             NavHost(navController = nav, startDestination = "home") {
                 composable("home") {
-                    TvHomeScreen(onOpenPlayer = { playerId -> nav.navigate("nowplaying/$playerId") })
+                    TvHomeScreen(
+                        onOpenPlayer = { playerId -> nav.navigate("nowplaying/$playerId") },
+                        onOpenSettings = { nav.navigate("settings") }
+                    )
                 }
                 composable(
                     route = "nowplaying/{playerId}",
@@ -37,6 +40,7 @@ fun TvRoot(viewModel: TvRootViewModel = hiltViewModel()) {
                 ) {
                     TvNowPlayingScreen()
                 }
+                composable("settings") { TvSettingsScreen() }
             }
         }
         (!initialized || hasSavedServer) && !changeServer -> {
