@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import net.asksakis.massdroidv2.domain.model.Album
@@ -29,6 +30,12 @@ class TvHomeViewModel @Inject constructor(
 
     val players: StateFlow<List<Player>> = playerRepository.players
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val selectedPlayerId: StateFlow<String?> = playerRepository.selectedPlayer
+        .map { it?.playerId }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    fun selectPlayer(playerId: String) = playerRepository.selectPlayer(playerId)
 
     private val _recentlyPlayed = MutableStateFlow<List<Album>>(emptyList())
     val recentlyPlayed: StateFlow<List<Album>> = _recentlyPlayed.asStateFlow()

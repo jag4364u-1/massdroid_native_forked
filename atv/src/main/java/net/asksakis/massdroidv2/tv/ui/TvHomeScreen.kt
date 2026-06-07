@@ -25,6 +25,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -46,6 +47,7 @@ fun TvHomeScreen(
     viewModel: TvHomeViewModel = hiltViewModel()
 ) {
     val players by viewModel.players.collectAsStateWithLifecycle()
+    val selectedPlayerId by viewModel.selectedPlayerId.collectAsStateWithLifecycle()
     val recentlyPlayed by viewModel.recentlyPlayed.collectAsStateWithLifecycle()
     val albums by viewModel.albums.collectAsStateWithLifecycle()
     val artists by viewModel.artists.collectAsStateWithLifecycle()
@@ -72,7 +74,14 @@ fun TvHomeScreen(
 
             if (players.isNotEmpty()) {
                 Shelf("Players") {
-                    items(players, key = { it.playerId }) { p -> PlayerCard(p) { onOpenPlayer(p.playerId) } }
+                    items(players, key = { it.playerId }) { p ->
+                        // First press selects the player as the playback target;
+                        // pressing the already-selected one opens its controls.
+                        PlayerCard(p, selected = p.playerId == selectedPlayerId) {
+                            if (p.playerId == selectedPlayerId) onOpenPlayer(p.playerId)
+                            else viewModel.selectPlayer(p.playerId)
+                        }
+                    }
                 }
             }
             ContentShelf("Recently Played", recentlyPlayed.map { MediaCardData(it.uri, it.imageUrl, it.name, it.artistNames) }, viewModel::playMedia)
@@ -128,12 +137,26 @@ private fun Shelf(title: String, content: LazyListScope.() -> Unit) {
 private val EDGE = 56.dp
 
 @Composable
-private fun PlayerCard(player: Player, onClick: () -> Unit) {
+private fun PlayerCard(player: Player, selected: Boolean, onClick: () -> Unit) {
     val subtitle = player.currentMedia?.title?.takeIf { it.isNotBlank() }
         ?: player.state.name.lowercase().replaceFirstChar { it.uppercase() }
     Card(onClick = onClick, modifier = Modifier.width(280.dp)) {
         Column(modifier = Modifier.padding(20.dp)) {
-            Text(player.displayName, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (selected) {
+                Text(
+                    "● Selected",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Spacer(Modifier.height(4.dp))
+            }
+            Text(
+                player.displayName,
+                style = MaterialTheme.typography.titleMedium,
+                color = if (selected) MaterialTheme.colorScheme.primary else Color.Unspecified,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
             Spacer(Modifier.height(6.dp))
             Text(
                 subtitle,
