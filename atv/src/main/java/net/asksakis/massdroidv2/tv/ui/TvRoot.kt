@@ -1,5 +1,6 @@
 package net.asksakis.massdroidv2.tv.ui
 
+import android.net.Uri
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -31,7 +32,10 @@ fun TvRoot(viewModel: TvRootViewModel = hiltViewModel()) {
                 composable("home") {
                     TvHomeScreen(
                         onOpenPlayer = { playerId -> nav.navigate("nowplaying/$playerId") },
-                        onOpenSettings = { nav.navigate("settings") }
+                        onOpenSettings = { nav.navigate("settings") },
+                        onOpenArtist = { itemId, provider ->
+                            nav.navigate("artist/${Uri.encode(itemId)}/${Uri.encode(provider)}")
+                        }
                     )
                 }
                 composable(
@@ -41,6 +45,15 @@ fun TvRoot(viewModel: TvRootViewModel = hiltViewModel()) {
                     TvNowPlayingScreen(onOpenQueue = { nav.navigate("queue") })
                 }
                 composable("queue") { TvQueueScreen() }
+                composable(
+                    route = "artist/{itemId}/{provider}",
+                    arguments = listOf(
+                        navArgument("itemId") { type = NavType.StringType },
+                        navArgument("provider") { type = NavType.StringType }
+                    )
+                ) {
+                    TvArtistScreen()
+                }
                 composable("settings") { TvSettingsScreen() }
             }
         }

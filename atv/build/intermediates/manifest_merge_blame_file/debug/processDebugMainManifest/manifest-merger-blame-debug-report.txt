@@ -1,0 +1,199 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="net.asksakis.massdroidv2.tv.debug"
+4    android:versionCode="1"
+5    android:versionName="0.1.0" >
+6
+7    <uses-sdk
+8        android:minSdkVersion="26"
+9        android:targetSdkVersion="35" />
+10
+11    <uses-permission android:name="android.permission.INTERNET" />
+11-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:4:5-67
+11-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:4:22-64
+12    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+12-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:5:5-79
+12-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:5:22-76
+13    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+13-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:6:5-76
+13-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:6:22-73
+14    <uses-permission android:name="android.permission.WAKE_LOCK" />
+14-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:7:5-68
+14-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:7:22-65
+15    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+15-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:8:5-77
+15-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:8:22-74
+16    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+16-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:9:5-92
+16-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:9:22-89
+17
+18    <!--
+19         TV does not have a touchscreen; declare leanback and make touch optional
+20         so the app is installable on Android TV / Shield.
+21    -->
+22    <uses-feature
+22-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:13:5-15:35
+23        android:name="android.software.leanback"
+23-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:14:9-49
+24        android:required="true" />
+24-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:15:9-32
+25    <uses-feature
+25-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:16:5-18:36
+26        android:name="android.hardware.touchscreen"
+26-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:17:9-52
+27        android:required="false" />
+27-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:18:9-33
+28
+29    <permission
+29-->[androidx.core:core:1.16.0] /home/sfortis/.gradle/caches/8.11.1/transforms/2f7f469ce2de731996f97dce375e68b2/transformed/core-1.16.0/AndroidManifest.xml:22:5-24:47
+30        android:name="net.asksakis.massdroidv2.tv.debug.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+30-->[androidx.core:core:1.16.0] /home/sfortis/.gradle/caches/8.11.1/transforms/2f7f469ce2de731996f97dce375e68b2/transformed/core-1.16.0/AndroidManifest.xml:23:9-81
+31        android:protectionLevel="signature" />
+31-->[androidx.core:core:1.16.0] /home/sfortis/.gradle/caches/8.11.1/transforms/2f7f469ce2de731996f97dce375e68b2/transformed/core-1.16.0/AndroidManifest.xml:24:9-44
+32
+33    <uses-permission android:name="net.asksakis.massdroidv2.tv.debug.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION" />
+33-->[androidx.core:core:1.16.0] /home/sfortis/.gradle/caches/8.11.1/transforms/2f7f469ce2de731996f97dce375e68b2/transformed/core-1.16.0/AndroidManifest.xml:26:5-97
+33-->[androidx.core:core:1.16.0] /home/sfortis/.gradle/caches/8.11.1/transforms/2f7f469ce2de731996f97dce375e68b2/transformed/core-1.16.0/AndroidManifest.xml:26:22-94
+34
+35    <application
+35-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:20:5-49:19
+36        android:name="net.asksakis.massdroidv2.tv.TvApp"
+36-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:21:9-30
+37        android:allowBackup="true"
+37-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:22:9-35
+38        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+38-->[androidx.core:core:1.16.0] /home/sfortis/.gradle/caches/8.11.1/transforms/2f7f469ce2de731996f97dce375e68b2/transformed/core-1.16.0/AndroidManifest.xml:28:18-86
+39        android:banner="@drawable/banner"
+39-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:23:9-42
+40        android:debuggable="true"
+41        android:extractNativeLibs="false"
+42        android:icon="@mipmap/ic_launcher"
+42-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:24:9-43
+43        android:label="@string/app_name"
+43-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:26:9-41
+44        android:networkSecurityConfig="@xml/network_security_config"
+44-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:27:9-69
+45        android:roundIcon="@mipmap/ic_launcher_round"
+45-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:25:9-54
+46        android:supportsRtl="true"
+46-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:28:9-35
+47        android:theme="@style/Theme.MassDroidTv" >
+47-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:29:9-49
+48        <activity
+48-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:31:9-42:20
+49            android:name="net.asksakis.massdroidv2.tv.ui.TvMainActivity"
+49-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:32:13-46
+50            android:configChanges="orientation|keyboardHidden|screenSize"
+50-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:34:13-74
+51            android:exported="true"
+51-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:33:13-36
+52            android:launchMode="singleTop"
+52-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:35:13-43
+53            android:theme="@style/Theme.MassDroidTv" >
+53-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:36:13-53
+54            <intent-filter>
+54-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:37:13-41:29
+55                <action android:name="android.intent.action.MAIN" />
+55-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:38:17-69
+55-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:38:25-66
+56                <!-- Launches from the Android TV home screen, not the phone launcher. -->
+57                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+57-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:40:17-86
+57-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:40:27-83
+58            </intent-filter>
+59        </activity>
+60
+61        <!-- Foreground service: the Shield as a synced Sendspin player. -->
+62        <service
+62-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:45:9-48:77
+63            android:name="net.asksakis.massdroidv2.tv.TvPlaybackService"
+63-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:46:13-46
+64            android:exported="false"
+64-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:47:13-37
+65            android:foregroundServiceType="mediaPlayback|connectedDevice" />
+65-->/home/sfortis/work/massdroid-native/atv/src/main/AndroidManifest.xml:48:13-74
+66
+67        <activity
+67-->[androidx.compose.ui:ui-tooling-android:1.8.0] /home/sfortis/.gradle/caches/8.11.1/transforms/fb8d6151a0888ee05ed94b1a2b56a2da/transformed/ui-tooling-release/AndroidManifest.xml:23:9-25:39
+68            android:name="androidx.compose.ui.tooling.PreviewActivity"
+68-->[androidx.compose.ui:ui-tooling-android:1.8.0] /home/sfortis/.gradle/caches/8.11.1/transforms/fb8d6151a0888ee05ed94b1a2b56a2da/transformed/ui-tooling-release/AndroidManifest.xml:24:13-71
+69            android:exported="true" />
+69-->[androidx.compose.ui:ui-tooling-android:1.8.0] /home/sfortis/.gradle/caches/8.11.1/transforms/fb8d6151a0888ee05ed94b1a2b56a2da/transformed/ui-tooling-release/AndroidManifest.xml:25:13-36
+70
+71        <provider
+71-->[androidx.emoji2:emoji2:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/11e530560701558a926df4abba73d395/transformed/emoji2-1.4.0/AndroidManifest.xml:24:9-32:20
+72            android:name="androidx.startup.InitializationProvider"
+72-->[androidx.emoji2:emoji2:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/11e530560701558a926df4abba73d395/transformed/emoji2-1.4.0/AndroidManifest.xml:25:13-67
+73            android:authorities="net.asksakis.massdroidv2.tv.debug.androidx-startup"
+73-->[androidx.emoji2:emoji2:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/11e530560701558a926df4abba73d395/transformed/emoji2-1.4.0/AndroidManifest.xml:26:13-68
+74            android:exported="false" >
+74-->[androidx.emoji2:emoji2:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/11e530560701558a926df4abba73d395/transformed/emoji2-1.4.0/AndroidManifest.xml:27:13-37
+75            <meta-data
+75-->[androidx.emoji2:emoji2:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/11e530560701558a926df4abba73d395/transformed/emoji2-1.4.0/AndroidManifest.xml:29:13-31:52
+76                android:name="androidx.emoji2.text.EmojiCompatInitializer"
+76-->[androidx.emoji2:emoji2:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/11e530560701558a926df4abba73d395/transformed/emoji2-1.4.0/AndroidManifest.xml:30:17-75
+77                android:value="androidx.startup" />
+77-->[androidx.emoji2:emoji2:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/11e530560701558a926df4abba73d395/transformed/emoji2-1.4.0/AndroidManifest.xml:31:17-49
+78            <meta-data
+78-->[androidx.lifecycle:lifecycle-process:2.8.7] /home/sfortis/.gradle/caches/8.11.1/transforms/f5602d31171555500b98c6b2d8dcd8e9/transformed/lifecycle-process-2.8.7/AndroidManifest.xml:29:13-31:52
+79                android:name="androidx.lifecycle.ProcessLifecycleInitializer"
+79-->[androidx.lifecycle:lifecycle-process:2.8.7] /home/sfortis/.gradle/caches/8.11.1/transforms/f5602d31171555500b98c6b2d8dcd8e9/transformed/lifecycle-process-2.8.7/AndroidManifest.xml:30:17-78
+80                android:value="androidx.startup" />
+80-->[androidx.lifecycle:lifecycle-process:2.8.7] /home/sfortis/.gradle/caches/8.11.1/transforms/f5602d31171555500b98c6b2d8dcd8e9/transformed/lifecycle-process-2.8.7/AndroidManifest.xml:31:17-49
+81            <meta-data
+81-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:29:13-31:52
+82                android:name="androidx.profileinstaller.ProfileInstallerInitializer"
+82-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:30:17-85
+83                android:value="androidx.startup" />
+83-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:31:17-49
+84        </provider>
+85
+86        <service
+86-->[androidx.room:room-runtime:2.6.1] /home/sfortis/.gradle/caches/8.11.1/transforms/a612d04f29787e6363a29ca6e62a83be/transformed/room-runtime-2.6.1/AndroidManifest.xml:24:9-28:63
+87            android:name="androidx.room.MultiInstanceInvalidationService"
+87-->[androidx.room:room-runtime:2.6.1] /home/sfortis/.gradle/caches/8.11.1/transforms/a612d04f29787e6363a29ca6e62a83be/transformed/room-runtime-2.6.1/AndroidManifest.xml:25:13-74
+88            android:directBootAware="true"
+88-->[androidx.room:room-runtime:2.6.1] /home/sfortis/.gradle/caches/8.11.1/transforms/a612d04f29787e6363a29ca6e62a83be/transformed/room-runtime-2.6.1/AndroidManifest.xml:26:13-43
+89            android:exported="false" />
+89-->[androidx.room:room-runtime:2.6.1] /home/sfortis/.gradle/caches/8.11.1/transforms/a612d04f29787e6363a29ca6e62a83be/transformed/room-runtime-2.6.1/AndroidManifest.xml:27:13-37
+90
+91        <receiver
+91-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:34:9-52:20
+92            android:name="androidx.profileinstaller.ProfileInstallReceiver"
+92-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:35:13-76
+93            android:directBootAware="false"
+93-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:36:13-44
+94            android:enabled="true"
+94-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:37:13-35
+95            android:exported="true"
+95-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:38:13-36
+96            android:permission="android.permission.DUMP" >
+96-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:39:13-57
+97            <intent-filter>
+97-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:40:13-42:29
+98                <action android:name="androidx.profileinstaller.action.INSTALL_PROFILE" />
+98-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:41:17-91
+98-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:41:25-88
+99            </intent-filter>
+100            <intent-filter>
+100-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:43:13-45:29
+101                <action android:name="androidx.profileinstaller.action.SKIP_FILE" />
+101-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:44:17-85
+101-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:44:25-82
+102            </intent-filter>
+103            <intent-filter>
+103-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:46:13-48:29
+104                <action android:name="androidx.profileinstaller.action.SAVE_PROFILE" />
+104-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:47:17-88
+104-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:47:25-85
+105            </intent-filter>
+106            <intent-filter>
+106-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:49:13-51:29
+107                <action android:name="androidx.profileinstaller.action.BENCHMARK_OPERATION" />
+107-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:50:17-95
+107-->[androidx.profileinstaller:profileinstaller:1.4.0] /home/sfortis/.gradle/caches/8.11.1/transforms/5d1cf2feb9289d9643c8dd48879ff7fd/transformed/profileinstaller-1.4.0/AndroidManifest.xml:50:25-92
+108            </intent-filter>
+109        </receiver>
+110    </application>
+111
+112</manifest>

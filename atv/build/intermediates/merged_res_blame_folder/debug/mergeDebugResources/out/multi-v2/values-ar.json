@@ -1,0 +1,77 @@
+{
+    "logs": [
+        {
+            "outputFile": "net.asksakis.massdroidv2.tv.atv-mergeDebugResources-63:/values-ar/values-ar.xml",
+            "map": [
+                {
+                    "source": "/home/sfortis/.gradle/caches/8.11.1/transforms/3c09a3fea8cf25c61e6f21f2dcddfbea/transformed/foundation-release/res/values-ar/values-ar.xml",
+                    "from": {
+                        "startLines": "2,3,4",
+                        "startColumns": "4,4,4",
+                        "startOffsets": "55,136,220",
+                        "endColumns": "80,83,85",
+                        "endOffsets": "131,215,301"
+                    },
+                    "to": {
+                        "startLines": "2,31,32",
+                        "startColumns": "4,4,4",
+                        "startOffsets": "105,2710,2794",
+                        "endColumns": "80,83,85",
+                        "endOffsets": "181,2789,2875"
+                    }
+                },
+                {
+                    "source": "/home/sfortis/.gradle/caches/8.11.1/transforms/d46dc6461be975b274b84b13d3824088/transformed/ui-release/res/values-ar/values-ar.xml",
+                    "from": {
+                        "startLines": "3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21",
+                        "startColumns": "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4",
+                        "startOffsets": "187,276,359,454,552,637,718,824,908,989,1070,1153,1223,1307,1386,1465,1539,1615,1689",
+                        "endColumns": "88,82,94,97,84,80,105,83,80,80,82,69,83,78,78,73,75,73,120",
+                        "endOffsets": "271,354,449,547,632,713,819,903,984,1065,1148,1218,1302,1381,1460,1534,1610,1684,1805"
+                    },
+                    "to": {
+                        "startLines": "10,11,12,13,14,15,16,18,19,20,21,22,23,24,25,26,28,29,30",
+                        "startColumns": "4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4",
+                        "startOffsets": "898,987,1070,1165,1263,1348,1429,1623,1707,1788,1869,1952,2022,2106,2185,2264,2439,2515,2589",
+                        "endColumns": "88,82,94,97,84,80,105,83,80,80,82,69,83,78,78,73,75,73,120",
+                        "endOffsets": "982,1065,1160,1258,1343,1424,1530,1702,1783,1864,1947,2017,2101,2180,2259,2333,2510,2584,2705"
+                    }
+                },
+                {
+                    "source": "/home/sfortis/.gradle/caches/8.11.1/transforms/880c97697635669175e7facbb0728eaa/transformed/material-release/res/values-ar/values-ar.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "87",
+                        "endOffsets": "138"
+                    },
+                    "to": {
+                        "startLines": "17",
+                        "startColumns": "4",
+                        "startOffsets": "1535",
+                        "endColumns": "87",
+                        "endOffsets": "1618"
+                    }
+                },
+                {
+                    "source": "/home/sfortis/.gradle/caches/8.11.1/transforms/2f7f469ce2de731996f97dce375e68b2/transformed/core-1.16.0/res/values-ar/values-ar.xml",
+                    "from": {
+                        "startLines": "2,3,4,5,6,7,8,9",
+                        "startColumns": "4,4,4,4,4,4,4,4",
+                        "startOffsets": "55,148,250,345,448,551,653,767",
+                        "endColumns": "92,101,94,102,102,101,113,100",
+                        "endOffsets": "143,245,340,443,546,648,762,863"
+                    },
+                    "to": {
+                        "startLines": "3,4,5,6,7,8,9,27",
+                        "startColumns": "4,4,4,4,4,4,4,4",
+                        "startOffsets": "186,279,381,476,579,682,784,2338",
+                        "endColumns": "92,101,94,102,102,101,113,100",
+                        "endOffsets": "274,376,471,574,677,779,893,2434"
+                    }
+                }
+            ]
+        }
+    ]
+}

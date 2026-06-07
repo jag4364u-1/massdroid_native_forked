@@ -1,0 +1,101 @@
+package net.asksakis.massdroidv2.tv.ui
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import coil.compose.AsyncImage
+import androidx.tv.material3.Card
+import androidx.tv.material3.LocalContentColor
+import androidx.tv.material3.MaterialTheme
+import androidx.tv.material3.Surface
+import androidx.tv.material3.Text
+import net.asksakis.massdroidv2.domain.model.Album
+
+/** An artist's albums in a 10-foot grid; click an album to play it on the selected player. */
+@Composable
+fun TvArtistScreen(viewModel: TvArtistViewModel = hiltViewModel()) {
+    val name by viewModel.name.collectAsStateWithLifecycle()
+    val albums by viewModel.albums.collectAsStateWithLifecycle()
+
+    Surface(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize().padding(top = 40.dp, bottom = 40.dp)) {
+            Text(
+                name.ifBlank { "Artist" },
+                style = MaterialTheme.typography.headlineMedium,
+                modifier = Modifier.padding(horizontal = ARTIST_EDGE)
+            )
+            Spacer(Modifier.height(20.dp))
+            if (albums.isEmpty()) {
+                Text(
+                    "No albums",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = LocalContentColor.current.copy(alpha = 0.7f),
+                    modifier = Modifier.padding(horizontal = ARTIST_EDGE)
+                )
+            } else {
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(180.dp),
+                    contentPadding = PaddingValues(horizontal = ARTIST_EDGE, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
+                    items(albums, key = { it.uri }) { album ->
+                        AlbumCard(album) { viewModel.playMedia(album.uri) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private val ARTIST_EDGE = 56.dp
+
+@Composable
+private fun AlbumCard(album: Album, onClick: () -> Unit) {
+    Card(onClick = onClick, modifier = Modifier.width(180.dp)) {
+        Column {
+            AsyncImage(
+                model = album.imageUrl,
+                contentDescription = album.name,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.size(180.dp)
+            )
+            Column(modifier = Modifier.fillMaxWidth().padding(10.dp)) {
+                Text(
+                    album.name,
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                val subtitle = album.year?.toString() ?: album.albumType.orEmpty()
+                if (subtitle.isNotBlank()) {
+                    Text(
+                        subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = LocalContentColor.current.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+    }
+}

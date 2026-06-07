@@ -62,6 +62,7 @@ import net.asksakis.massdroidv2.domain.model.Player
 fun TvHomeScreen(
     onOpenPlayer: (String) -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenArtist: (itemId: String, provider: String) -> Unit,
     viewModel: TvHomeViewModel = hiltViewModel()
 ) {
     val players by viewModel.players.collectAsStateWithLifecycle()
@@ -140,21 +141,29 @@ fun TvHomeScreen(
                     }
                 }
             }
-            ContentShelf("Recently Played", recentlyPlayed.map { MediaCardData(it.uri, it.imageUrl, it.name, it.artistNames) }, viewModel::playMedia)
+            ContentShelf(
+                "Recently Played",
+                recentlyPlayed.map { MediaCardData(it.uri, it.imageUrl, it.name, it.artistNames) },
+                onClick = { viewModel.playMedia(it.uri) }
+            )
             ContentShelf(
                 "Albums",
                 albums.map { MediaCardData(it.uri, it.imageUrl, it.name, it.artistNames) },
-                viewModel::playMedia,
+                onClick = { viewModel.playMedia(it.uri) },
                 onLoadMore = viewModel::loadMoreAlbums
             )
             ContentShelf(
                 "Artists",
-                artists.map { MediaCardData(it.uri, it.imageUrl, it.name, null) },
-                viewModel::playMedia,
+                artists.map { MediaCardData(it.uri, it.imageUrl, it.name, null, it.itemId, it.provider) },
+                onClick = { onOpenArtist(it.itemId, it.provider) },
                 circular = true,
                 onLoadMore = viewModel::loadMoreArtists
             )
-            ContentShelf("Playlists", playlists.map { MediaCardData(it.uri, it.imageUrl, it.name, null) }, viewModel::playMedia)
+            ContentShelf(
+                "Playlists",
+                playlists.map { MediaCardData(it.uri, it.imageUrl, it.name, null) },
+                onClick = { viewModel.playMedia(it.uri) }
+            )
         }
     }
 }
@@ -163,14 +172,16 @@ private data class MediaCardData(
     val uri: String,
     val imageUrl: String?,
     val title: String,
-    val subtitle: String?
+    val subtitle: String?,
+    val itemId: String = "",
+    val provider: String = ""
 )
 
 @Composable
 private fun ContentShelf(
     title: String,
     items: List<MediaCardData>,
-    onClick: (String) -> Unit,
+    onClick: (MediaCardData) -> Unit,
     circular: Boolean = false,
     onLoadMore: (() -> Unit)? = null
 ) {
@@ -187,7 +198,7 @@ private fun ContentShelf(
     }
     Shelf(title, state) {
         items(items, key = { it.uri }) { item ->
-            MediaCard(item, circular) { onClick(item.uri) }
+            MediaCard(item, circular) { onClick(item) }
         }
     }
 }
