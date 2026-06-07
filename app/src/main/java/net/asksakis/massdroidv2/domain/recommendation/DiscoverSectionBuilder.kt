@@ -2,11 +2,11 @@ package net.asksakis.massdroidv2.domain.recommendation
 
 import net.asksakis.massdroidv2.domain.model.Album
 import net.asksakis.massdroidv2.domain.model.Artist
+import net.asksakis.massdroidv2.domain.model.GenreItem
 import net.asksakis.massdroidv2.domain.model.Playlist
 import net.asksakis.massdroidv2.domain.model.RecommendationFolder
 import net.asksakis.massdroidv2.domain.model.Track
 import net.asksakis.massdroidv2.domain.repository.GenreScore
-import net.asksakis.massdroidv2.ui.screens.home.GenreItem
 import javax.inject.Inject
 import javax.inject.Singleton
 

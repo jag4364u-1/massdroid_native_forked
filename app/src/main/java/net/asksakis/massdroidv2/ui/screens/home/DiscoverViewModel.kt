@@ -32,6 +32,7 @@ import net.asksakis.massdroidv2.data.websocket.MaWebSocketClient
 import net.asksakis.massdroidv2.data.websocket.ItemByUriArgs
 import net.asksakis.massdroidv2.data.websocket.SessionEventBus
 import net.asksakis.massdroidv2.domain.model.Album
+import net.asksakis.massdroidv2.domain.model.GenreItem
 import net.asksakis.massdroidv2.domain.model.MediaType
 import net.asksakis.massdroidv2.domain.model.Artist
 import net.asksakis.massdroidv2.domain.model.PlaybackState
@@ -130,12 +131,6 @@ data class ConnectionProbeState(
 )
 
 private data class SmartMixResult(val tracks: List<Track>, val genre: String?)
-
-data class GenreItem(
-    val name: String,
-    val count: Int,
-    val imageUrl: String?
-)
 
 data class DiscoverUiState(
     val sections: List<DiscoverSection> = emptyList(),

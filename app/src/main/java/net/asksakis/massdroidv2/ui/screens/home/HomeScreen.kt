@@ -108,6 +108,7 @@ import kotlinx.coroutines.delay
 import net.asksakis.massdroidv2.R
 import net.asksakis.massdroidv2.data.websocket.ConnectionState
 import net.asksakis.massdroidv2.domain.model.Album
+import net.asksakis.massdroidv2.domain.model.GenreItem
 import net.asksakis.massdroidv2.domain.model.Artist
 import net.asksakis.massdroidv2.domain.model.Playlist
 import net.asksakis.massdroidv2.domain.model.Track
