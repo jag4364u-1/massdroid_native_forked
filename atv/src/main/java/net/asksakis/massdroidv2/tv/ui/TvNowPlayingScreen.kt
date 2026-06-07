@@ -25,7 +25,6 @@ import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.VolumeDown
 import androidx.compose.material.icons.filled.VolumeUp
-import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -51,7 +50,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.tv.material3.Icon
 import androidx.tv.material3.IconButton
-import androidx.tv.material3.LocalContentColor
+import androidx.tv.material3.IconButtonDefaults
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
@@ -74,7 +73,6 @@ fun TvNowPlayingScreen(
     val playing = player?.state == PlaybackState.PLAYING
     val shuffleOn = queue?.shuffleEnabled == true
     val repeatMode = queue?.repeatMode ?: RepeatMode.OFF
-    val accent = MaterialTheme.colorScheme.primary
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Box(modifier = Modifier.fillMaxSize()) {
@@ -131,7 +129,7 @@ fun TvNowPlayingScreen(
                         TransportIcon(
                             Icons.Filled.Shuffle,
                             "Shuffle",
-                            tint = if (shuffleOn) accent else LocalContentColor.current
+                            active = shuffleOn
                         ) { viewModel.toggleShuffle() }
                         TransportIcon(Icons.Filled.SkipPrevious, "Previous") { viewModel.previous() }
                         TransportIcon(
@@ -143,7 +141,7 @@ fun TvNowPlayingScreen(
                         TransportIcon(
                             if (repeatMode == RepeatMode.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
                             "Repeat",
-                            tint = if (repeatMode != RepeatMode.OFF) accent else LocalContentColor.current
+                            active = repeatMode != RepeatMode.OFF
                         ) { viewModel.cycleRepeat() }
                     }
                     Spacer(Modifier.height(16.dp))
@@ -192,11 +190,22 @@ private fun TransportIcon(
     icon: ImageVector,
     description: String,
     modifier: Modifier = Modifier,
-    tint: Color = LocalContentColor.current,
+    active: Boolean = false,
     onClick: () -> Unit
 ) {
-    IconButton(onClick = onClick, modifier = modifier) {
-        Icon(icon, contentDescription = description, tint = tint)
+    // Active toggles (shuffle on / repeat) get a filled primary container; the
+    // icon inherits the IconButton's focus-aware content color (turns dark when
+    // the button is focused), so nothing is hardcoded to a fixed brightness.
+    val colors = if (active) {
+        IconButtonDefaults.colors(
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = MaterialTheme.colorScheme.onPrimary
+        )
+    } else {
+        IconButtonDefaults.colors()
+    }
+    IconButton(onClick = onClick, modifier = modifier, colors = colors) {
+        Icon(icon, contentDescription = description)
     }
 }
 

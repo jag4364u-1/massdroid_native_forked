@@ -48,6 +48,10 @@ class SendspinCoordinator(
     private val onActive: (reason: String) -> Unit,
     private val onInactive: (reason: String) -> Unit,
     private val onWifiConnected: (reason: String) -> Unit,
+    // Optional now-playing surface hooks (used by the TV front-end to drive a
+    // MediaSession). Default no-op so the phone wiring is unaffected.
+    private val onMetadata: (SendspinMetadata) -> Unit = {},
+    private val onPlayingChanged: (playing: Boolean) -> Unit = {},
 ) {
     companion object {
         private const val TAG = "SendspinCoord"
@@ -106,8 +110,11 @@ class SendspinCoordinator(
             wsClient = wsClient,
             volumeCoordinator = volumeCoordinator,
             clientName = clientName,
-            onMetadataChanged = { _ -> },
-            onStateChanged = { _, _, _ -> onConnectionStateChanged() }
+            onMetadataChanged = { onMetadata(it) },
+            onStateChanged = { _, _, playing ->
+                onConnectionStateChanged()
+                onPlayingChanged(playing)
+            }
         )
     }
 
@@ -170,7 +177,9 @@ class SendspinCoordinator(
 
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-                val wifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+                // Treat wired Ethernet as a local high-bandwidth network too (Shield/TV).
+                val wifi = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
                 if (wifi != wifiState.value) {
                     Log.d(TAG, "Network changed: ${if (wifi) "WiFi" else "Mobile"}")
                     if (wifi) onWifiConnected("wifi-connected")
@@ -374,9 +383,14 @@ class SendspinCoordinator(
         networkCallback = null
     }
 
+    // "Local high-bandwidth" network: Wi-Fi OR wired Ethernet (Android TV /
+    // Shield is frequently on Ethernet). Both pick the lossless FLAC path and
+    // skip the cellular recovery buffers; only true mobile data falls back to
+    // Opus. Named isOnWifi for historical continuity.
     private fun isOnWifi(connectivityManager: ConnectivityManager): Boolean {
         val caps = connectivityManager.getNetworkCapabilities(connectivityManager.activeNetwork) ?: return false
-        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
     }
 
     private fun isBtA2dpActive(): Boolean {

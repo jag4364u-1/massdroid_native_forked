@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.lazy.items
@@ -25,10 +26,16 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
@@ -83,17 +90,50 @@ fun TvHomeScreen(
             Spacer(Modifier.height(28.dp))
 
             if (players.isNotEmpty()) {
-                Shelf("Players") {
-                    items(players, key = { it.playerId }) { p ->
-                        // First press selects the player as the playback target;
-                        // pressing the already-selected one opens its controls.
-                        PlayerCard(
-                            p,
-                            selected = p.playerId == selectedPlayerId,
-                            local = p.playerId == localPlayerId
-                        ) {
-                            if (p.playerId == selectedPlayerId) onOpenPlayer(p.playerId)
-                            else viewModel.selectPlayer(p.playerId)
+                val playersState = rememberLazyListState()
+                val selectedFocus = remember { FocusRequester() }
+                var focusRestored by remember { mutableStateOf(false) }
+                // On (re)entering home (e.g. Back from a player's controls), return
+                // focus to the player you had open — that is the selected one.
+                LaunchedEffect(players.size) {
+                    if (!focusRestored) {
+                        val idx = players.indexOfFirst { it.playerId == selectedPlayerId }
+                        if (idx >= 0) {
+                            playersState.scrollToItem(idx)
+                            runCatching { selectedFocus.requestFocus() }
+                            focusRestored = true
+                        }
+                    }
+                }
+                Column(modifier = Modifier.padding(bottom = 28.dp)) {
+                    Text(
+                        "Players",
+                        style = MaterialTheme.typography.titleLarge,
+                        modifier = Modifier.padding(horizontal = EDGE)
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    LazyRow(
+                        state = playersState,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        contentPadding = PaddingValues(horizontal = EDGE)
+                    ) {
+                        items(players, key = { it.playerId }) { p ->
+                            // First press selects the player as the playback target;
+                            // pressing the already-selected one opens its controls.
+                            val cardModifier = if (p.playerId == selectedPlayerId) {
+                                Modifier.focusRequester(selectedFocus)
+                            } else {
+                                Modifier
+                            }
+                            PlayerCard(
+                                p,
+                                selected = p.playerId == selectedPlayerId,
+                                local = p.playerId == localPlayerId,
+                                modifier = cardModifier
+                            ) {
+                                if (p.playerId == selectedPlayerId) onOpenPlayer(p.playerId)
+                                else viewModel.selectPlayer(p.playerId)
+                            }
                         }
                     }
                 }
@@ -151,7 +191,13 @@ private fun Shelf(title: String, content: LazyListScope.() -> Unit) {
 private val EDGE = 56.dp
 
 @Composable
-private fun PlayerCard(player: Player, selected: Boolean, local: Boolean, onClick: () -> Unit) {
+private fun PlayerCard(
+    player: Player,
+    selected: Boolean,
+    local: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
     val subtitle = player.currentMedia?.title?.takeIf { it.isNotBlank() }
         ?: player.state.name.lowercase().replaceFirstChar { it.uppercase() }
     // Selection highlights the whole card (primary border) rather than a text label.
@@ -164,7 +210,7 @@ private fun PlayerCard(player: Player, selected: Boolean, local: Boolean, onClic
     Card(
         onClick = onClick,
         border = if (selected) selectedBorder else CardDefaults.border(),
-        modifier = Modifier.width(280.dp)
+        modifier = modifier.width(280.dp)
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {

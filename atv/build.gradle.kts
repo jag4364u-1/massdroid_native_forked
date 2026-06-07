@@ -69,6 +69,9 @@ dependencies {
 
     // Core platform
     implementation("androidx.core:core-ktx:1.16.0")
+
+    // MediaSession (now-playing surface on the Android TV home / system controls)
+    implementation("androidx.media:media:1.7.1")
 }
 
 kapt {
