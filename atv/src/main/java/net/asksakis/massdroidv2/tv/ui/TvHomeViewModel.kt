@@ -3,7 +3,6 @@ package net.asksakis.massdroidv2.tv.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -51,12 +50,12 @@ class TvHomeViewModel @Inject constructor(
     private val _recentlyPlayed = MutableStateFlow<List<Album>>(emptyList())
     val recentlyPlayed: StateFlow<List<Album>> = _recentlyPlayed.asStateFlow()
 
-    private val albumsPager = Pager<Album>(viewModelScope, { it.uri }) { limit, offset ->
+    private val albumsPager = LibraryPager(viewModelScope, { a: Album -> a.uri }) { limit, offset ->
         musicRepository.getAlbums(limit = limit, offset = offset, orderBy = "name")
     }
     val albums: StateFlow<List<Album>> = albumsPager.items
 
-    private val artistsPager = Pager<Artist>(viewModelScope, { it.uri }) { limit, offset ->
+    private val artistsPager = LibraryPager(viewModelScope, { a: Artist -> a.uri }) { limit, offset ->
         musicRepository.getArtists(limit = limit, offset = offset, orderBy = "name")
     }
     val artists: StateFlow<List<Artist>> = artistsPager.items
@@ -65,7 +64,7 @@ class TvHomeViewModel @Inject constructor(
     val playlists: StateFlow<List<Playlist>> = _playlists.asStateFlow()
 
     init {
-        load(_recentlyPlayed) { musicRepository.getAlbums(limit = 25, orderBy = "last_played") }
+        load(_recentlyPlayed) { musicRepository.getAlbums(limit = 25, orderBy = "last_played_desc") }
         load(_playlists) { musicRepository.getPlaylists(limit = 100) }
         albumsPager.loadMore()
         artistsPager.loadMore()
@@ -90,43 +89,5 @@ class TvHomeViewModel @Inject constructor(
 
     private fun <T> load(target: MutableStateFlow<List<T>>, block: suspend () -> List<T>) {
         viewModelScope.launch { runCatching { block() }.onSuccess { target.value = it } }
-    }
-
-    /**
-     * Offset-based forward pager over a :core library endpoint. De-duplicates by
-     * [key] when appending so the LazyRow never sees a duplicate stable key, and
-     * stops once a short/empty page signals the end.
-     */
-    private class Pager<T>(
-        private val scope: CoroutineScope,
-        private val key: (T) -> Any,
-        private val fetch: suspend (limit: Int, offset: Int) -> List<T>,
-    ) {
-        private val _items = MutableStateFlow<List<T>>(emptyList())
-        val items: StateFlow<List<T>> = _items.asStateFlow()
-
-        private var offset = 0
-        private var endReached = false
-        private var loading = false
-
-        fun loadMore() {
-            if (loading || endReached) return
-            loading = true
-            scope.launch {
-                val page = runCatching { fetch(PAGE_SIZE, offset) }.getOrDefault(emptyList())
-                if (page.size < PAGE_SIZE) endReached = true
-                if (page.isNotEmpty()) {
-                    offset += page.size
-                    val seen = _items.value.mapTo(HashSet(), key)
-                    val fresh = page.filter { seen.add(key(it)) }
-                    if (fresh.isNotEmpty()) _items.value = _items.value + fresh
-                }
-                loading = false
-            }
-        }
-
-        private companion object {
-            const val PAGE_SIZE = 50
-        }
     }
 }

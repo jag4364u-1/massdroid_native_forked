@@ -4,12 +4,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -52,10 +51,13 @@ fun TvArtistScreen(viewModel: TvArtistViewModel = hiltViewModel()) {
                 )
             } else {
                 LazyVerticalGrid(
-                    columns = GridCells.Adaptive(180.dp),
-                    contentPadding = PaddingValues(horizontal = ARTIST_EDGE, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                    // Fixed columns + fill-width cards keep the art aligned across the
+                    // grid; generous padding/spacing leaves room for the focus scale so
+                    // the selected card is not clipped at the edges.
+                    columns = GridCells.Fixed(ARTIST_GRID_COLUMNS),
+                    contentPadding = PaddingValues(horizontal = ARTIST_EDGE, vertical = 24.dp),
+                    horizontalArrangement = Arrangement.spacedBy(24.dp),
+                    verticalArrangement = Arrangement.spacedBy(24.dp)
                 ) {
                     items(albums, key = { it.uri }) { album ->
                         AlbumCard(album) { viewModel.playMedia(album.uri) }
@@ -67,16 +69,17 @@ fun TvArtistScreen(viewModel: TvArtistViewModel = hiltViewModel()) {
 }
 
 private val ARTIST_EDGE = 56.dp
+private const val ARTIST_GRID_COLUMNS = 5
 
 @Composable
 private fun AlbumCard(album: Album, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = Modifier.width(180.dp)) {
+    Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
         Column {
             AsyncImage(
                 model = album.imageUrl,
                 contentDescription = album.name,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.size(180.dp)
+                modifier = Modifier.fillMaxWidth().aspectRatio(1f)
             )
             Column(modifier = Modifier.fillMaxWidth().padding(10.dp)) {
                 Text(

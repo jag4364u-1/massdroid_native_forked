@@ -17,6 +17,7 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -25,12 +26,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -38,14 +41,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
+import kotlinx.coroutines.delay
+import net.asksakis.massdroidv2.tv.R
 import androidx.tv.material3.Border
 import androidx.tv.material3.Card
 import androidx.tv.material3.CardDefaults
@@ -63,6 +70,7 @@ fun TvHomeScreen(
     onOpenPlayer: (String) -> Unit,
     onOpenSettings: () -> Unit,
     onOpenArtist: (itemId: String, provider: String) -> Unit,
+    onOpenBrowse: () -> Unit,
     viewModel: TvHomeViewModel = hiltViewModel()
 ) {
     val players by viewModel.players.collectAsStateWithLifecycle()
@@ -72,6 +80,27 @@ fun TvHomeScreen(
     val albums by viewModel.albums.collectAsStateWithLifecycle()
     val artists by viewModel.artists.collectAsStateWithLifecycle()
     val playlists by viewModel.playlists.collectAsStateWithLifecycle()
+
+    // Back-stack focus restoration: remember the last focused card key (survives the
+    // detail screen via rememberSaveable) and return focus there when home recomposes,
+    // so Back lands you where you were instead of jumping to a player. The row/scroll
+    // positions restore on their own (LazyListState/ScrollState are saveable).
+    var lastFocusedKey by rememberSaveable { mutableStateOf<String?>(null) }
+    val restoreRequester = remember { FocusRequester() }
+    val focusModifierFor: (String) -> Modifier = { key ->
+        Modifier
+            .onFocusChanged { if (it.isFocused) lastFocusedKey = key }
+            .then(if (key == lastFocusedKey) Modifier.focusRequester(restoreRequester) else Modifier)
+    }
+    LaunchedEffect(Unit) {
+        if (lastFocusedKey == null) return@LaunchedEffect
+        // The target card composes once its row's saved scroll position restores;
+        // retry until the requester is attached.
+        repeat(FOCUS_RESTORE_TRIES) {
+            if (runCatching { restoreRequester.requestFocus() }.isSuccess) return@LaunchedEffect
+            delay(FOCUS_RESTORE_RETRY_MS)
+        }
+    }
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -85,29 +114,29 @@ fun TvHomeScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("MassDroid TV", style = MaterialTheme.typography.headlineMedium)
-                IconButton(onClick = onOpenSettings) {
-                    Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Image(
+                        painter = painterResource(R.drawable.logo_md),
+                        contentDescription = null,
+                        // The logo_md vector has internal padding, so render it a bit
+                        // larger than the cap height to visually match the wordmark.
+                        modifier = Modifier.size(56.dp)
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text("MassDroid TV", style = MaterialTheme.typography.headlineMedium)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    IconButton(onClick = onOpenBrowse) {
+                        Icon(Icons.Filled.GridView, contentDescription = "Browse")
+                    }
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                    }
                 }
             }
             Spacer(Modifier.height(28.dp))
 
             if (players.isNotEmpty()) {
-                val playersState = rememberLazyListState()
-                val selectedFocus = remember { FocusRequester() }
-                var focusRestored by remember { mutableStateOf(false) }
-                // On (re)entering home (e.g. Back from a player's controls), return
-                // focus to the player you had open — that is the selected one.
-                LaunchedEffect(players.size) {
-                    if (!focusRestored) {
-                        val idx = players.indexOfFirst { it.playerId == selectedPlayerId }
-                        if (idx >= 0) {
-                            playersState.scrollToItem(idx)
-                            runCatching { selectedFocus.requestFocus() }
-                            focusRestored = true
-                        }
-                    }
-                }
                 Column(modifier = Modifier.padding(bottom = 28.dp)) {
                     Text(
                         "Players",
@@ -116,23 +145,18 @@ fun TvHomeScreen(
                     )
                     Spacer(Modifier.height(12.dp))
                     LazyRow(
-                        state = playersState,
+                        state = rememberLazyListState(),
                         horizontalArrangement = Arrangement.spacedBy(16.dp),
                         contentPadding = PaddingValues(horizontal = EDGE)
                     ) {
                         items(players, key = { it.playerId }) { p ->
                             // First press selects the player as the playback target;
                             // pressing the already-selected one opens its controls.
-                            val cardModifier = if (p.playerId == selectedPlayerId) {
-                                Modifier.focusRequester(selectedFocus)
-                            } else {
-                                Modifier
-                            }
                             PlayerCard(
                                 p,
                                 selected = p.playerId == selectedPlayerId,
                                 local = p.playerId == localPlayerId,
-                                modifier = cardModifier
+                                modifier = focusModifierFor(p.playerId)
                             ) {
                                 if (p.playerId == selectedPlayerId) onOpenPlayer(p.playerId)
                                 else viewModel.selectPlayer(p.playerId)
@@ -144,25 +168,29 @@ fun TvHomeScreen(
             ContentShelf(
                 "Recently Played",
                 recentlyPlayed.map { MediaCardData(it.uri, it.imageUrl, it.name, it.artistNames) },
-                onClick = { viewModel.playMedia(it.uri) }
+                onClick = { viewModel.playMedia(it.uri) },
+                focusModifierFor = focusModifierFor
             )
             ContentShelf(
                 "Albums",
                 albums.map { MediaCardData(it.uri, it.imageUrl, it.name, it.artistNames) },
                 onClick = { viewModel.playMedia(it.uri) },
-                onLoadMore = viewModel::loadMoreAlbums
+                onLoadMore = viewModel::loadMoreAlbums,
+                focusModifierFor = focusModifierFor
             )
             ContentShelf(
                 "Artists",
                 artists.map { MediaCardData(it.uri, it.imageUrl, it.name, null, it.itemId, it.provider) },
                 onClick = { onOpenArtist(it.itemId, it.provider) },
                 circular = true,
-                onLoadMore = viewModel::loadMoreArtists
+                onLoadMore = viewModel::loadMoreArtists,
+                focusModifierFor = focusModifierFor
             )
             ContentShelf(
                 "Playlists",
                 playlists.map { MediaCardData(it.uri, it.imageUrl, it.name, null) },
-                onClick = { viewModel.playMedia(it.uri) }
+                onClick = { viewModel.playMedia(it.uri) },
+                focusModifierFor = focusModifierFor
             )
         }
     }
@@ -183,7 +211,8 @@ private fun ContentShelf(
     items: List<MediaCardData>,
     onClick: (MediaCardData) -> Unit,
     circular: Boolean = false,
-    onLoadMore: (() -> Unit)? = null
+    onLoadMore: (() -> Unit)? = null,
+    focusModifierFor: (String) -> Modifier = { Modifier }
 ) {
     if (items.isEmpty()) return
     val state = rememberLazyListState()
@@ -198,12 +227,14 @@ private fun ContentShelf(
     }
     Shelf(title, state) {
         items(items, key = { it.uri }) { item ->
-            MediaCard(item, circular) { onClick(item) }
+            MediaCard(item, circular, modifier = focusModifierFor(item.uri)) { onClick(item) }
         }
     }
 }
 
 private const val LOAD_MORE_THRESHOLD = 10
+private const val FOCUS_RESTORE_TRIES = 25
+private const val FOCUS_RESTORE_RETRY_MS = 60L
 
 @Composable
 private fun Shelf(
@@ -232,6 +263,9 @@ private fun Shelf(
 /** Overscan-safe horizontal inset for 10-foot layout. */
 private val EDGE = 56.dp
 
+/** Home row card/art size. Kept compact so more items are visible per row. */
+private val CARD_SIZE = 148.dp
+
 @Composable
 private fun PlayerCard(
     player: Player,
@@ -252,7 +286,7 @@ private fun PlayerCard(
     Card(
         onClick = onClick,
         border = if (selected) selectedBorder else CardDefaults.border(),
-        modifier = modifier.width(280.dp)
+        modifier = modifier.width(240.dp)
     ) {
         Box(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.fillMaxWidth().padding(20.dp)) {
@@ -305,15 +339,20 @@ private fun PlayerCard(
 }
 
 @Composable
-private fun MediaCard(item: MediaCardData, circular: Boolean, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = Modifier.width(180.dp)) {
+private fun MediaCard(
+    item: MediaCardData,
+    circular: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    Card(onClick = onClick, modifier = modifier.width(CARD_SIZE)) {
         Column {
             val imageModifier = if (circular) {
-                Modifier.size(180.dp).clip(CircleShape)
+                Modifier.size(CARD_SIZE).clip(CircleShape)
             } else {
-                Modifier.size(180.dp)
+                Modifier.size(CARD_SIZE)
             }
-            Box(modifier = Modifier.size(180.dp)) {
+            Box(modifier = Modifier.size(CARD_SIZE)) {
                 AsyncImage(
                     model = item.imageUrl,
                     contentDescription = item.title,

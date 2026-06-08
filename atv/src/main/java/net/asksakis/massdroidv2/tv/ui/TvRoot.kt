@@ -35,9 +35,19 @@ fun TvRoot(viewModel: TvRootViewModel = hiltViewModel()) {
                         onOpenSettings = { nav.navigate("settings") },
                         onOpenArtist = { itemId, provider ->
                             nav.navigate("artist/${Uri.encode(itemId)}/${Uri.encode(provider)}")
-                        }
+                        },
+                        onOpenBrowse = { nav.navigate("browse") }
                     )
                 }
+                composable("browse") {
+                    TvBrowseScreen(
+                        onOpenArtist = { itemId, provider ->
+                            nav.navigate("artist/${Uri.encode(itemId)}/${Uri.encode(provider)}")
+                        },
+                        onOpenFolders = { nav.navigate("serverbrowse") }
+                    )
+                }
+                composable("serverbrowse") { TvServerBrowseScreen() }
                 composable(
                     route = "nowplaying/{playerId}",
                     arguments = listOf(navArgument("playerId") { type = NavType.StringType })
