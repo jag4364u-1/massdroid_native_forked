@@ -9,6 +9,8 @@
 .cxx
 local.properties
 /app/build
+# Ignore every module's build output (app, atv, core, future modules)
+build/
 .kotlin
 
 # Signing

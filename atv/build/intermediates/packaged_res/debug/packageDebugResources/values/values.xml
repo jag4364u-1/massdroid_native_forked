@@ -1,9 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <color name="banner_bg">#14141F</color>
-    <color name="ic_launcher_background">#0D0D1A</color>
-    <string name="app_name">MassDroid TV</string>
-    <style name="Theme.MassDroidTv" parent="@android:style/Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@android:color/black</item>
-    </style>
-</resources>
