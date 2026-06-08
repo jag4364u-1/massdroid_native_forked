@@ -1,6 +1,9 @@
-- **Line up your grouped speakers by ear.** A new "Sync speakers" option in the player menu lets you nudge every speaker in a sync group a little earlier or later until they play perfectly in time. Your phone and supported speakers adjust live; speakers that manage their own timing are listed for reference.
-- **Music no longer starts playing over a phone call.** During a call a brief audio handover could make playback resume on top of the call. It now stays quiet and waits until the call ends.
-- **Tidier player menu.** The three dots menu is grouped into clear sections (settings, queue, grouping, power) so the options are easier to find.
-- **Lower battery use from room detection.** Bluetooth scanning for Follow Me is gentler and stops waking the phone unnecessarily while idle.
-- **The home screen shows connection drops at a glance.** The status icon blinks while the server is unreachable and flashes green the moment it reconnects.
-- **Sendspin player no longer drops to "Reconnecting / Stopped" mid-song on certain tracks.** The phone player kept rejecting metadata updates from the server whenever a track's duration arrived with a decimal value (common for local files and some streaming providers). The player now accepts both shapes, so playback stays connected instead of flapping.
+- Android TV app (Shield / Google TV / Android TV): browse the full library, control any player, and use the TV as a synced speaker with an adjustable delay for AV receivers.
+- Rewrote the phone's audio output (native, low-latency): fixes random dropouts and sync drift, and auto-aligns with other speakers.
+- Audiobooks: library section, chapter list with skip-to-chapter, H:M:S timing, chapter-aware transport.
+- Bluetooth/car: auto-play once the connection settles (skipped during a call/meeting); fixed intermittent no-audio on connect.
+- Sync speakers sheet: nudge each speaker's timing earlier/later.
+- Add/remove items to your library from search and detail screens (long-press actions, in-library badge).
+- Follow Me: better room scoring, per-room sensitivity, on-room-change modes (ask / move here / select only), lower battery use.
+- Ethernet devices stream lossless.
+- Fixes: audio skips on some phones, playback no longer starts over a phone call, synced members track the leader's position, faster group re-lock, connection-drop indicator on home.
