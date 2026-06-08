@@ -50,34 +50,42 @@ MassDroid is a full-featured Music Assistant companion app built around music ex
 
 ## What's New ![NEW](https://img.shields.io/badge/-NEW-brightgreen)
 
-- **Sendspin disconnect/connect flap between songs fixed.** When a track ended, the client was sending an `error` state that made the server close the WebSocket, causing a flap loop with the next song. The client now reports its idle moments correctly so playback transitions smoothly.
-- **Share logs button visible in stable builds.** Settings → About → Share logs now appears in the release APK too, not just debug. Helpful for reporting issues without ADB.
-- **Phone-as-speaker reliability fix:** the "Sendspin player keeps switching to Error" loop is gone. Reconnects are quick, automatic and don't fight each other anymore.
-- **Smoother seek and skip:** scrubbing the slider feels responsive again, dragging to the very end no longer skips to the next track, and the progress bar stays in sync right after a skip.
-- **Volume keys behave properly:** one press = one volume command. The Bluetooth sync toggle stays out of the way when your car already controls the volume.
-- **Remote volume on-screen indicator:** pressing the volume keys while a remote speaker is selected now shows a sliding overlay with the player name and level, so you actually see what changed.
+- Android TV app (Shield / Google TV / Android TV): browse the full library, control any player, and use the TV as a synced speaker with an adjustable delay for AV receivers.
+- Rewrote the phone's audio output (native, low-latency): fixes random dropouts and sync drift, and auto-aligns with other speakers.
+- Audiobooks: library section, chapter list with skip-to-chapter, H:M:S timing, chapter-aware transport.
+- Bluetooth/car: auto-play once the connection settles (skipped during a call/meeting); fixed intermittent no-audio on connect.
+- Sync speakers sheet: nudge each speaker's timing earlier/later.
+- Add/remove items to your library from search and detail screens (long-press actions, in-library badge).
+- Follow Me: better room scoring, per-room sensitivity, on-room-change modes (ask / move here / select only), lower battery use.
+- Ethernet devices stream lossless.
+- Fixes: audio skips on some phones, playback no longer starts over a phone call, synced members track the leader's position, faster group re-lock, connection-drop indicator on home.
 
 ## Screenshots
 
+### Phone
+
 <p align="center">
-  <img src="screenshots/home.png" width="260" />&nbsp;&nbsp;
-  <img src="screenshots/nowplaying.png" width="260" />&nbsp;&nbsp;
-  <img src="screenshots/library.png" width="260" />
+  <img src="screenshots/home.png" width="240" />&nbsp;&nbsp;
+  <img src="screenshots/nowplaying.png" width="240" />&nbsp;&nbsp;
+  <img src="screenshots/library.png" width="240" />
 </p>
 <p align="center">
-  <img src="screenshots/search_providers.png" width="260" />&nbsp;&nbsp;
-  <img src="screenshots/players.png" width="260" />&nbsp;&nbsp;
-  <img src="screenshots/artist_detail.png" width="260" />
+  <img src="screenshots/artist_detail.png" width="240" />&nbsp;&nbsp;
+  <img src="screenshots/players.png" width="240" />&nbsp;&nbsp;
+  <img src="screenshots/lyrics.png" width="240" />
 </p>
+
+### Android TV
+
 <p align="center">
-  <img src="screenshots/album_detail.png" width="260" />&nbsp;&nbsp;
-  <img src="screenshots/proximity_settings.png" width="260" />&nbsp;&nbsp;
-  <img src="screenshots/room_setup.png" width="260" />
+  <img src="screenshots/atv_home.png" width="440" />&nbsp;&nbsp;
+  <img src="screenshots/atv_nowplaying.png" width="440" />
 </p>
+
+### Android Auto
+
 <p align="center">
-  <img src="screenshots/lyrics.png" width="260" />&nbsp;&nbsp;
-  <img src="screenshots/streaming_status.png" width="260" />&nbsp;&nbsp;
-  <img src="screenshots/inspect_ble.png" width="260" />
+  <img src="screenshots/androidauto_nowplaying.png" width="440" />
 </p>
 
 ## Core Features
