@@ -2,8 +2,11 @@
 - Rewrote the phone's audio output (native, low-latency): fixes random dropouts and sync drift, and auto-aligns with other speakers.
 - Audiobooks: library section, chapter list with skip-to-chapter, H:M:S timing, chapter-aware transport.
 - Bluetooth/car: auto-play once the connection settles (skipped during a call/meeting); fixed intermittent no-audio on connect.
+- Library: swipe between tabs, the provider filter is remembered per tab, and you can play a whole folder (e.g. an album) straight from Browse.
+- Player settings: choose the streaming codec for speakers that expose it (e.g. Sonos).
 - Sync speakers sheet: nudge each speaker's timing earlier/later.
 - Add/remove items to your library from search and detail screens (long-press actions, in-library badge).
 - Follow Me: better room scoring, per-room sensitivity, on-room-change modes (ask / move here / select only), lower battery use.
 - Ethernet devices stream lossless.
-- Fixes: audio skips on some phones, playback no longer starts over a phone call, synced members track the leader's position, faster group re-lock, connection-drop indicator on home.
+- Finer volume steps with the hardware buttons, plus a cleaner volume popup.
+- Fixes: audio skips on some phones, playback no longer starts over a phone call, synced members track the leader's position, faster group re-lock, connection-drop indicator on home, the library provider filter now works for multi-account providers (e.g. Deezer) and local files, and some local cover art that failed on mobile data / VPN now loads.
