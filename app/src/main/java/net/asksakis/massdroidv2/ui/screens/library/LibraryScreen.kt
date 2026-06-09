@@ -21,6 +21,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.activity.compose.BackHandler
@@ -47,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
 import net.asksakis.massdroidv2.domain.model.*
 import net.asksakis.massdroidv2.domain.recommendation.MediaIdentity
 import net.asksakis.massdroidv2.ui.components.ActionSheetItem
@@ -63,6 +66,14 @@ import net.asksakis.massdroidv2.ui.components.fadingEdges
 import net.asksakis.massdroidv2.ui.components.MediaItemGrid
 import net.asksakis.massdroidv2.ui.components.MediaItemRow
 import net.asksakis.massdroidv2.ui.components.RemoveFromLibraryDialog
+
+private const val TAB_ARTISTS = 0
+private const val TAB_ALBUMS = 1
+private const val TAB_TRACKS = 2
+private const val TAB_PLAYLISTS = 3
+private const val TAB_RADIOS = 4
+private const val TAB_AUDIOBOOKS = 5
+private const val TAB_BROWSE = 6
 
 @Composable
 fun LibraryScreen(
@@ -88,6 +99,7 @@ fun LibraryScreen(
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
     val sortOption by viewModel.sortOption.collectAsStateWithLifecycle()
     val displayMode by viewModel.displayMode.collectAsStateWithLifecycle()
+    val displayModesByTab by viewModel.displayModesByTab.collectAsStateWithLifecycle()
     val sortDescending by viewModel.sortDescending.collectAsStateWithLifecycle()
     val favoritesOnly by viewModel.favoritesOnly.collectAsStateWithLifecycle()
 
@@ -101,10 +113,31 @@ fun LibraryScreen(
     val settingsLoaded by viewModel.settingsLoaded.collectAsStateWithLifecycle()
     val blockedArtistUris by viewModel.blockedArtistUris.collectAsStateWithLifecycle()
     val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
-    val isBrowseTab = selectedTab == 6
+    val isBrowseTab = selectedTab == TAB_BROWSE
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
     var showControlsSheet by remember { mutableStateOf(false) }
     var landscapeSearchExpanded by remember { mutableStateOf(false) }
+
+    // Single pager state shared by the tab chips and the content, so the chip highlight tracks the
+    // swipe live (no jump-after-settle) and the chip row scrolls the active tab into view.
+    val pagerScope = rememberCoroutineScope()
+    val tabRowState = rememberLazyListState()
+    val pagerState = rememberPagerState(
+        initialPage = selectedTab.coerceIn(0, tabs.lastIndex),
+        pageCount = { tabs.size }
+    )
+    LaunchedEffect(pagerState.currentPage) {
+        // Only scroll the chip row when the active tab is off-screen or clipped; if it is already
+        // fully visible, leave the row where it is (no pointless jump on every tab tap).
+        val info = tabRowState.layoutInfo
+        val chip = info.visibleItemsInfo.firstOrNull { it.index == pagerState.currentPage }
+        val fullyVisible = chip != null &&
+            chip.offset >= info.viewportStartOffset &&
+            chip.offset + chip.size <= info.viewportEndOffset
+        if (!fullyVisible) {
+            tabRowState.animateScrollToItem(pagerState.currentPage)
+        }
+    }
 
     // Reload pending changes when screen becomes visible again
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
@@ -130,14 +163,16 @@ fun LibraryScreen(
         if (!settingsLoaded) return@LaunchedEffect
         if (initConnectionState !is ConnectionState.Connected) return@LaunchedEffect
         when (selectedTab) {
-            0 -> if (artists.isEmpty()) viewModel.loadArtists()
-            1 -> if (albums.isEmpty()) viewModel.loadAlbums()
-            2 -> if (tracks.isEmpty()) viewModel.loadTracks()
-            3 -> if (playlists.isEmpty()) viewModel.loadPlaylists()
-            4 -> if (radios.isEmpty()) viewModel.loadRadios()
-            5 -> if (audiobooks.isEmpty()) viewModel.loadAudiobooks()
-            6 -> if (browseItems.isEmpty()) viewModel.loadBrowse()
+            TAB_ARTISTS -> if (artists.isEmpty()) viewModel.loadArtists()
+            TAB_ALBUMS -> if (albums.isEmpty()) viewModel.loadAlbums()
+            TAB_TRACKS -> if (tracks.isEmpty()) viewModel.loadTracks()
+            TAB_PLAYLISTS -> if (playlists.isEmpty()) viewModel.loadPlaylists()
+            TAB_RADIOS -> if (radios.isEmpty()) viewModel.loadRadios()
+            TAB_AUDIOBOOKS -> if (audiobooks.isEmpty()) viewModel.loadAudiobooks()
+            TAB_BROWSE -> if (browseItems.isEmpty()) viewModel.loadBrowse()
         }
+        // Warm the neighbouring tabs so the next swipe shows content immediately.
+        viewModel.preloadAdjacentTabs(selectedTab)
     }
 
     Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
@@ -146,12 +181,12 @@ fun LibraryScreen(
                 searchExpanded = landscapeSearchExpanded,
                 searchQuery = searchQuery,
                 searchPlaceholder = when (selectedTab) {
-                    0 -> "Search artists..."
-                    1 -> "Search albums..."
-                    2 -> "Search tracks..."
-                    3 -> "Search playlists..."
-                    4 -> "Search radios..."
-                    5 -> "Search audiobooks..."
+                    TAB_ARTISTS -> "Search artists..."
+                    TAB_ALBUMS -> "Search albums..."
+                    TAB_TRACKS -> "Search tracks..."
+                    TAB_PLAYLISTS -> "Search playlists..."
+                    TAB_RADIOS -> "Search radios..."
+                    TAB_AUDIOBOOKS -> "Search audiobooks..."
                     else -> "Search..."
                 },
                 onSearchChange = { viewModel.updateSearch(it) },
@@ -178,12 +213,12 @@ fun LibraryScreen(
                     placeholder = {
                         Text(
                             when (selectedTab) {
-                                0 -> "Search artists..."
-                                1 -> "Search albums..."
-                                2 -> "Search tracks..."
-                                3 -> "Search playlists..."
-                                4 -> "Search radios..."
-                                5 -> "Search audiobooks..."
+                                TAB_ARTISTS -> "Search artists..."
+                                TAB_ALBUMS -> "Search albums..."
+                                TAB_TRACKS -> "Search tracks..."
+                                TAB_PLAYLISTS -> "Search playlists..."
+                                TAB_RADIOS -> "Search radios..."
+                                TAB_AUDIOBOOKS -> "Search audiobooks..."
                                 else -> "Search..."
                             }
                         )
@@ -223,14 +258,15 @@ fun LibraryScreen(
         }
 
         LazyRow(
+            state = tabRowState,
             modifier = Modifier.fillMaxWidth(),
             contentPadding = PaddingValues(horizontal = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             itemsIndexed(tabs) { index, title ->
                 FilterChip(
-                    selected = selectedTab == index,
-                    onClick = { viewModel.setCurrentTab(index) },
+                    selected = pagerState.currentPage == index,
+                    onClick = { pagerScope.launch { pagerState.animateScrollToPage(index) } },
                     label = { Text(title) }
                 )
             }
@@ -251,239 +287,273 @@ fun LibraryScreen(
                     Text("Not connected to Music Assistant", style = MaterialTheme.typography.bodyLarge)
                 }
             }
-        } else if (isLoading && !isRefreshing) {
-            Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
-            }
         } else {
-            @OptIn(ExperimentalMaterial3Api::class)
-            PullToRefreshBox(
-                isRefreshing = isRefreshing,
-                onRefresh = { viewModel.refresh() },
-                modifier = Modifier.weight(1f)
-            ) {
-                when (selectedTab) {
-                    0 -> MediaList(
-                        items = artists,
-                        displayMode = displayMode,
-                        isLoadingMore = isLoadingMore,
-                        onLoadMore = { viewModel.loadMoreArtists() },
-                        key = { it.uri },
-                        title = { it.name },
-                        subtitle = { "" },
-                        imageUrl = { it.imageUrl },
-                        favorite = { it.favorite },
-                        onClick = { onArtistClick(it) },
-                        onLongClick = { artist ->
-                            actionSheetItem = ActionSheetItem(
-                                title = artist.name,
-                                subtitle = "",
-                                uri = artist.uri,
-                                imageUrl = artist.imageUrl,
-                                favorite = artist.favorite,
-                                mediaType = MediaType.ARTIST,
-                                itemId = artist.itemId,
-                                primaryArtistUri = artist.uri,
-                                primaryArtistName = artist.name
-                            )
-                        },
-                        onPlayClick = { if (it.uri !in blockedArtistUris) viewModel.quickPlay(it.uri) },
-                        isBlocked = { it.uri in blockedArtistUris },
-                        providerDomains = { it.providerDomains }
-                    )
-                    1 -> MediaList(
-                        items = albums,
-                        displayMode = displayMode,
-                        isLoadingMore = isLoadingMore,
-                        onLoadMore = { viewModel.loadMoreAlbums() },
-                        key = { it.uri },
-                        title = { it.name },
-                        subtitle = {
-                            formatAlbumTypeYear(it.albumType, it.year).ifBlank { it.artistNames }
-                        },
-                        imageUrl = { it.imageUrl },
-                        favorite = { it.favorite },
-                        onClick = { onAlbumClick(it) },
-                        onLongClick = { album ->
-                            actionSheetItem = ActionSheetItem(
-                                title = album.name,
-                                subtitle = album.artistNames,
-                                uri = album.uri,
-                                imageUrl = album.imageUrl,
-                                favorite = album.favorite,
-                                mediaType = MediaType.ALBUM,
-                                itemId = album.itemId,
-                                primaryArtistUri = album.artists.firstOrNull()?.uri,
-                                primaryArtistName = album.artists.firstOrNull()?.name
-                            )
-                        },
-                        onPlayClick = { album ->
-                            val artistUri = album.artists.firstOrNull()?.uri
-                            if (artistUri == null || artistUri !in blockedArtistUris) viewModel.quickPlay(album.uri)
-                        },
-                        providerDomains = { it.providerDomains }
-                    )
-                    2 -> MediaList(
-                        items = tracks,
-                        displayMode = displayMode,
-                        isLoadingMore = isLoadingMore,
-                        onLoadMore = { viewModel.loadMoreTracks() },
-                        key = { it.uri },
-                        title = { it.name },
-                        subtitle = { "${it.artistNames} - ${it.albumName}".trimEnd(' ', '-') },
-                        imageUrl = { it.imageUrl },
-                        favorite = { it.favorite },
-                        onClick = { track ->
-                            val albumItemId = track.albumItemId
-                            val albumProvider = track.albumProvider
-                            if (albumItemId != null && albumProvider != null) {
-                                onAlbumClick(Album(itemId = albumItemId, provider = albumProvider, name = track.albumName, uri = ""))
-                            } else {
-                                viewModel.playTrack(track)
-                            }
-                        },
-                        onLongClick = { track ->
-                            actionSheetItem = ActionSheetItem(
-                                title = track.name,
-                                subtitle = track.artistNames,
-                                uri = track.uri,
-                                imageUrl = track.imageUrl,
-                                favorite = track.favorite,
-                                mediaType = MediaType.TRACK,
-                                itemId = track.itemId,
-                                primaryArtistUri = track.artistUri,
-                                primaryArtistName = track.artistNames.split(",").firstOrNull()?.trim()
-                            )
-                        },
-                        onPlayClick = { viewModel.quickPlay(it.uri) },
-                        providerDomains = { it.providerDomains }
-                    )
-                    3 -> Box(modifier = Modifier.fillMaxSize()) {
-                        MediaList(
-                            items = playlists,
-                            displayMode = displayMode,
-                            isLoadingMore = isLoadingMore,
-                            onLoadMore = { viewModel.loadMorePlaylists() },
+            // A settled swipe (or chip tap) commits the tab: drives data load + persistence.
+            LaunchedEffect(pagerState) {
+                snapshotFlow { pagerState.settledPage }.collect { page ->
+                    if (page != selectedTab) viewModel.setCurrentTab(page)
+                }
+            }
+            // Spinner shows only over the active tab while its list is still empty; the pager stays
+            // mounted across tab changes so transitions slide smoothly instead of flashing a spinner.
+            val currentTabEmpty = when (selectedTab) {
+                TAB_ARTISTS -> artists.isEmpty()
+                TAB_ALBUMS -> albums.isEmpty()
+                TAB_TRACKS -> tracks.isEmpty()
+                TAB_PLAYLISTS -> playlists.isEmpty()
+                TAB_RADIOS -> radios.isEmpty()
+                TAB_AUDIOBOOKS -> audiobooks.isEmpty()
+                TAB_BROWSE -> browseItems.isEmpty()
+                else -> false
+            }
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize(),
+                key = { it },
+                beyondViewportPageCount = 1
+            ) { page ->
+                // Each page renders with its own display mode (defaults differ per tab), so the
+                // destination layout is correct mid-swipe and never flips after the page settles.
+                val pageMode = displayModesByTab[page]
+                    ?: LibraryTabKey.fromIndex(page)?.defaultDisplayMode
+                    ?: LibraryDisplayMode.LIST
+                @OptIn(ExperimentalMaterial3Api::class)
+                PullToRefreshBox(
+                    isRefreshing = isRefreshing && page == selectedTab,
+                    onRefresh = { viewModel.refresh() },
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    when (page) {
+                        TAB_ARTISTS -> MediaList(
+                            items = artists,
+                            displayMode = pageMode,
+                            isLoadingMore = isLoadingMore && page == selectedTab,
+                            onLoadMore = { viewModel.loadMoreArtists() },
                             key = { it.uri },
                             title = { it.name },
                             subtitle = { "" },
                             imageUrl = { it.imageUrl },
                             favorite = { it.favorite },
-                            onClick = { onPlaylistClick(it) },
-                            onLongClick = { playlist ->
+                            onClick = { onArtistClick(it) },
+                            onLongClick = { artist ->
                                 actionSheetItem = ActionSheetItem(
-                                    title = playlist.name,
+                                    title = artist.name,
                                     subtitle = "",
-                                    uri = playlist.uri,
-                                    imageUrl = playlist.imageUrl,
-                                    favorite = playlist.favorite,
-                                    mediaType = MediaType.PLAYLIST,
-                                    itemId = playlist.itemId
+                                    uri = artist.uri,
+                                    imageUrl = artist.imageUrl,
+                                    favorite = artist.favorite,
+                                    mediaType = MediaType.ARTIST,
+                                    itemId = artist.itemId,
+                                    primaryArtistUri = artist.uri,
+                                    primaryArtistName = artist.name
+                                )
+                            },
+                            onPlayClick = { if (it.uri !in blockedArtistUris) viewModel.quickPlay(it.uri) },
+                            isBlocked = { it.uri in blockedArtistUris },
+                            providerDomains = { it.providerDomains }
+                        )
+                        TAB_ALBUMS -> MediaList(
+                            items = albums,
+                            displayMode = pageMode,
+                            isLoadingMore = isLoadingMore && page == selectedTab,
+                            onLoadMore = { viewModel.loadMoreAlbums() },
+                            key = { it.uri },
+                            title = { it.name },
+                            subtitle = {
+                                formatAlbumTypeYear(it.albumType, it.year).ifBlank { it.artistNames }
+                            },
+                            imageUrl = { it.imageUrl },
+                            favorite = { it.favorite },
+                            onClick = { onAlbumClick(it) },
+                            onLongClick = { album ->
+                                actionSheetItem = ActionSheetItem(
+                                    title = album.name,
+                                    subtitle = album.artistNames,
+                                    uri = album.uri,
+                                    imageUrl = album.imageUrl,
+                                    favorite = album.favorite,
+                                    mediaType = MediaType.ALBUM,
+                                    itemId = album.itemId,
+                                    primaryArtistUri = album.artists.firstOrNull()?.uri,
+                                    primaryArtistName = album.artists.firstOrNull()?.name
+                                )
+                            },
+                            onPlayClick = { album ->
+                                val artistUri = album.artists.firstOrNull()?.uri
+                                if (artistUri == null || artistUri !in blockedArtistUris) viewModel.quickPlay(album.uri)
+                            },
+                            providerDomains = { it.providerDomains }
+                        )
+                        TAB_TRACKS -> MediaList(
+                            items = tracks,
+                            displayMode = pageMode,
+                            isLoadingMore = isLoadingMore && page == selectedTab,
+                            onLoadMore = { viewModel.loadMoreTracks() },
+                            key = { it.uri },
+                            title = { it.name },
+                            subtitle = { "${it.artistNames} - ${it.albumName}".trimEnd(' ', '-') },
+                            imageUrl = { it.imageUrl },
+                            favorite = { it.favorite },
+                            onClick = { track ->
+                                val albumItemId = track.albumItemId
+                                val albumProvider = track.albumProvider
+                                if (albumItemId != null && albumProvider != null) {
+                                    onAlbumClick(Album(itemId = albumItemId, provider = albumProvider, name = track.albumName, uri = ""))
+                                } else {
+                                    viewModel.playTrack(track)
+                                }
+                            },
+                            onLongClick = { track ->
+                                actionSheetItem = ActionSheetItem(
+                                    title = track.name,
+                                    subtitle = track.artistNames,
+                                    uri = track.uri,
+                                    imageUrl = track.imageUrl,
+                                    favorite = track.favorite,
+                                    mediaType = MediaType.TRACK,
+                                    itemId = track.itemId,
+                                    primaryArtistUri = track.artistUri,
+                                    primaryArtistName = track.artistNames.split(",").firstOrNull()?.trim()
                                 )
                             },
                             onPlayClick = { viewModel.quickPlay(it.uri) },
                             providerDomains = { it.providerDomains }
                         )
-                        FloatingActionButton(
-                            onClick = { showCreatePlaylistDialog = true },
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(16.dp),
-                            containerColor = MaterialTheme.colorScheme.primaryContainer
-                        ) {
-                            Icon(Icons.Default.Add, contentDescription = "New Playlist")
+                        TAB_PLAYLISTS -> Box(modifier = Modifier.fillMaxSize()) {
+                            MediaList(
+                                items = playlists,
+                                displayMode = pageMode,
+                                isLoadingMore = isLoadingMore && page == selectedTab,
+                                onLoadMore = { viewModel.loadMorePlaylists() },
+                                key = { it.uri },
+                                title = { it.name },
+                                subtitle = { "" },
+                                imageUrl = { it.imageUrl },
+                                favorite = { it.favorite },
+                                onClick = { onPlaylistClick(it) },
+                                onLongClick = { playlist ->
+                                    actionSheetItem = ActionSheetItem(
+                                        title = playlist.name,
+                                        subtitle = "",
+                                        uri = playlist.uri,
+                                        imageUrl = playlist.imageUrl,
+                                        favorite = playlist.favorite,
+                                        mediaType = MediaType.PLAYLIST,
+                                        itemId = playlist.itemId
+                                    )
+                                },
+                                onPlayClick = { viewModel.quickPlay(it.uri) },
+                                providerDomains = { it.providerDomains }
+                            )
+                            FloatingActionButton(
+                                onClick = { showCreatePlaylistDialog = true },
+                                modifier = Modifier
+                                    .align(Alignment.BottomEnd)
+                                    .padding(16.dp),
+                                containerColor = MaterialTheme.colorScheme.primaryContainer
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = "New Playlist")
+                            }
                         }
-                    }
-                    4 -> MediaList(
-                        items = radios,
-                        displayMode = displayMode,
-                        isLoadingMore = isLoadingMore,
-                        onLoadMore = { viewModel.loadMoreRadios() },
-                        key = { it.uri },
-                        title = { it.name },
-                        subtitle = { "" },
-                        imageUrl = { it.imageUrl },
-                        favorite = { it.favorite },
-                        onClick = { viewModel.quickPlay(it.uri) },
-                        onLongClick = { radio ->
-                            actionSheetItem = ActionSheetItem(
-                                title = radio.name,
-                                subtitle = "",
-                                uri = radio.uri,
-                                imageUrl = radio.imageUrl,
-                                favorite = radio.favorite,
-                                mediaType = MediaType.RADIO,
-                                itemId = radio.itemId,
-                                inLibrary = radio.inLibrary
-                            )
-                        },
-                        onPlayClick = { viewModel.quickPlay(it.uri) },
-                        providerDomains = { it.providerDomains }
-                    )
-                    5 -> MediaList(
-                        items = audiobooks,
-                        displayMode = displayMode,
-                        isLoadingMore = isLoadingMore,
-                        onLoadMore = { viewModel.loadMoreAudiobooks() },
-                        key = { it.uri },
-                        title = { it.name },
-                        subtitle = { it.authors.joinToString(", ") },
-                        imageUrl = { it.imageUrl },
-                        favorite = { it.favorite },
-                        onClick = { viewModel.quickPlay(it.uri) },
-                        onLongClick = { book ->
-                            actionSheetItem = ActionSheetItem(
-                                title = book.name,
-                                subtitle = book.authors.joinToString(", "),
-                                uri = book.uri,
-                                imageUrl = book.imageUrl,
-                                favorite = book.favorite,
-                                mediaType = MediaType.AUDIOBOOK,
-                                itemId = book.itemId,
-                                inLibrary = book.uri.startsWith("library://")
-                            )
-                        },
-                        onPlayClick = { viewModel.quickPlay(it.uri) },
-                        providerDomains = { it.providerDomains }
-                    )
-                    6 -> BrowseList(
-                        items = browseItems,
-                        isLoading = isLoading,
-                        browsePath = browsePath,
-                        onFolderClick = { viewModel.browseTo(it.path ?: it.uri) },
-                        onItemClick = { item ->
-                            when (item.mediaType) {
-                                "artist" -> onArtistClick(Artist(
-                                    itemId = item.itemId, provider = item.provider,
-                                    name = item.name, uri = item.uri, imageUrl = item.imageUrl
-                                ))
-                                "album" -> onAlbumClick(Album(
-                                    itemId = item.itemId, provider = item.provider,
-                                    name = item.name, uri = item.uri, imageUrl = item.imageUrl
-                                ))
-                                "playlist" -> onPlaylistClick(Playlist(
-                                    itemId = item.itemId, provider = item.provider,
-                                    name = item.name, uri = item.uri, imageUrl = item.imageUrl
-                                ))
-                                else -> viewModel.quickPlay(item.uri)
-                            }
-                        },
-                        onPlayClick = { viewModel.quickPlay(it.uri) },
-                        onLongClick = { item ->
-                            MediaType.fromApi(item.mediaType)?.let { type ->
+                        TAB_RADIOS -> MediaList(
+                            items = radios,
+                            displayMode = pageMode,
+                            isLoadingMore = isLoadingMore && page == selectedTab,
+                            onLoadMore = { viewModel.loadMoreRadios() },
+                            key = { it.uri },
+                            title = { it.name },
+                            subtitle = { "" },
+                            imageUrl = { it.imageUrl },
+                            favorite = { it.favorite },
+                            onClick = { viewModel.quickPlay(it.uri) },
+                            onLongClick = { radio ->
                                 actionSheetItem = ActionSheetItem(
-                                    title = item.name,
-                                    uri = item.uri,
-                                    imageUrl = item.imageUrl,
-                                    favorite = false,
-                                    mediaType = type,
-                                    itemId = item.itemId
+                                    title = radio.name,
+                                    subtitle = "",
+                                    uri = radio.uri,
+                                    imageUrl = radio.imageUrl,
+                                    favorite = radio.favorite,
+                                    mediaType = MediaType.RADIO,
+                                    itemId = radio.itemId,
+                                    inLibrary = radio.inLibrary
                                 )
-                            }
-                        },
-                        onBack = { viewModel.browseBack() }
-                    )
+                            },
+                            onPlayClick = { viewModel.quickPlay(it.uri) },
+                            providerDomains = { it.providerDomains }
+                        )
+                        TAB_AUDIOBOOKS -> MediaList(
+                            items = audiobooks,
+                            displayMode = pageMode,
+                            isLoadingMore = isLoadingMore && page == selectedTab,
+                            onLoadMore = { viewModel.loadMoreAudiobooks() },
+                            key = { it.uri },
+                            title = { it.name },
+                            subtitle = { it.authors.joinToString(", ") },
+                            imageUrl = { it.imageUrl },
+                            favorite = { it.favorite },
+                            onClick = { viewModel.quickPlay(it.uri) },
+                            onLongClick = { book ->
+                                actionSheetItem = ActionSheetItem(
+                                    title = book.name,
+                                    subtitle = book.authors.joinToString(", "),
+                                    uri = book.uri,
+                                    imageUrl = book.imageUrl,
+                                    favorite = book.favorite,
+                                    mediaType = MediaType.AUDIOBOOK,
+                                    itemId = book.itemId,
+                                    inLibrary = book.uri.startsWith("library://")
+                                )
+                            },
+                            onPlayClick = { viewModel.quickPlay(it.uri) },
+                            providerDomains = { it.providerDomains }
+                        )
+                        TAB_BROWSE -> BrowseList(
+                            items = browseItems,
+                            isLoading = isLoading,
+                            browsePath = browsePath,
+                            onFolderClick = { viewModel.browseTo(it.path ?: it.uri) },
+                            onItemClick = { item ->
+                                when (item.mediaType) {
+                                    "artist" -> onArtistClick(Artist(
+                                        itemId = item.itemId, provider = item.provider,
+                                        name = item.name, uri = item.uri, imageUrl = item.imageUrl
+                                    ))
+                                    "album" -> onAlbumClick(Album(
+                                        itemId = item.itemId, provider = item.provider,
+                                        name = item.name, uri = item.uri, imageUrl = item.imageUrl
+                                    ))
+                                    "playlist" -> onPlaylistClick(Playlist(
+                                        itemId = item.itemId, provider = item.provider,
+                                        name = item.name, uri = item.uri, imageUrl = item.imageUrl
+                                    ))
+                                    else -> viewModel.quickPlay(item.uri)
+                                }
+                            },
+                            onPlayClick = { viewModel.quickPlay(it.uri) },
+                            onPlayFolder = { viewModel.playBrowseFolder(it) },
+                            onLongClick = { item ->
+                                MediaType.fromApi(item.mediaType)?.let { type ->
+                                    actionSheetItem = ActionSheetItem(
+                                        title = item.name,
+                                        uri = item.uri,
+                                        imageUrl = item.imageUrl,
+                                        favorite = false,
+                                        mediaType = type,
+                                        itemId = item.itemId
+                                    )
+                                }
+                            },
+                            onBack = { viewModel.browseBack() }
+                        )
+                    }
                 }
+            }
+            if (isLoading && !isRefreshing && currentTabEmpty) {
+                Box(modifier = Modifier.matchParentSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            }
             }
         }
     }
@@ -841,15 +911,18 @@ private fun LibraryControlsSheet(
                             label = { Text("Grid") }
                         )
                     }
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        FilterChip(
-                            selected = favoritesOnly,
-                            onClick = onToggleFavorites,
-                            label = { Text("Favorites only") }
-                        )
+                    // Favorites filter is library-only (the Browse folder tree has no favorites).
+                    if (!isBrowseTab) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            FilterChip(
+                                selected = favoritesOnly,
+                                onClick = onToggleFavorites,
+                                label = { Text("Favorites only") }
+                            )
+                        }
                     }
                 }
             }
@@ -1103,6 +1176,11 @@ private fun LoadingIndicator() {
     }
 }
 
+// "Play all" applies only to filesystem folders (real directory trees of music files). Provider
+// roots and navigation categories (Genres, Deezer, RadioBrowser, ORF, ...) are not playable trees.
+private fun BrowseItem.isPlayableFolder(): Boolean =
+    isFolder && (provider.startsWith("filesystem_local") || provider.startsWith("filesystem_smb"))
+
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun BrowseList(
@@ -1112,6 +1190,7 @@ private fun BrowseList(
     onFolderClick: (BrowseItem) -> Unit,
     onItemClick: (BrowseItem) -> Unit,
     onPlayClick: (BrowseItem) -> Unit,
+    onPlayFolder: (BrowseItem) -> Unit,
     onLongClick: (BrowseItem) -> Unit,
     onBack: () -> Unit
 ) {
@@ -1175,6 +1254,11 @@ private fun BrowseList(
                                 if (item.isPlayable) {
                                     MdIconButton(onClick = { onPlayClick(item) }) {
                                         Icon(Icons.Default.PlayArrow, contentDescription = "Play")
+                                    }
+                                } else if (item.isPlayableFolder()) {
+                                    // Play the whole folder/tree (e.g. an entire album).
+                                    MdIconButton(onClick = { onPlayFolder(item) }) {
+                                        Icon(Icons.Default.PlayArrow, contentDescription = "Play all")
                                     }
                                 }
                                 if (item.isFolder) {

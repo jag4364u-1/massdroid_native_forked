@@ -40,6 +40,20 @@ private const val TAG = "LibraryVM"
 private const val PAGE_SIZE = 50
 private const val STATE_CURRENT_TAB = "library_current_tab"
 
+// Library tab indices (kept in sync with LibraryTabKey and the tab labels in LibraryScreen).
+private const val TAB_ARTISTS = 0
+private const val TAB_ALBUMS = 1
+private const val TAB_TRACKS = 2
+private const val TAB_PLAYLISTS = 3
+private const val TAB_RADIOS = 4
+private const val TAB_AUDIOBOOKS = 5
+private const val TAB_BROWSE = 6
+
+// Folder playback (Browse): bound the recursive descent so a huge subtree can't hang or flood.
+private const val FOLDER_MAX_TRACKS = 500
+private const val FOLDER_MAX_FOLDERS = 250
+private const val FOLDER_PLAY_TIMEOUT_MS = 30_000L
+
 private fun defaultDisplayModeForTab(tab: Int): LibraryDisplayMode =
     LibraryTabKey.fromIndex(tab)?.defaultDisplayMode ?: LibraryDisplayMode.LIST
 
@@ -93,8 +107,9 @@ class LibraryViewModel @Inject constructor(
     val browsePath: StateFlow<String?> = _browsePath.asStateFlow()
     private val browsePathStack = mutableListOf<String?>()
 
-    private val _selectedProviders = MutableStateFlow<Set<String>>(emptySet())
-    val selectedProviders: StateFlow<Set<String>> = _selectedProviders.asStateFlow()
+
+    // Provider filter per tab (persisted), so a selection survives restart and stays tab-scoped.
+    private val _selectedProvidersMap = MutableStateFlow<Map<Int, Set<String>>>(emptyMap())
 
     private val _isLoading = MutableStateFlow(false)
     val connectionState = wsClient.connectionState
@@ -140,10 +155,18 @@ class LibraryViewModel @Inject constructor(
         favs[tab] ?: false
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
+    val selectedProviders: StateFlow<Set<String>> = combine(_selectedProvidersMap, _currentTab) { map, tab ->
+        map[tab] ?: emptySet()
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptySet())
+
     private val _displayModes = MutableStateFlow<Map<Int, LibraryDisplayMode>>(emptyMap())
     val displayMode: StateFlow<LibraryDisplayMode> = combine(_displayModes, _currentTab) { modes, tab ->
         modes[tab] ?: defaultDisplayModeForTab(tab)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), LibraryDisplayMode.GRID)
+
+    // Per-tab display modes (user overrides only; defaults resolved per page). Each pager page must
+    // render with its OWN mode so swiping doesn't briefly show the wrong layout then flip on settle.
+    val displayModesByTab: StateFlow<Map<Int, LibraryDisplayMode>> = _displayModes.asStateFlow()
 
     val players = playerRepository.players
 
@@ -167,6 +190,7 @@ class LibraryViewModel @Inject constructor(
             _sortOptions.value = settingsRepository.librarySortOptions.first()
             _sortDescendings.value = settingsRepository.librarySortDescending.first()
             _favoritesOnlyMap.value = settingsRepository.libraryFavoritesOnly.first()
+            _selectedProvidersMap.value = settingsRepository.libraryProviderFilters.first()
             _settingsLoaded.value = true
         }
         // Keep syncing after initial load
@@ -190,12 +214,12 @@ class LibraryViewModel @Inject constructor(
                 .collect { state ->
                     if (state is ConnectionState.Connected && _settingsLoaded.value) {
                         val isEmpty = when (_currentTab.value) {
-                            0 -> _artists.value.isEmpty()
-                            1 -> _albums.value.isEmpty()
-                            2 -> _tracks.value.isEmpty()
-                            3 -> _playlists.value.isEmpty()
-                            4 -> _radios.value.isEmpty()
-                            5 -> _audiobooks.value.isEmpty()
+                            TAB_ARTISTS -> _artists.value.isEmpty()
+                            TAB_ALBUMS -> _albums.value.isEmpty()
+                            TAB_TRACKS -> _tracks.value.isEmpty()
+                            TAB_PLAYLISTS -> _playlists.value.isEmpty()
+                            TAB_RADIOS -> _radios.value.isEmpty()
+                            TAB_AUDIOBOOKS -> _audiobooks.value.isEmpty()
                             else -> false
                         }
                         if (isEmpty) reloadCurrentTab()
@@ -237,7 +261,7 @@ class LibraryViewModel @Inject constructor(
         _browseItems.value = emptyList()
         _browsePath.value = null
         browsePathStack.clear()
-        _selectedProviders.value = emptySet()
+        _selectedProvidersMap.value = emptyMap()
         hasMoreArtists = true
         hasMoreAlbums = true
         hasMoreTracks = true
@@ -264,14 +288,15 @@ class LibraryViewModel @Inject constructor(
     }
 
     private val currentSearch: String? get() = _searchQuery.value.ifBlank { null }
-    private val currentOrderBy: String get() {
-        val tab = _currentTab.value
+    private val currentOrderBy: String get() = orderByForTab(_currentTab.value)
+    private val currentFavoriteOnly: Boolean get() = favoriteOnlyForTab(_currentTab.value)
+
+    private fun orderByForTab(tab: Int): String {
         val base = (_sortOptions.value[tab] ?: SortOption.NAME).apiValue
         return if (_sortDescendings.value[tab] == true) "${base}_desc" else base
     }
 
-    private val currentFavoriteOnly: Boolean get() =
-        _favoritesOnlyMap.value[_currentTab.value] ?: false
+    private fun favoriteOnlyForTab(tab: Int): Boolean = _favoritesOnlyMap.value[tab] ?: false
 
     fun setCurrentTab(tab: Int) {
         if (_currentTab.value != tab) {
@@ -320,23 +345,44 @@ class LibraryViewModel @Inject constructor(
     }
 
     fun toggleProviderFilter(instanceId: String) {
-        val current = _selectedProviders.value
-        _selectedProviders.value = if (instanceId in current) current - instanceId else current + instanceId
+        val tab = _currentTab.value
+        val current = _selectedProvidersMap.value[tab] ?: emptySet()
+        val updated = if (instanceId in current) current - instanceId else current + instanceId
+        _selectedProvidersMap.value = _selectedProvidersMap.value + (tab to updated)
+        viewModelScope.launch { settingsRepository.setLibraryProviderFilters(tab, updated) }
         reloadCurrentTab()
     }
 
     fun clearProviderFilter() {
-        _selectedProviders.value = emptySet()
+        val tab = _currentTab.value
+        _selectedProvidersMap.value = _selectedProvidersMap.value + (tab to emptySet())
+        viewModelScope.launch { settingsRepository.setLibraryProviderFilters(tab, emptySet()) }
         reloadCurrentTab()
     }
 
+    // MA's library_items `provider` filter matches the provider INSTANCE id (e.g. deezer--GWnPbDSt),
+    // not the bare domain. Sending the domain returns zero results, so the server filter must carry
+    // the selected instance ids.
     private fun providerFilterArgs(): List<String>? =
-        selectedProviderDomains().takeIf { it.isNotEmpty() }
+        selectedProviderInstanceIds().takeIf { it.isNotEmpty() }
 
-    private fun selectedProviderDomains(): List<String> {
-        if (_selectedProviders.value.isEmpty()) return emptyList()
-        val providersForTab = providerManifestCache.musicProvidersForTab(_currentTab.value)
-        return _selectedProviders.value
+    private fun selectedProviderInstanceIds(tab: Int = _currentTab.value): List<String> {
+        val selected = _selectedProvidersMap.value[tab] ?: emptySet()
+        if (selected.isEmpty()) return emptyList()
+        val providersForTab = providerManifestCache.musicProvidersForTab(tab)
+        return selected
+            .mapNotNull { selectedId ->
+                providersForTab.firstOrNull { it.instanceId == selectedId }?.instanceId
+                    ?: providersForTab.firstOrNull { it.domain == selectedId }?.instanceId
+            }
+            .distinct()
+    }
+
+    private fun selectedProviderDomains(tab: Int = _currentTab.value): List<String> {
+        val selected = _selectedProvidersMap.value[tab] ?: emptySet()
+        if (selected.isEmpty()) return emptyList()
+        val providersForTab = providerManifestCache.musicProvidersForTab(tab)
+        return selected
             .mapNotNull { selectedId ->
                 providersForTab.firstOrNull { it.instanceId == selectedId }?.domain
                     ?: providersForTab.firstOrNull { it.domain == selectedId }?.domain
@@ -372,13 +418,13 @@ class LibraryViewModel @Inject constructor(
 
     private fun reloadCurrentTab() {
         when (_currentTab.value) {
-            0 -> loadArtists()
-            1 -> loadAlbums()
-            2 -> loadTracks()
-            3 -> loadPlaylists()
-            4 -> loadRadios()
-            5 -> loadAudiobooks()
-            6 -> applyBrowseFilterSort()
+            TAB_ARTISTS -> loadArtists()
+            TAB_ALBUMS -> loadAlbums()
+            TAB_TRACKS -> loadTracks()
+            TAB_PLAYLISTS -> loadPlaylists()
+            TAB_RADIOS -> loadRadios()
+            TAB_AUDIOBOOKS -> loadAudiobooks()
+            TAB_BROWSE -> applyBrowseFilterSort()
         }
     }
 
@@ -786,6 +832,136 @@ class LibraryViewModel @Inject constructor(
         val prev = browsePathStack.removeAt(browsePathStack.lastIndex)
         loadBrowse(prev)
         return true
+    }
+
+    /**
+     * Warm the tabs on either side of [tab] so a swipe lands on populated content instead of an
+     * empty page that fills in after settling. Silent: it never toggles [_isLoading], fetches only
+     * an empty neighbour's first page, and uses that tab's own sort/favourite/provider params.
+     */
+    fun preloadAdjacentTabs(tab: Int) {
+        preloadTab(tab - 1)
+        preloadTab(tab + 1)
+    }
+
+    private fun preloadTab(tab: Int) {
+        val empty = when (tab) {
+            TAB_ARTISTS -> _artists.value.isEmpty()
+            TAB_ALBUMS -> _albums.value.isEmpty()
+            TAB_TRACKS -> _tracks.value.isEmpty()
+            TAB_PLAYLISTS -> _playlists.value.isEmpty()
+            TAB_RADIOS -> _radios.value.isEmpty()
+            TAB_AUDIOBOOKS -> _audiobooks.value.isEmpty()
+            else -> false // Browse loads on demand
+        }
+        if (!empty) return
+        val orderBy = orderByForTab(tab)
+        val fav = favoriteOnlyForTab(tab)
+        val pf = selectedProviderInstanceIds(tab).takeIf { it.isNotEmpty() }
+        // Publish only if the tab is STILL empty on completion: a real load() may have started
+        // concurrently (and even paged further), so never clobber a non-empty list back to page 0.
+        viewModelScope.launch {
+            runCatching {
+                when (tab) {
+                    TAB_ARTISTS -> {
+                        val items = musicRepository.getArtists(null, PAGE_SIZE, 0, orderBy, fav, pf)
+                        if (_artists.value.isEmpty()) {
+                            _artists.value = items
+                            hasMoreArtists = items.size >= PAGE_SIZE
+                            lastFmLibraryEnricher.enrichInBackground(items)
+                        }
+                    }
+                    TAB_ALBUMS -> {
+                        val items = musicRepository.getAlbums(null, PAGE_SIZE, 0, orderBy, fav, pf)
+                        if (_albums.value.isEmpty()) {
+                            _albums.value = items
+                            hasMoreAlbums = items.size >= PAGE_SIZE
+                        }
+                    }
+                    TAB_TRACKS -> {
+                        val items = musicRepository.getTracks(null, PAGE_SIZE, 0, orderBy, fav, pf)
+                        if (_tracks.value.isEmpty()) {
+                            _tracks.value = items
+                            hasMoreTracks = items.size >= PAGE_SIZE
+                        }
+                    }
+                    TAB_PLAYLISTS -> {
+                        val items = musicRepository.getPlaylists(null, PAGE_SIZE, 0, orderBy, fav, pf)
+                        if (_playlists.value.isEmpty()) {
+                            _playlists.value = items
+                            hasMorePlaylists = items.size >= PAGE_SIZE
+                        }
+                    }
+                    TAB_RADIOS -> {
+                        val items = musicRepository.getRadios(null, PAGE_SIZE, 0, orderBy, fav, pf)
+                        if (_radios.value.isEmpty()) {
+                            _radios.value = items
+                            hasMoreRadios = items.size >= PAGE_SIZE
+                        }
+                    }
+                    TAB_AUDIOBOOKS -> {
+                        val items = musicRepository.getAudiobooks(null, PAGE_SIZE, 0, orderBy, fav, pf)
+                        if (_audiobooks.value.isEmpty()) {
+                            _audiobooks.value = items
+                            hasMoreAudiobooks = items.size >= PAGE_SIZE
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Play (or enqueue) every playable item under a Browse folder, e.g. a whole album or artist
+     * folder on the filesystem. Walks the subtree breadth-first so tracks come out in folder order,
+     * bounded by [FOLDER_MAX_TRACKS]/[FOLDER_MAX_FOLDERS] so a large tree can't hang the UI.
+     */
+    fun playBrowseFolder(folder: BrowseItem, enqueue: Boolean = false) {
+        val queueId = playerRepository.requireSelectedPlayerId() ?: return
+        val rootPath = folder.path ?: folder.uri
+        viewModelScope.launch {
+            _isLoading.value = true
+            try {
+                val uris = collectFolderTrackUris(rootPath)
+                if (uris.isEmpty()) {
+                    _error.tryEmit("No playable tracks in this folder")
+                    return@launch
+                }
+                if (!enqueue) {
+                    playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.NORMAL)
+                }
+                musicRepository.playMedia(
+                    queueId, uris, option = if (enqueue) "add" else "replace", timeoutMs = FOLDER_PLAY_TIMEOUT_MS
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "playBrowseFolder failed: ${e.message}")
+                _error.tryEmit("Not connected to server")
+            } finally {
+                _isLoading.value = false
+            }
+        }
+    }
+
+    private suspend fun collectFolderTrackUris(rootPath: String): List<String> {
+        val collected = mutableListOf<String>()
+        val pending = ArrayDeque<String>().apply { add(rootPath) }
+        var foldersVisited = 0
+        while (pending.isNotEmpty() && collected.size < FOLDER_MAX_TRACKS && foldersVisited < FOLDER_MAX_FOLDERS) {
+            val current = pending.removeFirst()
+            foldersVisited++
+            val children = runCatching { musicRepository.browse(current) }
+                .getOrElse { Log.w(TAG, "browse failed for folder play ($current): ${it.message}"); emptyList() }
+                .filter { it.name != ".." }
+            for (child in children) {
+                if (child.isFolder) {
+                    pending.add(child.path ?: child.uri)
+                } else if (child.uri.isNotBlank()) {
+                    collected.add(child.uri)
+                    if (collected.size >= FOLDER_MAX_TRACKS) break
+                }
+            }
+        }
+        return collected
     }
 
     fun playTrack(track: Track) {

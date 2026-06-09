@@ -20,6 +20,7 @@ interface SettingsRepository {
     val librarySortOptions: Flow<Map<Int, SortOption>>
     val librarySortDescending: Flow<Map<Int, Boolean>>
     val libraryFavoritesOnly: Flow<Map<Int, Boolean>>
+    val libraryProviderFilters: Flow<Map<Int, Set<String>>>
     val lastFmApiKey: Flow<String>
     val themeMode: Flow<String>
     val sendspinAudioFormat: Flow<String>
@@ -77,6 +78,7 @@ interface SettingsRepository {
     suspend fun setLibrarySortOption(tab: Int, option: SortOption)
     suspend fun setLibrarySortDescending(tab: Int, descending: Boolean)
     suspend fun setLibraryFavoritesOnly(tab: Int, favoritesOnly: Boolean)
+    suspend fun setLibraryProviderFilters(tab: Int, instanceIds: Set<String>)
     suspend fun setLastFmApiKey(key: String)
     suspend fun setThemeMode(mode: String)
     suspend fun setSendspinAudioFormat(format: String)

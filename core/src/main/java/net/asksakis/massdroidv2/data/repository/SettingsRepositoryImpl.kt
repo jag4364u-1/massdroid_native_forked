@@ -44,6 +44,7 @@ class SettingsRepositoryImpl @Inject constructor(
         private val KEY_LIBRARY_SORT_OPTIONS = stringPreferencesKey("library_sort_options")
         private val KEY_LIBRARY_SORT_DESC = stringPreferencesKey("library_sort_desc")
         private val KEY_LIBRARY_FAV_ONLY = stringPreferencesKey("library_fav_only")
+        private val KEY_LIBRARY_PROVIDER_FILTERS = stringPreferencesKey("library_provider_filters")
         private val KEY_LASTFM_API_KEY = stringPreferencesKey("lastfm_api_key")
         private val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
         private val KEY_SENDSPIN_AUDIO_FORMAT = stringPreferencesKey("sendspin_audio_format")
@@ -295,6 +296,22 @@ class SettingsRepositoryImpl @Inject constructor(
             val current = parseStringMap(prefs[KEY_LIBRARY_FAV_ONLY]).toMutableMap()
             current[tab] = favoritesOnly.toString()
             prefs[KEY_LIBRARY_FAV_ONLY] = encodeStringMap(current)
+        }
+    }
+
+    // Provider filters per tab: value is the selected instance ids joined by '|' (instance ids never
+    // contain ',', ':' or '|', so this nests safely inside the shared tab-keyed string-map encoding).
+    override val libraryProviderFilters: Flow<Map<Int, Set<String>>> = safeData.map { prefs ->
+        parseStringMap(prefs[KEY_LIBRARY_PROVIDER_FILTERS]).mapValues { (_, v) ->
+            v.split("|").filter { it.isNotBlank() }.toSet()
+        }
+    }
+
+    override suspend fun setLibraryProviderFilters(tab: Int, instanceIds: Set<String>) {
+        context.dataStore.edit { prefs ->
+            val current = parseStringMap(prefs[KEY_LIBRARY_PROVIDER_FILTERS]).toMutableMap()
+            if (instanceIds.isEmpty()) current.remove(tab) else current[tab] = instanceIds.joinToString("|")
+            prefs[KEY_LIBRARY_PROVIDER_FILTERS] = encodeStringMap(current)
         }
     }
 
