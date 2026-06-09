@@ -100,7 +100,7 @@ private fun VolumeOsdCard(state: PlayerRepository.VolumeOsdState) {
         shadowElevation = 8.dp,
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -116,7 +116,7 @@ private fun VolumeOsdCard(state: PlayerRepository.VolumeOsdState) {
             )
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
