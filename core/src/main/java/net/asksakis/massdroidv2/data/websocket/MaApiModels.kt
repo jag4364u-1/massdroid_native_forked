@@ -198,7 +198,15 @@ fun MediaItemImage.resolveUrl(wsClient: MaWebSocketClient): String? {
     val p = path.trim()
     if (p.isEmpty()) return null
     if (p.equals("none", ignoreCase = true) || p.equals("null", ignoreCase = true)) return null
-    if (remotelyAccessible) return p
+    if (remotelyAccessible) {
+        // "Remotely accessible" art on a private/LAN host only works on that LAN; off-LAN (cellular)
+        // or via a remote/VPN endpoint, route it through the server imageproxy so it loads anywhere.
+        val host = runCatching { java.net.URI(p).host }.getOrNull()
+        if (host != null && wsClient.isOffLanImageHost(host)) {
+            return wsClient.getImageUrl(p, provider = imageProvider) ?: p
+        }
+        return p
+    }
     return wsClient.getImageUrl(p, provider = imageProvider) ?: p
 }
 

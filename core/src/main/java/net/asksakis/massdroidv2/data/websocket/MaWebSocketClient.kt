@@ -627,6 +627,18 @@ class MaWebSocketClient(
         return "${base}/imageproxy?path=$encodedPath&size=$size$providerParam"
     }
 
+    /**
+     * True when [host] is a private/LAN address that is NOT the host we reach the server through.
+     * A "remotely accessible" image on such a host is only reachable on that LAN, so off-LAN
+     * (cellular) or via a different remote/VPN endpoint it must be fetched through imageproxy
+     * (the server resolves it on the LAN and serves it from whatever host we already reach).
+     */
+    fun isOffLanImageHost(host: String): Boolean {
+        if (!isPrivateHost(host)) return false
+        val serverHost = runCatching { java.net.URI(serverUrl).host }.getOrNull()
+        return serverHost == null || !host.equals(serverHost, ignoreCase = true)
+    }
+
     fun rewriteImageProxyUrl(url: String): String {
         val proxyIdx = url.indexOf("/imageproxy?")
         if (proxyIdx < 0) return url
