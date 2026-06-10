@@ -4,20 +4,15 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import net.asksakis.massdroidv2.data.util.LibraryPager
 import net.asksakis.massdroidv2.domain.model.Album
 import net.asksakis.massdroidv2.domain.model.Artist
-import net.asksakis.massdroidv2.domain.model.Player
 import net.asksakis.massdroidv2.domain.model.Playlist
 import net.asksakis.massdroidv2.domain.repository.MusicRepository
 import net.asksakis.massdroidv2.domain.repository.PlayerRepository
-import net.asksakis.massdroidv2.domain.repository.SettingsRepository
 import javax.inject.Inject
 
 /**
@@ -32,21 +27,7 @@ import javax.inject.Inject
 class TvHomeViewModel @Inject constructor(
     private val musicRepository: MusicRepository,
     private val playerRepository: PlayerRepository,
-    settingsRepository: SettingsRepository,
 ) : ViewModel() {
-
-    val players: StateFlow<List<Player>> = playerRepository.players
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-
-    /** MA player id of this device's own Sendspin player (the local "MassDroid TV"). */
-    val localPlayerId: StateFlow<String?> = settingsRepository.sendspinClientId
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-
-    val selectedPlayerId: StateFlow<String?> = playerRepository.selectedPlayer
-        .map { it?.playerId }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-
-    fun selectPlayer(playerId: String) = playerRepository.selectPlayer(playerId)
 
     private val _recentlyPlayed = MutableStateFlow<List<Album>>(emptyList())
     val recentlyPlayed: StateFlow<List<Album>> = _recentlyPlayed.asStateFlow()
@@ -81,7 +62,7 @@ class TvHomeViewModel @Inject constructor(
     fun playMedia(uri: String) {
         viewModelScope.launch {
             val target = playerRepository.selectedPlayer.value?.playerId
-                ?: players.value.firstOrNull()?.playerId
+                ?: playerRepository.players.value.firstOrNull()?.playerId
                 ?: return@launch
             playerRepository.selectPlayer(target)
             runCatching { musicRepository.playMedia(target, uri, option = "replace") }

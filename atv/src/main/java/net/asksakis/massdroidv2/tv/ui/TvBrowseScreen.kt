@@ -9,30 +9,45 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import androidx.tv.material3.Card
 import androidx.tv.material3.ClickableSurfaceDefaults
+import androidx.tv.material3.Icon
+import androidx.tv.material3.IconButton
 import androidx.tv.material3.LocalContentColor
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Surface
 import androidx.tv.material3.Text
+import net.asksakis.massdroidv2.domain.model.SortOption
 
 /** Full server library browse: category chips + a paginated grid of everything. */
 @Composable
@@ -43,7 +58,31 @@ fun TvBrowseScreen(
 ) {
     val category by viewModel.category.collectAsStateWithLifecycle()
     val items by viewModel.items.collectAsStateWithLifecycle()
+    val sortOption by viewModel.sortOption.collectAsStateWithLifecycle()
+    val sortDescending by viewModel.sortDescending.collectAsStateWithLifecycle()
+    var showSortDialog by remember { mutableStateOf(false) }
     val gridState = rememberLazyGridState()
+
+    // Track the focused card so the mini player can hand the cursor back to it on exit.
+    var lastFocusedKey by remember { mutableStateOf<String?>(null) }
+    val restoreRequester = remember { FocusRequester() }
+    val focusMemory = LocalTvFocusMemory.current
+    DisposableEffect(focusMemory) {
+        val hook: () -> Boolean = {
+            lastFocusedKey != null && runCatching { restoreRequester.requestFocus() }.isSuccess
+        }
+        focusMemory.restoreToLastFocused = hook
+        // Only clear our own hook: on navigation the NEW screen registers before the old
+        // one disposes, and an unconditional null here would wipe the new screen's hook.
+        onDispose {
+            if (focusMemory.restoreToLastFocused === hook) focusMemory.restoreToLastFocused = null
+        }
+    }
+    val focusModifierFor: (String) -> Modifier = { key ->
+        Modifier
+            .onFocusChanged { if (it.isFocused) lastFocusedKey = key }
+            .then(if (key == lastFocusedKey) Modifier.focusRequester(restoreRequester) else Modifier)
+    }
 
     LaunchedEffect(gridState, items.size) {
         snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1 }
@@ -52,14 +91,19 @@ fun TvBrowseScreen(
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize().padding(top = 40.dp, bottom = 24.dp)) {
-            Text(
-                "Browse",
-                style = MaterialTheme.typography.headlineMedium,
-                modifier = Modifier.padding(horizontal = BROWSE_EDGE)
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = BROWSE_EDGE),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Browse", style = MaterialTheme.typography.headlineMedium)
+                IconButton(onClick = { showSortDialog = true }) {
+                    Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "Sort")
+                }
+            }
             Spacer(Modifier.height(16.dp))
             Row(
-                modifier = Modifier.padding(horizontal = BROWSE_EDGE),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = BROWSE_EDGE),
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 BrowseCategory.entries.forEach { cat ->
@@ -78,13 +122,102 @@ fun TvBrowseScreen(
                 verticalArrangement = Arrangement.spacedBy(20.dp)
             ) {
                 items(items, key = { it.uri }) { item ->
-                    BrowseCard(item) {
+                    BrowseCard(item, modifier = focusModifierFor(item.uri)) {
                         if (item.isArtist) onOpenArtist(item.itemId, item.provider)
                         else viewModel.play(item.uri)
                     }
                 }
             }
         }
+    }
+
+    if (showSortDialog) {
+        SortDialog(
+            current = sortOption,
+            descending = sortDescending,
+            onSelect = { option ->
+                viewModel.setSort(option)
+                showSortDialog = false
+            },
+            onSetDescending = { viewModel.setSortDescending(it) },
+            onDismiss = { showSortDialog = false }
+        )
+    }
+}
+
+/** Per-category sort picker; the choice is persisted by the view model. */
+@Composable
+private fun SortDialog(
+    current: SortOption,
+    descending: Boolean,
+    onSelect: (SortOption) -> Unit,
+    onSetDescending: (Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val initialFocus = remember { FocusRequester() }
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp)) {
+            Column(modifier = Modifier.padding(20.dp).width(260.dp)) {
+                Text("Sort by", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(12.dp))
+                SortOption.entries.forEach { option ->
+                    val selected = option == current
+                    Surface(
+                        onClick = { onSelect(option) },
+                        colors = if (selected) {
+                            ClickableSurfaceDefaults.colors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary
+                            )
+                        } else {
+                            ClickableSurfaceDefaults.colors()
+                        },
+                        shape = ClickableSurfaceDefaults.shape(
+                            androidx.compose.foundation.shape.RoundedCornerShape(8.dp)
+                        ),
+                        modifier = if (selected) Modifier.fillMaxWidth().focusRequester(initialFocus)
+                                   else Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            option.label,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                }
+                Spacer(Modifier.height(8.dp))
+                Text("Direction", style = MaterialTheme.typography.labelLarge)
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    DirectionChip("Ascending", selected = !descending) { onSetDescending(false) }
+                    DirectionChip("Descending", selected = descending) { onSetDescending(true) }
+                }
+            }
+        }
+    }
+    LaunchedEffect(Unit) { runCatching { initialFocus.requestFocus() } }
+}
+
+@Composable
+private fun DirectionChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Surface(
+        onClick = onClick,
+        colors = if (selected) {
+            ClickableSurfaceDefaults.colors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary
+            )
+        } else {
+            ClickableSurfaceDefaults.colors()
+        },
+        shape = ClickableSurfaceDefaults.shape(androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+        )
     }
 }
 
@@ -116,8 +249,8 @@ private fun CategoryChip(label: String, selected: Boolean, onClick: () -> Unit) 
 }
 
 @Composable
-private fun BrowseCard(item: BrowseItem, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+private fun BrowseCard(item: BrowseItem, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Card(onClick = onClick, modifier = modifier.fillMaxWidth()) {
         Column {
             val imageModifier = Modifier.fillMaxWidth().aspectRatio(1f)
             AsyncImage(
