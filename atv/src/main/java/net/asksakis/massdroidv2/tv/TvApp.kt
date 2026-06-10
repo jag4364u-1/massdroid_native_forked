@@ -63,9 +63,20 @@ class TvApp : Application(), ImageLoaderFactory {
         ImageLoader.Builder(this)
             .okHttpClient { wsClient.getHttpClient() }
             .crossfade(true)
+            // Same artwork-cache policy as the phone app: fanart.tv sends no cache headers
+            // (header-respecting policy = re-download on every display), and the 250MB default
+            // disk cache evicts a full artwork library. Artwork is content-addressed by URL.
+            .respectCacheHeaders(false)
+            .diskCache {
+                coil.disk.DiskCache.Builder()
+                    .directory(cacheDir.resolve("image_cache"))
+                    .maxSizeBytes(IMAGE_DISK_CACHE_BYTES)
+                    .build()
+            }
             .build()
 
     private companion object {
         const val TAG = "TvApp"
+        const val IMAGE_DISK_CACHE_BYTES = 1024L * 1024 * 1024 // 1 GB
     }
 }

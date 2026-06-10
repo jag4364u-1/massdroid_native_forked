@@ -22,7 +22,6 @@ import net.asksakis.massdroidv2.data.websocket.SessionEventBus
 import net.asksakis.massdroidv2.domain.model.*
 import net.asksakis.massdroidv2.domain.recommendation.MediaIdentity
 import net.asksakis.massdroidv2.domain.repository.MusicRepository
-import net.asksakis.massdroidv2.domain.repository.PlayHistoryRepository
 import net.asksakis.massdroidv2.domain.repository.PlayerRepository
 import net.asksakis.massdroidv2.domain.repository.SettingsRepository
 import net.asksakis.massdroidv2.domain.repository.SmartListeningRepository
@@ -52,7 +51,6 @@ class LibraryViewModel @Inject constructor(
     private val wsClient: MaWebSocketClient,
     private val settingsRepository: SettingsRepository,
     private val smartListeningRepository: SmartListeningRepository,
-    private val playHistoryRepository: PlayHistoryRepository,
     private val genreRepository: net.asksakis.massdroidv2.data.genre.GenreRepository,
     private val lastFmLibraryEnricher: LastFmLibraryEnricher,
     val providerManifestCache: net.asksakis.massdroidv2.data.provider.ProviderManifestCache,
@@ -348,8 +346,10 @@ class LibraryViewModel @Inject constructor(
     private fun pagerForIndex(index: Int): LibraryPager<*>? =
         LibraryTabKey.fromIndex(index)?.let { pagerFor(it) }
 
-    private val allPagers
-        get() = listOf(artistsPager, albumsPager, tracksPager, playlistsPager, radiosPager, audiobooksPager)
+    // Derived from pagerFor so a future tab can't be added to the dispatch but missed here
+    // (resetForAccountSwitch would then leak that tab's list across an account switch).
+    private val allPagers: List<LibraryPager<*>>
+        get() = LibraryTabKey.entries.mapNotNull { pagerFor(it) }
 
     val artists: StateFlow<List<Artist>> = artistsPager.items
     val albums: StateFlow<List<Album>> = albumsPager.items
@@ -472,15 +472,21 @@ class LibraryViewModel @Inject constructor(
             is MediaItemUpdate.PlaylistUpdated ->
                 playlistsPager.update { replaceByUri(it, update.item) { p -> p.uri } }
             is MediaItemUpdate.RadioUpdated ->
-                radiosPager.update { replaceByUri(it, update.item) { r -> r.uri } }
+                // The server payload has no library-membership flag (toRadio defaults inLibrary
+                // to true), so keep the flag of the row being replaced: a search-merged
+                // non-library station must not flip to inLibrary=true on a metadata event.
+                radiosPager.update { list ->
+                    list.map { if (it.uri == update.item.uri) update.item.copy(inLibrary = it.inLibrary) else it }
+                }
         }
     }
 
     /** Same list instance when the URI isn't present, so unrelated events don't recompose. */
     private fun <T> replaceByUri(list: List<T>, item: T, uriOf: (T) -> String): List<T> {
         val uri = uriOf(item)
-        if (list.none { uriOf(it) == uri }) return list
-        return list.map { if (uriOf(it) == uri) item else it }
+        val idx = list.indexOfFirst { uriOf(it) == uri }
+        if (idx < 0) return list
+        return list.toMutableList().also { it[idx] = item }
     }
 
     fun onScreenVisible() {
@@ -602,17 +608,21 @@ class LibraryViewModel @Inject constructor(
         if (tab == LibraryTabKey.BROWSE) applyBrowseFilterSort() else pagerFor(tab)?.reload()
     }
 
-    fun loadArtists() = artistsPager.reload()
+    // The screen calls these only when a tab is still empty (on-settle LaunchedEffect), so they
+    // route through reloadIfEmpty: an in-flight neighbour preload is adopted instead of being
+    // cancelled and refetched. Forced reloads (search/sort/filter/refresh) go through
+    // reloadCurrentTab -> pager.reload().
+    fun loadArtists() = artistsPager.reloadIfEmpty()
     fun loadMoreArtists() = artistsPager.loadMore()
-    fun loadAlbums() = albumsPager.reload()
+    fun loadAlbums() = albumsPager.reloadIfEmpty()
     fun loadMoreAlbums() = albumsPager.loadMore()
-    fun loadTracks() = tracksPager.reload()
+    fun loadTracks() = tracksPager.reloadIfEmpty()
     fun loadMoreTracks() = tracksPager.loadMore()
-    fun loadPlaylists() = playlistsPager.reload()
+    fun loadPlaylists() = playlistsPager.reloadIfEmpty()
     fun loadMorePlaylists() = playlistsPager.loadMore()
-    fun loadRadios() = radiosPager.reload()
+    fun loadRadios() = radiosPager.reloadIfEmpty()
     fun loadMoreRadios() = radiosPager.loadMore()
-    fun loadAudiobooks() = audiobooksPager.reload()
+    fun loadAudiobooks() = audiobooksPager.reloadIfEmpty()
     fun loadMoreAudiobooks() = audiobooksPager.loadMore()
 
     /**

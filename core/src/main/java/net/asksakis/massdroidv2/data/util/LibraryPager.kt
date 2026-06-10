@@ -3,6 +3,7 @@ package net.asksakis.massdroidv2.data.util
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -24,6 +25,10 @@ import kotlinx.coroutines.launch
  * into page 0, e.g. genre-matched artists) and [transformPage] (client-side safety filtering)
  * only shape what is published, so client-side additions/removals can never shift later pages.
  * [onPageLoaded] receives every raw page for side effects (e.g. background enrichment).
+ *
+ * [fetch] is expected to read its remaining query params (search, sort, filters) live from the
+ * owner's state: every param change MUST be followed by [reload], otherwise a later [loadMore]
+ * appends pages from a different query onto the current list.
  *
  * Not thread-safe by design: [scope] is expected to be Main-confined (viewModelScope).
  */
@@ -50,17 +55,35 @@ class LibraryPager<T>(
     private var endReached = false
 
     /** Replace the list with a fresh page 0, cancelling any in-flight load. */
-    fun reload() {
+    fun reload() = startReload(publishOnlyIfEmpty = false)
+
+    /**
+     * First page for a tab that has never loaded; no-op when data or an active load exists.
+     * The result is published only if the list is STILL empty on completion, so a local
+     * mutation racing the preload (optimistic favorite, a just-created playlist) is never
+     * clobbered by a stale page 0.
+     */
+    fun reloadIfEmpty() {
+        if (_items.value.isEmpty() && job?.isActive != true) startReload(publishOnlyIfEmpty = true)
+    }
+
+    private fun startReload(publishOnlyIfEmpty: Boolean) {
         job?.cancel()
-        job = scope.launch {
+        // LAZY start so the `job` field is assigned before the body can run (an immediate
+        // dispatcher would otherwise execute the body undispatched, and a body that completes
+        // before the assignment would fail the ownership check in finally, leaking the flag).
+        val newJob = scope.launch(start = CoroutineStart.LAZY) {
             _loading.value = true
             try {
                 val raw = fetch(pageSize, 0)
-                offset = raw.size
-                endReached = raw.size < pageSize
                 val augmented = augmentFirstPage?.invoke(raw) ?: raw
-                _items.value = transformPage?.invoke(augmented) ?: augmented
-                onPageLoaded?.invoke(raw)
+                val page = transformPage?.invoke(augmented) ?: augmented
+                if (!publishOnlyIfEmpty || _items.value.isEmpty()) {
+                    offset = raw.size
+                    endReached = raw.size < pageSize
+                    _items.value = page
+                    onPageLoaded?.invoke(raw)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -71,11 +94,8 @@ class LibraryPager<T>(
                 if (job === coroutineContext[Job]) _loading.value = false
             }
         }
-    }
-
-    /** First page for a tab that has never loaded; no-op when data or an active load exists. */
-    fun reloadIfEmpty() {
-        if (_items.value.isEmpty() && job?.isActive != true) reload()
+        job = newJob
+        newJob.start()
     }
 
     fun loadMore() {

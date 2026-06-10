@@ -1,8 +1,10 @@
 package net.asksakis.massdroidv2.data.repository
 
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -52,7 +54,9 @@ class MusicRepositoryImpl @Inject constructor(
             "radio" -> serverItem.toRadio()?.let { MediaItemUpdate.RadioUpdated(it) }
             else -> null
         }
-    }
+        // Library syncs emit media_item_updated in large bursts; keep the per-event JSON decode
+        // off the collector's (Main) dispatcher.
+    }.flowOn(Dispatchers.Default)
 
     override suspend fun getArtists(search: String?, limit: Int, offset: Int, orderBy: String?, favoriteOnly: Boolean, providerFilter: List<String>?): List<Artist> {
         val result = wsClient.sendCommand(
