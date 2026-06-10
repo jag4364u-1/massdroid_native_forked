@@ -5,7 +5,7 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -13,22 +13,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
-import kotlinx.coroutines.withTimeoutOrNull
-import net.asksakis.massdroidv2.data.util.ProviderHealthReporter
-import net.asksakis.massdroidv2.data.util.mapMaBounded
+import net.asksakis.massdroidv2.data.lastfm.LastFmLibraryEnricher
+import net.asksakis.massdroidv2.data.util.LibraryPager
 import net.asksakis.massdroidv2.data.websocket.ConnectionState
 import net.asksakis.massdroidv2.data.websocket.EventType
 import net.asksakis.massdroidv2.data.websocket.MaWebSocketClient
 import net.asksakis.massdroidv2.data.websocket.SessionEventBus
 import net.asksakis.massdroidv2.domain.model.*
 import net.asksakis.massdroidv2.domain.recommendation.MediaIdentity
-import net.asksakis.massdroidv2.domain.recommendation.normalizeGenre
-import net.asksakis.massdroidv2.data.database.PlayHistoryDao
-import net.asksakis.massdroidv2.data.lastfm.LastFmAlbumInfoResolver
-import net.asksakis.massdroidv2.data.lastfm.LastFmArtistInfoResolver
-import net.asksakis.massdroidv2.data.lastfm.LastFmGenreResolver
-import net.asksakis.massdroidv2.data.lastfm.LastFmLibraryEnricher
-import net.asksakis.massdroidv2.data.lastfm.LastFmSimilarResolver
 import net.asksakis.massdroidv2.domain.repository.MusicRepository
 import net.asksakis.massdroidv2.domain.repository.PlayHistoryRepository
 import net.asksakis.massdroidv2.domain.repository.PlayerRepository
@@ -37,17 +29,12 @@ import net.asksakis.massdroidv2.domain.repository.SmartListeningRepository
 import javax.inject.Inject
 
 private const val TAG = "LibraryVM"
-private const val PAGE_SIZE = 50
 private const val STATE_CURRENT_TAB = "library_current_tab"
 
-// Library tab indices (kept in sync with LibraryTabKey and the tab labels in LibraryScreen).
-private const val TAB_ARTISTS = 0
-private const val TAB_ALBUMS = 1
-private const val TAB_TRACKS = 2
-private const val TAB_PLAYLISTS = 3
-private const val TAB_RADIOS = 4
-private const val TAB_AUDIOBOOKS = 5
-private const val TAB_BROWSE = 6
+// Page-0 search augmentation thresholds (see the pager construction below).
+private const val GENRE_SEARCH_MIN_CHARS = 3
+private const val RADIO_SEARCH_MIN_CHARS = 2
+private const val RADIO_SEARCH_LIMIT = 25
 
 // Folder playback (Browse): bound the recursive descent so a huge subtree can't hang or flood.
 private const val FOLDER_MAX_TRACKS = 500
@@ -72,73 +59,14 @@ class LibraryViewModel @Inject constructor(
     private val sessionEventBus: SessionEventBus
 ) : ViewModel() {
 
-    private val _artists = MutableStateFlow<List<Artist>>(emptyList())
-    val artists: StateFlow<List<Artist>> = _artists.asStateFlow()
-
-    private val _albums = MutableStateFlow<List<Album>>(emptyList())
-    val albums: StateFlow<List<Album>> = _albums.asStateFlow()
-
-    private val _tracks = MutableStateFlow<List<Track>>(emptyList())
-    val tracks: StateFlow<List<Track>> = _tracks.asStateFlow()
-
-    private val _playlists = MutableStateFlow<List<Playlist>>(emptyList())
-    val playlists: StateFlow<List<Playlist>> = _playlists.asStateFlow()
-
-    private val _radios = MutableStateFlow<List<Radio>>(emptyList())
-    val radios: StateFlow<List<Radio>> = _radios.asStateFlow()
-
-    // Audiobooks are modeled as Track (single playable item; chapters arrive on play).
-    private val _audiobooks = MutableStateFlow<List<Track>>(emptyList())
-    val audiobooks: StateFlow<List<Track>> = _audiobooks.asStateFlow()
-
-    private val _editablePlaylists = MutableStateFlow<List<Playlist>>(emptyList())
-    val editablePlaylists: StateFlow<List<Playlist>> = _editablePlaylists.asStateFlow()
-    private val _isLoadingEditablePlaylists = MutableStateFlow(false)
-    val isLoadingEditablePlaylists: StateFlow<Boolean> = _isLoadingEditablePlaylists.asStateFlow()
-    private val _addingToPlaylistId = MutableStateFlow<String?>(null)
-    val addingToPlaylistId: StateFlow<String?> = _addingToPlaylistId.asStateFlow()
-    private val _playlistContainsTrack = MutableStateFlow<Set<String>>(emptySet())
-    val playlistContainsTrack: StateFlow<Set<String>> = _playlistContainsTrack.asStateFlow()
-
-    private val _browseItemsRaw = MutableStateFlow<List<BrowseItem>>(emptyList())
-    private val _browseItems = MutableStateFlow<List<BrowseItem>>(emptyList())
-    val browseItems: StateFlow<List<BrowseItem>> = _browseItems.asStateFlow()
-    private val _browsePath = MutableStateFlow<String?>(null)
-    val browsePath: StateFlow<String?> = _browsePath.asStateFlow()
-    private val browsePathStack = mutableListOf<String?>()
-
-
-    // Provider filter per tab (persisted), so a selection survives restart and stays tab-scoped.
-    private val _selectedProvidersMap = MutableStateFlow<Map<Int, Set<String>>>(emptyMap())
-
-    private val _isLoading = MutableStateFlow(false)
-    val connectionState = wsClient.connectionState
-    val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
-
-    private val _isLoadingMore = MutableStateFlow(false)
-    val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
-
-    private val _isRefreshing = MutableStateFlow(false)
-    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
-
-    private val _error = MutableSharedFlow<String>(extraBufferCapacity = 1)
-    val error: SharedFlow<String> = _error.asSharedFlow()
+    private val _currentTab = MutableStateFlow(savedStateHandle[STATE_CURRENT_TAB] ?: 0)
+    val currentTab: StateFlow<Int> = _currentTab.asStateFlow()
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
 
-    private var searchJob: Job? = null
-    private var mediaEventJob: Job? = null
-    private var pendingReload = false
-
-    fun onScreenVisible() {
-        if (pendingReload) {
-            pendingReload = false
-            reloadCurrentTab()
-        }
-    }
-    private val _currentTab = MutableStateFlow(savedStateHandle[STATE_CURRENT_TAB] ?: 0)
-    val currentTab: StateFlow<Int> = _currentTab.asStateFlow()
+    // Provider filter per tab (persisted), so a selection survives restart and stays tab-scoped.
+    private val _selectedProvidersMap = MutableStateFlow<Map<Int, Set<String>>>(emptyMap())
 
     private val _sortOptions = MutableStateFlow<Map<Int, SortOption>>(emptyMap())
     val sortOption: StateFlow<SortOption> = combine(_sortOptions, _currentTab) { opts, tab ->
@@ -169,18 +97,306 @@ class LibraryViewModel @Inject constructor(
     val displayModesByTab: StateFlow<Map<Int, LibraryDisplayMode>> = _displayModes.asStateFlow()
 
     val players = playerRepository.players
+    val connectionState = wsClient.connectionState
 
-    private var hasMoreArtists = true
-    private var hasMoreAlbums = true
-    private var hasMoreTracks = true
-    private var hasMorePlaylists = true
-    private var hasMoreRadios = true
-    private var hasMoreAudiobooks = true
+    private val _isRefreshing = MutableStateFlow(false)
+    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
+
+    private val _error = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val error: SharedFlow<String> = _error.asSharedFlow()
 
     private val _settingsLoaded = MutableStateFlow(false)
     val settingsLoaded: StateFlow<Boolean> = _settingsLoaded.asStateFlow()
     private val _blockedArtistUris = MutableStateFlow<Set<String>>(emptySet())
     val blockedArtistUris: StateFlow<Set<String>> = _blockedArtistUris.asStateFlow()
+
+    private var searchJob: Job? = null
+    private var pendingReload = false
+
+    // ---- per-tab fetch parameters -------------------------------------------------------------
+
+    private val currentSearch: String? get() = _searchQuery.value.ifBlank { null }
+
+    /** Search applies only to the tab the user is on; preloads of other tabs fetch unfiltered. */
+    private fun searchFor(tab: LibraryTabKey): String? =
+        if (_currentTab.value == tab.index) currentSearch else null
+
+    private fun orderByForTab(tab: Int): String {
+        val base = (_sortOptions.value[tab] ?: SortOption.NAME).apiValue
+        return if (_sortDescendings.value[tab] == true) "${base}_desc" else base
+    }
+
+    private fun favoriteOnlyForTab(tab: Int): Boolean = _favoritesOnlyMap.value[tab] ?: false
+
+    // MA's library_items `provider` filter matches the provider INSTANCE id (e.g. deezer--GWnPbDSt),
+    // not the bare domain. Sending the domain returns zero results, so the server filter must carry
+    // the selected instance ids.
+    private fun providerFilterFor(tab: LibraryTabKey): List<String>? =
+        selectedProviderInstanceIds(tab.index).takeIf { it.isNotEmpty() }
+
+    private fun selectedProviderInstanceIds(tab: Int): List<String> {
+        val selected = _selectedProvidersMap.value[tab] ?: emptySet()
+        if (selected.isEmpty()) return emptyList()
+        val providersForTab = providerManifestCache.musicProvidersForTab(tab)
+        return selected
+            .mapNotNull { selectedId ->
+                providersForTab.firstOrNull { it.instanceId == selectedId }?.instanceId
+                    ?: providersForTab.firstOrNull { it.domain == selectedId }?.instanceId
+            }
+            .distinct()
+    }
+
+    private fun selectedProviderDomains(tab: Int): List<String> {
+        val selected = _selectedProvidersMap.value[tab] ?: emptySet()
+        if (selected.isEmpty()) return emptyList()
+        val providersForTab = providerManifestCache.musicProvidersForTab(tab)
+        return selected
+            .mapNotNull { selectedId ->
+                providersForTab.firstOrNull { it.instanceId == selectedId }?.domain
+                    ?: providersForTab.firstOrNull { it.domain == selectedId }?.domain
+            }
+            .distinct()
+    }
+
+    /** Client-side safety net on top of the server instance-id filter. */
+    private fun <T> filterBySelectedProviders(
+        items: List<T>,
+        tab: LibraryTabKey,
+        providerDomains: (T) -> List<String>
+    ): List<T> {
+        val selectedDomains = selectedProviderDomains(tab.index).toSet()
+        if (selectedDomains.isEmpty()) return items
+        return items.filter { item -> providerDomains(item).any { it in selectedDomains } }
+    }
+
+    private fun parseMediaUri(uri: String): Pair<String, String>? {
+        val sep = uri.indexOf("://")
+        if (sep < 0) return null
+        val provider = uri.substring(0, sep)
+        val itemId = uri.substringAfterLast("/")
+        return if (provider.isNotBlank() && itemId.isNotBlank()) provider to itemId else null
+    }
+
+    // ---- page-0 search augmentation -----------------------------------------------------------
+
+    /**
+     * When the user searches the library, also surface items whose ARTIST matches the query by
+     * genre association (Last.fm-backed), merged after the API results. [excludeArtistUris] skips
+     * resolution for artists already present (Artists tab); the Albums/Tracks tabs cannot pre-skip
+     * because the genre match is the artist URI, not the row item.
+     */
+    private suspend fun <T> augmentWithGenreMatches(
+        query: String?,
+        apiResults: List<T>,
+        excludeArtistUris: Set<String>,
+        uriOf: (T) -> String,
+        resolveArtistItems: suspend (provider: String, itemId: String) -> List<T>
+    ): List<T> {
+        if (query == null || query.length < GENRE_SEARCH_MIN_CHARS) return apiResults
+        val genreUris = runCatching { genreRepository.searchArtistUris(query) }
+            .getOrElse { emptyList() }
+            .filterNot { it in excludeArtistUris }
+        if (genreUris.isEmpty()) return apiResults
+        val extras = supervisorScope {
+            genreUris.map { uri ->
+                async {
+                    runCatching {
+                        parseMediaUri(uri)?.let { (prov, id) -> resolveArtistItems(prov, id) }
+                    }.getOrNull().orEmpty()
+                }
+            }.awaitAll().flatten()
+        }
+        val seen = apiResults.mapTo(HashSet(), uriOf)
+        return apiResults + extras.filter { seen.add(uriOf(it)) }
+    }
+
+    /** Radios search also offers non-library stations, flagged by name-match against the library. */
+    private suspend fun mergeRadioSearchResults(query: String?, apiResults: List<Radio>): List<Radio> {
+        if (query == null || query.length < RADIO_SEARCH_MIN_CHARS) return apiResults
+        val searchResults = runCatching {
+            musicRepository.search(query, mediaTypes = listOf(MediaType.RADIO), limit = RADIO_SEARCH_LIMIT).radios
+        }.getOrElse { emptyList() }
+        if (searchResults.isEmpty()) return apiResults
+        val seenUris = apiResults.mapTo(HashSet()) { it.uri }
+        val libraryNames = apiResults.mapTo(HashSet()) { it.name.lowercase() }
+        return apiResults + searchResults
+            .filter { seenUris.add(it.uri) }
+            .map { it.copy(inLibrary = it.name.lowercase() in libraryNames) }
+    }
+
+    // ---- tab pagers -----------------------------------------------------------------------------
+
+    private val artistsPager = LibraryPager(
+        scope = viewModelScope,
+        key = { it: Artist -> it.uri },
+        augmentFirstPage = { api ->
+            augmentWithGenreMatches(
+                query = searchFor(LibraryTabKey.ARTISTS),
+                apiResults = api,
+                excludeArtistUris = api.mapTo(HashSet()) { it.uri },
+                uriOf = { it.uri }
+            ) { provider, itemId -> listOfNotNull(musicRepository.getArtist(itemId, provider)) }
+        },
+        transformPage = { filterBySelectedProviders(it, LibraryTabKey.ARTISTS) { a -> a.providerDomains } },
+        onPageLoaded = { lastFmLibraryEnricher.enrichInBackground(it) }
+    ) { limit, offset ->
+        musicRepository.getArtists(
+            search = searchFor(LibraryTabKey.ARTISTS), limit = limit, offset = offset,
+            orderBy = orderByForTab(LibraryTabKey.ARTISTS.index),
+            favoriteOnly = favoriteOnlyForTab(LibraryTabKey.ARTISTS.index),
+            providerFilter = providerFilterFor(LibraryTabKey.ARTISTS)
+        )
+    }
+
+    private val albumsPager = LibraryPager(
+        scope = viewModelScope,
+        key = { it: Album -> it.uri },
+        augmentFirstPage = { api ->
+            augmentWithGenreMatches(
+                query = searchFor(LibraryTabKey.ALBUMS),
+                apiResults = api,
+                excludeArtistUris = emptySet(),
+                uriOf = { it.uri }
+            ) { provider, itemId ->
+                musicRepository.getArtistAlbums(itemId, provider).filter { it.uri.startsWith("library://") }
+            }
+        },
+        transformPage = { filterBySelectedProviders(it, LibraryTabKey.ALBUMS) { a -> a.providerDomains } }
+    ) { limit, offset ->
+        musicRepository.getAlbums(
+            search = searchFor(LibraryTabKey.ALBUMS), limit = limit, offset = offset,
+            orderBy = orderByForTab(LibraryTabKey.ALBUMS.index),
+            favoriteOnly = favoriteOnlyForTab(LibraryTabKey.ALBUMS.index),
+            providerFilter = providerFilterFor(LibraryTabKey.ALBUMS)
+        )
+    }
+
+    private val tracksPager = LibraryPager(
+        scope = viewModelScope,
+        key = { it: Track -> it.uri },
+        augmentFirstPage = { api ->
+            augmentWithGenreMatches(
+                query = searchFor(LibraryTabKey.TRACKS),
+                apiResults = api,
+                excludeArtistUris = emptySet(),
+                uriOf = { it.uri }
+            ) { provider, itemId ->
+                musicRepository.getArtistTracks(itemId, provider).filter { it.uri.startsWith("library://") }
+            }
+        },
+        transformPage = { filterBySelectedProviders(it, LibraryTabKey.TRACKS) { t -> t.providerDomains } }
+    ) { limit, offset ->
+        musicRepository.getTracks(
+            search = searchFor(LibraryTabKey.TRACKS), limit = limit, offset = offset,
+            orderBy = orderByForTab(LibraryTabKey.TRACKS.index),
+            favoriteOnly = favoriteOnlyForTab(LibraryTabKey.TRACKS.index),
+            providerFilter = providerFilterFor(LibraryTabKey.TRACKS)
+        )
+    }
+
+    private val playlistsPager = LibraryPager(
+        scope = viewModelScope,
+        key = { it: Playlist -> it.uri },
+        transformPage = { filterBySelectedProviders(it, LibraryTabKey.PLAYLISTS) { p -> p.providerDomains } }
+    ) { limit, offset ->
+        musicRepository.getPlaylists(
+            search = searchFor(LibraryTabKey.PLAYLISTS), limit = limit, offset = offset,
+            orderBy = orderByForTab(LibraryTabKey.PLAYLISTS.index),
+            favoriteOnly = favoriteOnlyForTab(LibraryTabKey.PLAYLISTS.index),
+            providerFilter = providerFilterFor(LibraryTabKey.PLAYLISTS)
+        )
+    }
+
+    private val radiosPager = LibraryPager(
+        scope = viewModelScope,
+        key = { it: Radio -> it.uri },
+        augmentFirstPage = { api -> mergeRadioSearchResults(searchFor(LibraryTabKey.RADIOS), api) },
+        transformPage = { filterBySelectedProviders(it, LibraryTabKey.RADIOS) { r -> r.providerDomains } }
+    ) { limit, offset ->
+        musicRepository.getRadios(
+            search = searchFor(LibraryTabKey.RADIOS), limit = limit, offset = offset,
+            orderBy = orderByForTab(LibraryTabKey.RADIOS.index),
+            favoriteOnly = favoriteOnlyForTab(LibraryTabKey.RADIOS.index),
+            providerFilter = providerFilterFor(LibraryTabKey.RADIOS)
+        )
+    }
+
+    // Audiobooks are modeled as Track (single playable item; chapters arrive on play).
+    private val audiobooksPager = LibraryPager(
+        scope = viewModelScope,
+        key = { it: Track -> it.uri },
+        transformPage = { filterBySelectedProviders(it, LibraryTabKey.AUDIOBOOKS) { t -> t.providerDomains } }
+    ) { limit, offset ->
+        musicRepository.getAudiobooks(
+            search = searchFor(LibraryTabKey.AUDIOBOOKS), limit = limit, offset = offset,
+            orderBy = orderByForTab(LibraryTabKey.AUDIOBOOKS.index),
+            favoriteOnly = favoriteOnlyForTab(LibraryTabKey.AUDIOBOOKS.index),
+            providerFilter = providerFilterFor(LibraryTabKey.AUDIOBOOKS)
+        )
+    }
+
+    private fun pagerFor(tab: LibraryTabKey): LibraryPager<*>? = when (tab) {
+        LibraryTabKey.ARTISTS -> artistsPager
+        LibraryTabKey.ALBUMS -> albumsPager
+        LibraryTabKey.TRACKS -> tracksPager
+        LibraryTabKey.PLAYLISTS -> playlistsPager
+        LibraryTabKey.RADIOS -> radiosPager
+        LibraryTabKey.AUDIOBOOKS -> audiobooksPager
+        LibraryTabKey.BROWSE -> null // Browse is a folder tree, not a paged list.
+    }
+
+    private fun pagerForIndex(index: Int): LibraryPager<*>? =
+        LibraryTabKey.fromIndex(index)?.let { pagerFor(it) }
+
+    private val allPagers
+        get() = listOf(artistsPager, albumsPager, tracksPager, playlistsPager, radiosPager, audiobooksPager)
+
+    val artists: StateFlow<List<Artist>> = artistsPager.items
+    val albums: StateFlow<List<Album>> = albumsPager.items
+    val tracks: StateFlow<List<Track>> = tracksPager.items
+    val playlists: StateFlow<List<Playlist>> = playlistsPager.items
+    val radios: StateFlow<List<Radio>> = radiosPager.items
+    val audiobooks: StateFlow<List<Track>> = audiobooksPager.items
+
+    // ---- browse (folder tree) state ----------------------------------------------------------
+
+    private val _browseItemsRaw = MutableStateFlow<List<BrowseItem>>(emptyList())
+    private val _browseItems = MutableStateFlow<List<BrowseItem>>(emptyList())
+    val browseItems: StateFlow<List<BrowseItem>> = _browseItems.asStateFlow()
+    private val _browsePath = MutableStateFlow<String?>(null)
+    val browsePath: StateFlow<String?> = _browsePath.asStateFlow()
+    private val browsePathStack = mutableListOf<String?>()
+    private val _browseLoading = MutableStateFlow(false)
+
+    // ---- loading state (derived from the active tab's pager + browse) -------------------------
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val isLoading: StateFlow<Boolean> = _currentTab
+        .flatMapLatest { tab ->
+            val pagerLoading = pagerForIndex(tab)?.loading
+            if (pagerLoading != null) {
+                combine(pagerLoading, _browseLoading) { pager, browse -> pager || browse }
+            } else {
+                _browseLoading
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val isLoadingMore: StateFlow<Boolean> = _currentTab
+        .flatMapLatest { tab -> pagerForIndex(tab)?.loadingMore ?: flowOf(false) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
+
+    // ---- playlist management state (declared before init: collectors may run synchronously) ----
+
+    private val _editablePlaylists = MutableStateFlow<List<Playlist>>(emptyList())
+    val editablePlaylists: StateFlow<List<Playlist>> = _editablePlaylists.asStateFlow()
+    private val _isLoadingEditablePlaylists = MutableStateFlow(false)
+    val isLoadingEditablePlaylists: StateFlow<Boolean> = _isLoadingEditablePlaylists.asStateFlow()
+    private val _addingToPlaylistId = MutableStateFlow<String?>(null)
+    val addingToPlaylistId: StateFlow<String?> = _addingToPlaylistId.asStateFlow()
+    private val _playlistContainsTrack = MutableStateFlow<Set<String>>(emptySet())
+    val playlistContainsTrack: StateFlow<Set<String>> = _playlistContainsTrack.asStateFlow()
 
     init {
         // Load all settings eagerly before any data loading
@@ -213,16 +429,9 @@ class LibraryViewModel @Inject constructor(
             wsClient.connectionState
                 .collect { state ->
                     if (state is ConnectionState.Connected && _settingsLoaded.value) {
-                        val isEmpty = when (_currentTab.value) {
-                            TAB_ARTISTS -> _artists.value.isEmpty()
-                            TAB_ALBUMS -> _albums.value.isEmpty()
-                            TAB_TRACKS -> _tracks.value.isEmpty()
-                            TAB_PLAYLISTS -> _playlists.value.isEmpty()
-                            TAB_RADIOS -> _radios.value.isEmpty()
-                            TAB_AUDIOBOOKS -> _audiobooks.value.isEmpty()
-                            else -> false
-                        }
-                        if (isEmpty) reloadCurrentTab()
+                        val currentEmpty =
+                            pagerForIndex(_currentTab.value)?.items?.value?.isEmpty() == true
+                        if (currentEmpty) reloadCurrentTab()
                     }
                 }
         }
@@ -244,17 +453,18 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
+    fun onScreenVisible() {
+        if (pendingReload) {
+            pendingReload = false
+            reloadCurrentTab()
+        }
+    }
+
     private fun resetForAccountSwitch() {
         Log.d(TAG, "Session reset: dropping cached library lists")
         searchJob?.cancel()
-        mediaEventJob?.cancel()
         _searchQuery.value = ""
-        _artists.value = emptyList()
-        _albums.value = emptyList()
-        _tracks.value = emptyList()
-        _playlists.value = emptyList()
-        _radios.value = emptyList()
-        _audiobooks.value = emptyList()
+        allPagers.forEach { it.clear() }
         _editablePlaylists.value = emptyList()
         _playlistContainsTrack.value = emptySet()
         _browseItemsRaw.value = emptyList()
@@ -262,15 +472,8 @@ class LibraryViewModel @Inject constructor(
         _browsePath.value = null
         browsePathStack.clear()
         _selectedProvidersMap.value = emptyMap()
-        hasMoreArtists = true
-        hasMoreAlbums = true
-        hasMoreTracks = true
-        hasMorePlaylists = true
-        hasMoreRadios = true
-        hasMoreAudiobooks = true
         pendingReload = false
-        _isLoading.value = false
-        _isLoadingMore.value = false
+        _browseLoading.value = false
         _isRefreshing.value = false
     }
 
@@ -286,17 +489,6 @@ class LibraryViewModel @Inject constructor(
             }
         }
     }
-
-    private val currentSearch: String? get() = _searchQuery.value.ifBlank { null }
-    private val currentOrderBy: String get() = orderByForTab(_currentTab.value)
-    private val currentFavoriteOnly: Boolean get() = favoriteOnlyForTab(_currentTab.value)
-
-    private fun orderByForTab(tab: Int): String {
-        val base = (_sortOptions.value[tab] ?: SortOption.NAME).apiValue
-        return if (_sortDescendings.value[tab] == true) "${base}_desc" else base
-    }
-
-    private fun favoriteOnlyForTab(tab: Int): Boolean = _favoritesOnlyMap.value[tab] ?: false
 
     fun setCurrentTab(tab: Int) {
         if (_currentTab.value != tab) {
@@ -360,47 +552,6 @@ class LibraryViewModel @Inject constructor(
         reloadCurrentTab()
     }
 
-    // MA's library_items `provider` filter matches the provider INSTANCE id (e.g. deezer--GWnPbDSt),
-    // not the bare domain. Sending the domain returns zero results, so the server filter must carry
-    // the selected instance ids.
-    private fun providerFilterArgs(): List<String>? =
-        selectedProviderInstanceIds().takeIf { it.isNotEmpty() }
-
-    private fun selectedProviderInstanceIds(tab: Int = _currentTab.value): List<String> {
-        val selected = _selectedProvidersMap.value[tab] ?: emptySet()
-        if (selected.isEmpty()) return emptyList()
-        val providersForTab = providerManifestCache.musicProvidersForTab(tab)
-        return selected
-            .mapNotNull { selectedId ->
-                providersForTab.firstOrNull { it.instanceId == selectedId }?.instanceId
-                    ?: providersForTab.firstOrNull { it.domain == selectedId }?.instanceId
-            }
-            .distinct()
-    }
-
-    private fun selectedProviderDomains(tab: Int = _currentTab.value): List<String> {
-        val selected = _selectedProvidersMap.value[tab] ?: emptySet()
-        if (selected.isEmpty()) return emptyList()
-        val providersForTab = providerManifestCache.musicProvidersForTab(tab)
-        return selected
-            .mapNotNull { selectedId ->
-                providersForTab.firstOrNull { it.instanceId == selectedId }?.domain
-                    ?: providersForTab.firstOrNull { it.domain == selectedId }?.domain
-            }
-            .distinct()
-    }
-
-    private fun <T> filterBySelectedProviders(
-        items: List<T>,
-        providerDomains: (T) -> List<String>
-    ): List<T> {
-        val selectedDomains = selectedProviderDomains().toSet()
-        if (selectedDomains.isEmpty()) return items
-        return items.filter { item ->
-            providerDomains(item).any { it in selectedDomains }
-        }
-    }
-
     fun toggleLibraryDisplayMode() {
         val tab = _currentTab.value
         val current = _displayModes.value[tab] ?: defaultDisplayModeForTab(tab)
@@ -408,364 +559,47 @@ class LibraryViewModel @Inject constructor(
             LibraryDisplayMode.LIST -> LibraryDisplayMode.GRID
             LibraryDisplayMode.GRID -> LibraryDisplayMode.LIST
         }
-        _displayModes.value = _displayModes.value + (_currentTab.value to newMode)
+        _displayModes.value = _displayModes.value + (tab to newMode)
         viewModelScope.launch {
-            LibraryTabKey.fromIndex(_currentTab.value)?.let { tabKey ->
+            LibraryTabKey.fromIndex(tab)?.let { tabKey ->
                 settingsRepository.setLibraryDisplayMode(tabKey, newMode)
             }
         }
     }
 
     private fun reloadCurrentTab() {
-        when (_currentTab.value) {
-            TAB_ARTISTS -> loadArtists()
-            TAB_ALBUMS -> loadAlbums()
-            TAB_TRACKS -> loadTracks()
-            TAB_PLAYLISTS -> loadPlaylists()
-            TAB_RADIOS -> loadRadios()
-            TAB_AUDIOBOOKS -> loadAudiobooks()
-            TAB_BROWSE -> applyBrowseFilterSort()
-        }
+        val tab = LibraryTabKey.fromIndex(_currentTab.value) ?: return
+        if (tab == LibraryTabKey.BROWSE) applyBrowseFilterSort() else pagerFor(tab)?.reload()
     }
 
-    private fun parseMediaUri(uri: String): Pair<String, String>? {
-        val sep = uri.indexOf("://")
-        if (sep < 0) return null
-        val provider = uri.substring(0, sep)
-        val itemId = uri.substringAfterLast("/")
-        return if (provider.isNotBlank() && itemId.isNotBlank()) provider to itemId else null
-    }
+    fun loadArtists() = artistsPager.reload()
+    fun loadMoreArtists() = artistsPager.loadMore()
+    fun loadAlbums() = albumsPager.reload()
+    fun loadMoreAlbums() = albumsPager.loadMore()
+    fun loadTracks() = tracksPager.reload()
+    fun loadMoreTracks() = tracksPager.loadMore()
+    fun loadPlaylists() = playlistsPager.reload()
+    fun loadMorePlaylists() = playlistsPager.loadMore()
+    fun loadRadios() = radiosPager.reload()
+    fun loadMoreRadios() = radiosPager.loadMore()
+    fun loadAudiobooks() = audiobooksPager.reload()
+    fun loadMoreAudiobooks() = audiobooksPager.loadMore()
 
-    fun loadArtists() {
-        viewModelScope.launch {
-            _isLoading.value = true
-            try {
-                val query = currentSearch
-                val apiDeferred = async {
-                    musicRepository.getArtists(
-                        search = query, limit = PAGE_SIZE, offset = 0, orderBy = currentOrderBy, favoriteOnly = currentFavoriteOnly,
-                        providerFilter = providerFilterArgs()
-                    )
-                }
-                val genreDeferred = if (query != null && query.length >= 3) {
-                    async { runCatching { genreRepository.searchArtistUris(query) }.getOrElse { emptyList() } }
-                } else null
-
-                val apiResults = apiDeferred.await()
-                val genreUris = genreDeferred?.await().orEmpty()
-
-                val merged = if (genreUris.isNotEmpty()) {
-                    val existingUris = apiResults.map { it.uri }.toSet()
-                    val newUris = genreUris.filter { it !in existingUris }
-                    val genreArtists = if (newUris.isNotEmpty()) {
-                        supervisorScope {
-                            newUris.map { uri -> async { runCatching { parseMediaUri(uri)?.let { (prov, id) -> musicRepository.getArtist(id, prov) } }.getOrNull() } }.awaitAll().filterNotNull()
-                        }
-                    } else emptyList()
-                    val seenUris = existingUris.toMutableSet()
-                    apiResults + genreArtists.filter { seenUris.add(it.uri) }
-                } else apiResults
-
-                _artists.value = filterBySelectedProviders(merged) { it.providerDomains }
-                hasMoreArtists = apiResults.size >= PAGE_SIZE
-                lastFmLibraryEnricher.enrichInBackground(apiResults)
-            } catch (_: Exception) {}
-            _isLoading.value = false
-        }
-    }
-
-    fun loadMoreArtists() {
-        if (_isLoadingMore.value || !hasMoreArtists) return
-        _isLoadingMore.value = true
-        viewModelScope.launch {
-            try {
-                val items = musicRepository.getArtists(
-                    search = currentSearch,
-                    limit = PAGE_SIZE,
-                    offset = _artists.value.size,
-                    orderBy = currentOrderBy,
-                    favoriteOnly = currentFavoriteOnly,
-                    providerFilter = providerFilterArgs()
-                )
-                _artists.value = _artists.value + filterBySelectedProviders(items) { it.providerDomains }
-                hasMoreArtists = items.size >= PAGE_SIZE
-                lastFmLibraryEnricher.enrichInBackground(items)
-            } catch (_: Exception) {
-            } finally {
-                _isLoadingMore.value = false
-            }
-        }
-    }
-
-    fun loadAlbums() {
-        viewModelScope.launch {
-            _isLoading.value = true
-            try {
-                val query = currentSearch
-                val apiDeferred = async {
-                    musicRepository.getAlbums(
-                        search = query, limit = PAGE_SIZE, offset = 0, orderBy = currentOrderBy, favoriteOnly = currentFavoriteOnly,
-                        providerFilter = providerFilterArgs()
-                    )
-                }
-                val genreDeferred = if (query != null && query.length >= 3) {
-                    async { runCatching { genreRepository.searchArtistUris(query) }.getOrElse { emptyList() } }
-                } else null
-
-                val apiResults = apiDeferred.await()
-                val genreUris = genreDeferred?.await().orEmpty()
-
-                val merged = if (genreUris.isNotEmpty()) {
-                    val genreAlbums: List<Album> = supervisorScope {
-                        genreUris.map { uri ->
-                            async {
-                                runCatching {
-                                    parseMediaUri(uri)?.let { (prov, id) -> musicRepository.getArtistAlbums(id, prov) }
-                                }.getOrNull().orEmpty()
-                            }
-                        }.awaitAll().flatten()
-                    }.filter { it.uri.startsWith("library://") }
-                    val seenUris = apiResults.map { it.uri }.toMutableSet()
-                    apiResults + genreAlbums.filter { seenUris.add(it.uri) }
-                } else apiResults
-
-                _albums.value = filterBySelectedProviders(merged) { it.providerDomains }
-                hasMoreAlbums = apiResults.size >= PAGE_SIZE
-            } catch (_: Exception) {}
-            _isLoading.value = false
-        }
-    }
-
-    fun loadMoreAlbums() {
-        if (_isLoadingMore.value || !hasMoreAlbums) return
-        _isLoadingMore.value = true
-        viewModelScope.launch {
-            try {
-                val items = musicRepository.getAlbums(
-                    search = currentSearch,
-                    limit = PAGE_SIZE,
-                    offset = _albums.value.size,
-                    orderBy = currentOrderBy,
-                    favoriteOnly = currentFavoriteOnly,
-                    providerFilter = providerFilterArgs()
-                )
-                _albums.value = _albums.value + filterBySelectedProviders(items) { it.providerDomains }
-                hasMoreAlbums = items.size >= PAGE_SIZE
-            } catch (_: Exception) {
-            } finally {
-                _isLoadingMore.value = false
-            }
-        }
-    }
-
-    fun loadTracks() {
-        viewModelScope.launch {
-            _isLoading.value = true
-            try {
-                val query = currentSearch
-                val apiDeferred = async {
-                    musicRepository.getTracks(
-                        search = query, limit = PAGE_SIZE, offset = 0, orderBy = currentOrderBy, favoriteOnly = currentFavoriteOnly,
-                        providerFilter = providerFilterArgs()
-                    )
-                }
-                val genreDeferred = if (query != null && query.length >= 3) {
-                    async { runCatching { genreRepository.searchArtistUris(query) }.getOrElse { emptyList() } }
-                } else null
-
-                val apiResults = apiDeferred.await()
-                val genreUris = genreDeferred?.await().orEmpty()
-
-                val merged = if (genreUris.isNotEmpty()) {
-                    val genreTracks: List<Track> = supervisorScope {
-                        genreUris.map { uri ->
-                            async {
-                                runCatching {
-                                    parseMediaUri(uri)?.let { (prov, id) -> musicRepository.getArtistTracks(id, prov) }
-                                }.getOrNull().orEmpty()
-                            }
-                        }.awaitAll().flatten()
-                    }.filter { it.uri.startsWith("library://") }
-                    val seenUris = apiResults.map { it.uri }.toMutableSet()
-                    apiResults + genreTracks.filter { seenUris.add(it.uri) }
-                } else apiResults
-
-                _tracks.value = filterBySelectedProviders(merged) { it.providerDomains }
-                hasMoreTracks = apiResults.size >= PAGE_SIZE
-            } catch (_: Exception) {}
-            _isLoading.value = false
-        }
-    }
-
-    fun loadMoreTracks() {
-        if (_isLoadingMore.value || !hasMoreTracks) return
-        _isLoadingMore.value = true
-        viewModelScope.launch {
-            try {
-                val items = musicRepository.getTracks(
-                    search = currentSearch,
-                    limit = PAGE_SIZE,
-                    offset = _tracks.value.size,
-                    orderBy = currentOrderBy,
-                    favoriteOnly = currentFavoriteOnly,
-                    providerFilter = providerFilterArgs()
-                )
-                _tracks.value = _tracks.value + filterBySelectedProviders(items) { it.providerDomains }
-                hasMoreTracks = items.size >= PAGE_SIZE
-            } catch (_: Exception) {
-            } finally {
-                _isLoadingMore.value = false
-            }
-        }
-    }
-
-    fun loadPlaylists() {
-        viewModelScope.launch {
-            _isLoading.value = true
-            try {
-                val items = musicRepository.getPlaylists(
-                    search = currentSearch,
-                    limit = PAGE_SIZE,
-                    offset = 0,
-                    orderBy = currentOrderBy,
-                    favoriteOnly = currentFavoriteOnly,
-                    providerFilter = providerFilterArgs()
-                )
-                _playlists.value = filterBySelectedProviders(items) { it.providerDomains }
-                hasMorePlaylists = items.size >= PAGE_SIZE
-            } catch (_: Exception) {}
-            _isLoading.value = false
-        }
-    }
-
-    fun loadMorePlaylists() {
-        if (_isLoadingMore.value || !hasMorePlaylists) return
-        _isLoadingMore.value = true
-        viewModelScope.launch {
-            try {
-                val items = musicRepository.getPlaylists(
-                    search = currentSearch,
-                    limit = PAGE_SIZE,
-                    offset = _playlists.value.size,
-                    orderBy = currentOrderBy,
-                    favoriteOnly = currentFavoriteOnly,
-                    providerFilter = providerFilterArgs()
-                )
-                _playlists.value = _playlists.value + filterBySelectedProviders(items) { it.providerDomains }
-                hasMorePlaylists = items.size >= PAGE_SIZE
-            } catch (_: Exception) {
-            } finally {
-                _isLoadingMore.value = false
-            }
-        }
-    }
-
-    fun loadRadios() {
-        viewModelScope.launch {
-            _isLoading.value = true
-            try {
-                val query = currentSearch
-                val libraryDeferred = async {
-                    musicRepository.getRadios(
-                        search = query, limit = PAGE_SIZE, offset = 0, orderBy = currentOrderBy, favoriteOnly = currentFavoriteOnly,
-                        providerFilter = providerFilterArgs()
-                    )
-                }
-                val searchDeferred = if (query != null && query.length >= 2) {
-                    async {
-                        runCatching {
-                            musicRepository.search(query, mediaTypes = listOf(MediaType.RADIO), limit = 25).radios
-                        }.getOrElse { emptyList() }
-                    }
-                } else null
-
-                val libraryResults = libraryDeferred.await()
-                val searchResults = searchDeferred?.await().orEmpty()
-
-                val merged = if (searchResults.isNotEmpty()) {
-                    val seenUris = libraryResults.map { it.uri }.toMutableSet()
-                    val libraryNames = libraryResults.map { it.name.lowercase() }.toSet()
-                    libraryResults + searchResults
-                        .filter { seenUris.add(it.uri) }
-                        .map { radio ->
-                            val alreadyInLibrary = radio.name.lowercase() in libraryNames
-                            radio.copy(inLibrary = alreadyInLibrary)
-                        }
-                } else libraryResults
-
-                _radios.value = filterBySelectedProviders(merged) { it.providerDomains }
-                hasMoreRadios = libraryResults.size >= PAGE_SIZE
-            } catch (_: Exception) {}
-            _isLoading.value = false
-        }
-    }
-
-    fun loadMoreRadios() {
-        if (_isLoadingMore.value || !hasMoreRadios) return
-        _isLoadingMore.value = true
-        viewModelScope.launch {
-            try {
-                val items = musicRepository.getRadios(
-                    search = currentSearch,
-                    limit = PAGE_SIZE,
-                    offset = _radios.value.size,
-                    orderBy = currentOrderBy,
-                    favoriteOnly = currentFavoriteOnly,
-                    providerFilter = providerFilterArgs()
-                )
-                _radios.value = _radios.value + filterBySelectedProviders(items) { it.providerDomains }
-                hasMoreRadios = items.size >= PAGE_SIZE
-            } catch (_: Exception) {
-            } finally {
-                _isLoadingMore.value = false
-            }
-        }
-    }
-
-    fun loadAudiobooks() {
-        viewModelScope.launch {
-            _isLoading.value = true
-            try {
-                val items = musicRepository.getAudiobooks(
-                    search = currentSearch,
-                    limit = PAGE_SIZE,
-                    offset = 0,
-                    orderBy = currentOrderBy,
-                    favoriteOnly = currentFavoriteOnly,
-                    providerFilter = providerFilterArgs()
-                )
-                _audiobooks.value = filterBySelectedProviders(items) { it.providerDomains }
-                hasMoreAudiobooks = items.size >= PAGE_SIZE
-            } catch (_: Exception) {}
-            _isLoading.value = false
-        }
-    }
-
-    fun loadMoreAudiobooks() {
-        if (_isLoadingMore.value || !hasMoreAudiobooks) return
-        _isLoadingMore.value = true
-        viewModelScope.launch {
-            try {
-                val items = musicRepository.getAudiobooks(
-                    search = currentSearch,
-                    limit = PAGE_SIZE,
-                    offset = _audiobooks.value.size,
-                    orderBy = currentOrderBy,
-                    favoriteOnly = currentFavoriteOnly,
-                    providerFilter = providerFilterArgs()
-                )
-                _audiobooks.value = _audiobooks.value + filterBySelectedProviders(items) { it.providerDomains }
-                hasMoreAudiobooks = items.size >= PAGE_SIZE
-            } catch (_: Exception) {
-            } finally {
-                _isLoadingMore.value = false
-            }
-        }
+    /**
+     * Warm the tabs on either side of [tab] so a swipe lands on populated content instead of an
+     * empty page that fills in after settling. Fetches only an empty neighbour's first page, with
+     * that tab's own sort/favourite/provider params and no search (the query belongs to the
+     * active tab). The active-tab spinner is unaffected: [isLoading] only mirrors the CURRENT
+     * tab's pager.
+     */
+    fun preloadAdjacentTabs(tab: Int) {
+        pagerForIndex(tab - 1)?.reloadIfEmpty()
+        pagerForIndex(tab + 1)?.reloadIfEmpty()
     }
 
     fun loadBrowse(path: String? = null) {
         viewModelScope.launch {
-            _isLoading.value = true
+            _browseLoading.value = true
             try {
                 when {
                     path == "genres://" -> {
@@ -804,7 +638,7 @@ class LibraryViewModel @Inject constructor(
                 _browsePath.value = path
                 applyBrowseFilterSort()
             } catch (_: Exception) {}
-            _isLoading.value = false
+            _browseLoading.value = false
         }
     }
 
@@ -835,83 +669,6 @@ class LibraryViewModel @Inject constructor(
     }
 
     /**
-     * Warm the tabs on either side of [tab] so a swipe lands on populated content instead of an
-     * empty page that fills in after settling. Silent: it never toggles [_isLoading], fetches only
-     * an empty neighbour's first page, and uses that tab's own sort/favourite/provider params.
-     */
-    fun preloadAdjacentTabs(tab: Int) {
-        preloadTab(tab - 1)
-        preloadTab(tab + 1)
-    }
-
-    private fun preloadTab(tab: Int) {
-        val empty = when (tab) {
-            TAB_ARTISTS -> _artists.value.isEmpty()
-            TAB_ALBUMS -> _albums.value.isEmpty()
-            TAB_TRACKS -> _tracks.value.isEmpty()
-            TAB_PLAYLISTS -> _playlists.value.isEmpty()
-            TAB_RADIOS -> _radios.value.isEmpty()
-            TAB_AUDIOBOOKS -> _audiobooks.value.isEmpty()
-            else -> false // Browse loads on demand
-        }
-        if (!empty) return
-        val orderBy = orderByForTab(tab)
-        val fav = favoriteOnlyForTab(tab)
-        val pf = selectedProviderInstanceIds(tab).takeIf { it.isNotEmpty() }
-        // Publish only if the tab is STILL empty on completion: a real load() may have started
-        // concurrently (and even paged further), so never clobber a non-empty list back to page 0.
-        viewModelScope.launch {
-            runCatching {
-                when (tab) {
-                    TAB_ARTISTS -> {
-                        val items = musicRepository.getArtists(null, PAGE_SIZE, 0, orderBy, fav, pf)
-                        if (_artists.value.isEmpty()) {
-                            _artists.value = items
-                            hasMoreArtists = items.size >= PAGE_SIZE
-                            lastFmLibraryEnricher.enrichInBackground(items)
-                        }
-                    }
-                    TAB_ALBUMS -> {
-                        val items = musicRepository.getAlbums(null, PAGE_SIZE, 0, orderBy, fav, pf)
-                        if (_albums.value.isEmpty()) {
-                            _albums.value = items
-                            hasMoreAlbums = items.size >= PAGE_SIZE
-                        }
-                    }
-                    TAB_TRACKS -> {
-                        val items = musicRepository.getTracks(null, PAGE_SIZE, 0, orderBy, fav, pf)
-                        if (_tracks.value.isEmpty()) {
-                            _tracks.value = items
-                            hasMoreTracks = items.size >= PAGE_SIZE
-                        }
-                    }
-                    TAB_PLAYLISTS -> {
-                        val items = musicRepository.getPlaylists(null, PAGE_SIZE, 0, orderBy, fav, pf)
-                        if (_playlists.value.isEmpty()) {
-                            _playlists.value = items
-                            hasMorePlaylists = items.size >= PAGE_SIZE
-                        }
-                    }
-                    TAB_RADIOS -> {
-                        val items = musicRepository.getRadios(null, PAGE_SIZE, 0, orderBy, fav, pf)
-                        if (_radios.value.isEmpty()) {
-                            _radios.value = items
-                            hasMoreRadios = items.size >= PAGE_SIZE
-                        }
-                    }
-                    TAB_AUDIOBOOKS -> {
-                        val items = musicRepository.getAudiobooks(null, PAGE_SIZE, 0, orderBy, fav, pf)
-                        if (_audiobooks.value.isEmpty()) {
-                            _audiobooks.value = items
-                            hasMoreAudiobooks = items.size >= PAGE_SIZE
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /**
      * Play (or enqueue) every playable item under a Browse folder, e.g. a whole album or artist
      * folder on the filesystem. Walks the subtree breadth-first so tracks come out in folder order,
      * bounded by [FOLDER_MAX_TRACKS]/[FOLDER_MAX_FOLDERS] so a large tree can't hang the UI.
@@ -920,7 +677,7 @@ class LibraryViewModel @Inject constructor(
         val queueId = playerRepository.requireSelectedPlayerId() ?: return
         val rootPath = folder.path ?: folder.uri
         viewModelScope.launch {
-            _isLoading.value = true
+            _browseLoading.value = true
             try {
                 val uris = collectFolderTrackUris(rootPath)
                 if (uris.isEmpty()) {
@@ -937,7 +694,7 @@ class LibraryViewModel @Inject constructor(
                 Log.w(TAG, "playBrowseFolder failed: ${e.message}")
                 _error.tryEmit("Not connected to server")
             } finally {
-                _isLoading.value = false
+                _browseLoading.value = false
             }
         }
     }
@@ -964,6 +721,8 @@ class LibraryViewModel @Inject constructor(
         return collected
     }
 
+    // ---- playback actions ----------------------------------------------------------------------
+
     fun playTrack(track: Track) {
         playUri(track.uri)
     }
@@ -976,11 +735,80 @@ class LibraryViewModel @Inject constructor(
         playUri(playlist.uri)
     }
 
+    fun quickPlay(uri: String) {
+        val queueId = playerRepository.requireSelectedPlayerId() ?: return
+        viewModelScope.launch {
+            try {
+                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.NORMAL)
+                musicRepository.playMedia(queueId, uri, option = "replace")
+            } catch (e: Exception) {
+                Log.w(TAG, "quickPlay failed: ${e.message}")
+                _error.tryEmit("Not connected to server")
+            }
+        }
+    }
+
+    fun playUri(uri: String) {
+        val queueId = playerRepository.requireSelectedPlayerId() ?: return
+        viewModelScope.launch {
+            try {
+                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.NORMAL)
+                musicRepository.playMedia(queueId, uri)
+            } catch (e: Exception) {
+                Log.w(TAG, "play failed: ${e.message}")
+                _error.tryEmit("Not connected to server")
+            }
+        }
+    }
+
+    fun playOnPlayer(uri: String, playerId: String) {
+        viewModelScope.launch {
+            try {
+                playerRepository.setQueueFilterMode(playerId, PlayerRepository.QueueFilterMode.NORMAL)
+                musicRepository.playMedia(playerId, uri)
+            } catch (e: Exception) {
+                Log.w(TAG, "playOnPlayer failed: ${e.message}")
+                _error.tryEmit("Not connected to server")
+            }
+        }
+    }
+
+    fun enqueue(uri: String) {
+        val queueId = playerRepository.requireSelectedPlayerId() ?: return
+        viewModelScope.launch {
+            try {
+                musicRepository.playMedia(queueId, uri, option = "add")
+            } catch (e: Exception) {
+                Log.w(TAG, "enqueue failed: ${e.message}")
+                _error.tryEmit("Not connected to server")
+            }
+        }
+    }
+
+    fun startRadio(uri: String) {
+        val queueId = playerRepository.requireSelectedPlayerId() ?: return
+        viewModelScope.launch {
+            try {
+                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.RADIO_SMART)
+                musicRepository.playMedia(queueId, uri, radioMode = true)
+            } catch (e: Exception) {
+                Log.w(TAG, "startRadio failed: ${e.message}")
+                _error.tryEmit("Not connected to server")
+            }
+        }
+    }
+
+    fun addTrackToQueue(track: Track) {
+        enqueue(track.uri)
+    }
+
+    // ---- playlist management -------------------------------------------------------------------
+
     fun createPlaylist(name: String) {
         viewModelScope.launch {
             try {
                 val playlist = musicRepository.createPlaylist(name)
-                _playlists.value = _playlists.value + playlist
+                playlistsPager.update { it + playlist }
                 _editablePlaylists.value = _editablePlaylists.value + playlist
             } catch (e: Exception) {
                 Log.w(TAG, "createPlaylist failed: ${e.message}")
@@ -1058,7 +886,7 @@ class LibraryViewModel @Inject constructor(
             try {
                 val playlist = musicRepository.createPlaylist(name)
                 musicRepository.addTrackToPlaylist(playlist, trackUri)
-                _playlists.value = _playlists.value + playlist
+                playlistsPager.update { it + playlist }
                 _editablePlaylists.value = _editablePlaylists.value + playlist
                 _playlistContainsTrack.value = _playlistContainsTrack.value + playlist.uri
             } catch (e: Exception) {
@@ -1068,94 +896,29 @@ class LibraryViewModel @Inject constructor(
         }
     }
 
-    fun quickPlay(uri: String) {
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.NORMAL)
-                musicRepository.playMedia(queueId, uri, option = "replace")
-            } catch (e: Exception) {
-                Log.w(TAG, "quickPlay failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun playUri(uri: String) {
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.NORMAL)
-                musicRepository.playMedia(queueId, uri)
-            } catch (e: Exception) {
-                Log.w(TAG, "play failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun playOnPlayer(uri: String, playerId: String) {
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(playerId, PlayerRepository.QueueFilterMode.NORMAL)
-                musicRepository.playMedia(playerId, uri)
-            } catch (e: Exception) {
-                Log.w(TAG, "playOnPlayer failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun enqueue(uri: String) {
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                musicRepository.playMedia(queueId, uri, option = "add")
-            } catch (e: Exception) {
-                Log.w(TAG, "enqueue failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun startRadio(uri: String) {
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.RADIO_SMART)
-                musicRepository.playMedia(queueId, uri, radioMode = true)
-            } catch (e: Exception) {
-                Log.w(TAG, "startRadio failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun addTrackToQueue(track: Track) {
-        enqueue(track.uri)
-    }
+    // ---- item state toggles ----------------------------------------------------------------------
 
     fun toggleFavorite(uri: String, mediaType: MediaType, itemId: String, currentFavorite: Boolean) {
         viewModelScope.launch {
             try {
                 musicRepository.setFavorite(uri, mediaType, itemId, !currentFavorite)
                 when (mediaType) {
-                    MediaType.ARTIST -> _artists.update { list ->
+                    MediaType.ARTIST -> artistsPager.update { list ->
                         list.map { if (it.itemId == itemId) it.copy(favorite = !currentFavorite) else it }
                     }
-                    MediaType.ALBUM -> _albums.update { list ->
+                    MediaType.ALBUM -> albumsPager.update { list ->
                         list.map { if (it.itemId == itemId) it.copy(favorite = !currentFavorite) else it }
                     }
-                    MediaType.TRACK -> _tracks.update { list ->
+                    MediaType.TRACK -> tracksPager.update { list ->
                         list.map { if (it.itemId == itemId) it.copy(favorite = !currentFavorite) else it }
                     }
-                    MediaType.PLAYLIST -> _playlists.update { list ->
+                    MediaType.PLAYLIST -> playlistsPager.update { list ->
                         list.map { if (it.itemId == itemId) it.copy(favorite = !currentFavorite) else it }
                     }
-                    MediaType.RADIO -> _radios.update { list ->
+                    MediaType.RADIO -> radiosPager.update { list ->
                         list.map { if (it.itemId == itemId) it.copy(favorite = !currentFavorite) else it }
                     }
-                    MediaType.AUDIOBOOK -> _audiobooks.update { list ->
+                    MediaType.AUDIOBOOK -> audiobooksPager.update { list ->
                         list.map { if (it.itemId == itemId) it.copy(favorite = !currentFavorite) else it }
                     }
                 }
@@ -1170,12 +933,12 @@ class LibraryViewModel @Inject constructor(
             try {
                 musicRepository.removeFromLibrary(mediaType, uri, itemId)
                 when (mediaType) {
-                    MediaType.ARTIST -> _artists.update { list -> list.filter { it.itemId != itemId } }
-                    MediaType.ALBUM -> _albums.update { list -> list.filter { it.itemId != itemId } }
-                    MediaType.TRACK -> _tracks.update { list -> list.filter { it.itemId != itemId } }
-                    MediaType.PLAYLIST -> _playlists.update { list -> list.filter { it.itemId != itemId } }
-                    MediaType.RADIO -> _radios.update { list -> list.filter { it.itemId != itemId } }
-                    MediaType.AUDIOBOOK -> _audiobooks.update { list -> list.filter { it.itemId != itemId } }
+                    MediaType.ARTIST -> artistsPager.update { list -> list.filter { it.itemId != itemId } }
+                    MediaType.ALBUM -> albumsPager.update { list -> list.filter { it.itemId != itemId } }
+                    MediaType.TRACK -> tracksPager.update { list -> list.filter { it.itemId != itemId } }
+                    MediaType.PLAYLIST -> playlistsPager.update { list -> list.filter { it.itemId != itemId } }
+                    MediaType.RADIO -> radiosPager.update { list -> list.filter { it.itemId != itemId } }
+                    MediaType.AUDIOBOOK -> audiobooksPager.update { list -> list.filter { it.itemId != itemId } }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "removeFromLibrary failed: ${e.message}")
@@ -1187,7 +950,7 @@ class LibraryViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 musicRepository.addToLibrary(radio.uri)
-                _radios.update { list ->
+                radiosPager.update { list ->
                     list.map { if (it.uri == radio.uri) it.copy(inLibrary = true) else it }
                 }
             } catch (e: Exception) {
@@ -1204,1111 +967,3 @@ class LibraryViewModel @Inject constructor(
         }
     }
 }
-
-
-@HiltViewModel
-class ArtistDetailViewModel @Inject constructor(
-    savedStateHandle: SavedStateHandle,
-    private val musicRepository: MusicRepository,
-    private val playerRepository: PlayerRepository,
-    private val smartListeningRepository: SmartListeningRepository,
-    private val lastFmSimilarResolver: LastFmSimilarResolver,
-    private val lastFmArtistInfoResolver: LastFmArtistInfoResolver,
-    private val lastFmGenreResolver: LastFmGenreResolver,
-    private val dao: PlayHistoryDao,
-    private val providerHealthReporter: ProviderHealthReporter
-) : ViewModel() {
-
-    val itemId: String = savedStateHandle["itemId"] ?: ""
-    val provider: String = savedStateHandle["provider"] ?: ""
-
-    private val _artist = MutableStateFlow<Artist?>(null)
-    val artist: StateFlow<Artist?> = _artist.asStateFlow()
-
-    private val _artistInLibrary = MutableStateFlow(false)
-    val artistInLibrary: StateFlow<Boolean> = _artistInLibrary.asStateFlow()
-
-    private val _albums = MutableStateFlow<List<Album>>(emptyList())
-    val albums: StateFlow<List<Album>> = _albums.asStateFlow()
-
-    private val _tracks = MutableStateFlow<List<Track>>(emptyList())
-    val tracks: StateFlow<List<Track>> = _tracks.asStateFlow()
-
-    private val _artistName = MutableStateFlow(savedStateHandle.get<String>("name") ?: "Artist")
-    val artistName: StateFlow<String> = _artistName.asStateFlow()
-
-    private val _error = MutableSharedFlow<String>(extraBufferCapacity = 1)
-    val error: SharedFlow<String> = _error.asSharedFlow()
-
-    private val _isRefreshing = MutableStateFlow(false)
-    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
-    private val _blockedArtistUris = MutableStateFlow<Set<String>>(emptySet())
-    val blockedArtistUris: StateFlow<Set<String>> = _blockedArtistUris.asStateFlow()
-
-    private val _similarArtists = MutableStateFlow<List<Artist>>(emptyList())
-    val similarArtists: StateFlow<List<Artist>> = _similarArtists.asStateFlow()
-
-    val players = playerRepository.players
-
-    init {
-        viewModelScope.launch { loadData(lazy = true) }
-        viewModelScope.launch {
-            smartListeningRepository.blockedArtistUris.collect { _blockedArtistUris.value = it }
-        }
-    }
-
-    fun refresh() {
-        viewModelScope.launch {
-            _isRefreshing.value = true
-            try {
-                dao.clearSimilarArtistResolved(_artistName.value.lowercase())
-                _artist.value?.uri?.let { musicRepository.refreshItemByUri(it) }
-                    ?: musicRepository.requestLibrarySync(force = true)
-                loadData(lazy = false)
-            } finally {
-                _isRefreshing.value = false
-            }
-        }
-    }
-
-    private suspend fun loadData(lazy: Boolean) {
-        try {
-            var artist = musicRepository.getArtist(itemId, provider, lazy = lazy)
-            // Immediately replace genres with cached Last.fm tags if available
-            if (artist != null) {
-                val cached = dao.getLastFmTags(artist.name)
-                if (cached != null) {
-                    val tags = cached.tags.split(",").filter { it.isNotBlank() }
-                    if (tags.isNotEmpty()) artist = artist.copy(genres = tags)
-                }
-            }
-            _artist.value = artist
-            _albums.value = musicRepository.getArtistAlbums(itemId, provider)
-            _tracks.value = musicRepository.getArtistTracks(itemId, provider)
-
-            _artist.value?.let { a ->
-                if (a.name.isNotBlank()) _artistName.value = a.name
-            } ?: run {
-                if (_artistName.value == "Artist") {
-                    _tracks.value.firstOrNull()?.artistNames?.let { _artistName.value = it }
-                }
-            }
-
-            // Auto-refresh if artist has no real image (only imageproxy fallback)
-            val hasRealImage = _artist.value?.imageUrl?.let {
-                !it.contains("imageproxy") || it.contains("path=http")
-            } ?: false
-            if (lazy && !hasRealImage) {
-                kotlinx.coroutines.delay(500)
-                val refreshed = musicRepository.getArtist(itemId, provider, lazy = false)
-                if (refreshed != null) {
-                    _artist.value = refreshed
-                    if (refreshed.name.isNotBlank()) _artistName.value = refreshed.name
-                }
-            }
-            _artistInLibrary.value = _artist.value.isInLibrary()
-        } catch (e: Exception) {
-            Log.w(TAG, "Load artist detail failed: ${e.message}")
-        }
-
-        val name = _artistName.value
-        if (name.isNotBlank()) {
-            viewModelScope.launch { loadSimilarArtists(name) }
-            if (_artist.value?.description.isNullOrBlank()) {
-                viewModelScope.launch { loadLastFmBio(name) }
-            }
-            viewModelScope.launch { enrichArtistGenresFromLastFm(name) }
-        }
-    }
-
-    private suspend fun loadSimilarArtists(artistName: String) {
-        try {
-            val similar = lastFmSimilarResolver.resolve(artistName, limit = 8)
-            if (similar.isEmpty()) return
-            val key = artistName.lowercase()
-            val cached = dao.getSimilarArtists(key)
-            val now = System.currentTimeMillis()
-            val resolveTtl = 7 * 86_400_000L
-            val sourceGenres = lastFmGenreResolver.resolve(artistName).toSet()
-
-            // Resolve candidates in parallel but globally concurrency-capped (mapMaBounded),
-            // so the artist + Discover bulk resolvers can't burst the shared WS pipeline. Each MA
-            // call has a short timeout: a slow/throttled provider makes `music/search` hang (the
-            // server gathers ALL providers), so without this the row hangs then comes back empty.
-            // On timeout we degrade (skip that candidate, don't poison the cache) and flag the row
-            // as unavailable so the UI can explain why instead of silently showing nothing.
-            val timedOut = java.util.concurrent.atomic.AtomicBoolean(false)
-            val resolved = similar.mapMaBounded { sim ->
-                try {
-                    val cachedRow = cached.firstOrNull { it.similarArtist == sim.name }
-                    val resolvedAt = cachedRow?.resolvedAt
-                    if (resolvedAt != null && now - resolvedAt < resolveTtl) {
-                        cachedRow.resolvedUri?.let { uri ->
-                            Artist(
-                                itemId = cachedRow.resolvedItemId.orEmpty(),
-                                provider = cachedRow.resolvedProvider.orEmpty(),
-                                name = cachedRow.resolvedName.orEmpty(),
-                                uri = uri,
-                                imageUrl = cachedRow.resolvedImageUrl
-                            )
-                        }
-                    } else {
-                        val searchResult = withTimeoutOrNull(SIMILAR_RESOLVE_TIMEOUT_MS) {
-                            musicRepository.search(sim.name, listOf(MediaType.ARTIST), limit = 5)
-                        }
-                        if (searchResult == null) {
-                            timedOut.set(true)
-                            null
-                        } else {
-                            val candidates = searchResult.artists.filter { it.name.equals(sim.name, ignoreCase = true) }
-                            val matched = if (candidates.isEmpty()) {
-                                null
-                            } else if (sourceGenres.isEmpty()) {
-                                candidates.firstOrNull()
-                            } else {
-                                candidates.firstNotNullOfOrNull { c ->
-                                    val detail = withTimeoutOrNull(SIMILAR_RESOLVE_TIMEOUT_MS) {
-                                        musicRepository.getArtist(c.itemId, c.provider)
-                                    } ?: run { timedOut.set(true); return@firstNotNullOfOrNull null }
-                                    val cGenres = detail.genres.map { normalizeGenre(it) }.toSet()
-                                    when {
-                                        cGenres.isEmpty() -> detail
-                                        cGenres.any { it in sourceGenres } -> detail
-                                        else -> null
-                                    }
-                                }
-                            }
-                            dao.updateSimilarArtistResolved(
-                                sourceArtist = key, similarArtist = sim.name,
-                                itemId = matched?.itemId, provider = matched?.provider,
-                                name = matched?.name, imageUrl = matched?.imageUrl, uri = matched?.uri,
-                                resolvedAt = now
-                            )
-                            matched
-                        }
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.w(TAG, "Resolve similar '${sim.name}' failed: ${e.message}")
-                    null
-                }
-            }.filterNotNull()
-            _similarArtists.value = resolved
-            if (resolved.isEmpty() && timedOut.get()) providerHealthReporter.reportSearchTimeout()
-        } catch (e: Exception) {
-            Log.w(TAG, "Load similar artists failed: ${e.message}")
-        }
-    }
-
-    private suspend fun enrichArtistGenresFromLastFm(artistName: String) {
-        try {
-            val lastFmGenres = lastFmGenreResolver.resolve(artistName)
-            if (lastFmGenres.isNotEmpty()) {
-                _artist.update { current ->
-                    current?.copy(genres = lastFmGenres)
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Enrich artist genres failed: ${e.message}")
-        }
-    }
-
-    private suspend fun loadLastFmBio(artistName: String) {
-        try {
-            val bio = lastFmArtistInfoResolver.resolve(artistName) ?: return
-            _artist.update { it?.copy(description = bio) }
-        } catch (e: Exception) {
-            Log.w(TAG, "Load Last.fm bio failed: ${e.message}")
-        }
-    }
-
-    fun playUri(uri: String) {
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.NORMAL)
-                musicRepository.playMedia(queueId, uri)
-            } catch (e: Exception) {
-                Log.w(TAG, "play failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun playOnPlayer(uri: String, playerId: String) {
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(playerId, PlayerRepository.QueueFilterMode.NORMAL)
-                musicRepository.playMedia(playerId, uri)
-            } catch (e: Exception) {
-                Log.w(TAG, "playOnPlayer failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun enqueue(uri: String) {
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                musicRepository.playMedia(queueId, uri, option = "add")
-            } catch (e: Exception) {
-                Log.w(TAG, "enqueue failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun startRadio(uri: String) {
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.RADIO_SMART)
-                musicRepository.playMedia(queueId, uri, radioMode = true)
-            } catch (e: Exception) {
-                Log.w(TAG, "startRadio failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun quickPlay(uri: String) {
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.NORMAL)
-                musicRepository.playMedia(queueId, uri, option = "replace")
-            } catch (e: Exception) {
-                Log.w(TAG, "quickPlay failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun playTrack(track: Track) = playUri(track.uri)
-
-    fun playAllTracks(option: String = "replace") {
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        val uris = _tracks.value
-            .filter { t ->
-                val uri = t.artistUri ?: return@filter true
-                val name = t.artistNames.split(",").firstOrNull()?.trim().orEmpty()
-                !playerRepository.isArtistBlocked(name, uri)
-            }
-            .map { it.uri }
-        if (uris.isEmpty()) return
-        viewModelScope.launch {
-            try {
-                if (option == "replace") {
-                    playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.NORMAL)
-                }
-                musicRepository.playMedia(queueId, uris, option = option)
-            } catch (e: Exception) {
-                Log.w(TAG, "playAllTracks failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun toggleArtistFavorite() {
-        val a = _artist.value ?: return
-        viewModelScope.launch {
-            try {
-                musicRepository.setFavorite(a.uri, MediaType.ARTIST, a.itemId, !a.favorite)
-                _artist.update { it?.copy(favorite = !a.favorite) }
-            } catch (e: Exception) {
-                Log.w(TAG, "toggleArtistFavorite failed: ${e.message}")
-            }
-        }
-    }
-
-    fun toggleFavorite(uri: String, mediaType: MediaType, itemId: String, currentFavorite: Boolean) {
-        viewModelScope.launch {
-            try {
-                musicRepository.setFavorite(uri, mediaType, itemId, !currentFavorite)
-                when (mediaType) {
-                    MediaType.ALBUM -> _albums.update { list ->
-                        list.map { if (it.itemId == itemId) it.copy(favorite = !currentFavorite) else it }
-                    }
-                    MediaType.TRACK -> _tracks.update { list ->
-                        list.map { if (it.itemId == itemId) it.copy(favorite = !currentFavorite) else it }
-                    }
-                    else -> {}
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "toggleFavorite failed: ${e.message}")
-            }
-        }
-    }
-
-    fun toggleArtistLibrary() {
-        val a = _artist.value ?: return
-        val inLibrary = _artistInLibrary.value
-        viewModelScope.launch {
-            try {
-                if (inLibrary) {
-                    musicRepository.removeFromLibrary(MediaType.ARTIST, a.uri, a.itemId)
-                } else {
-                    musicRepository.addToLibrary(a.uri)
-                }
-                _artistInLibrary.value = !inLibrary
-            } catch (e: Exception) {
-                Log.w(TAG, "toggleArtistLibrary failed: ${e.message}")
-            }
-        }
-    }
-
-    fun toggleLibrary(uri: String, mediaType: MediaType, itemId: String, currentlyInLibrary: Boolean) {
-        viewModelScope.launch {
-            try {
-                if (currentlyInLibrary) {
-                    musicRepository.removeFromLibrary(mediaType, uri, itemId)
-                } else {
-                    musicRepository.addToLibrary(uri)
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "toggleLibrary failed: ${e.message}")
-            }
-        }
-    }
-
-    fun toggleArtistBlocked(artistUri: String?, artistName: String?) {
-        val uri = MediaIdentity.canonicalArtistKey(uri = artistUri) ?: return
-        viewModelScope.launch {
-            val blocked = _blockedArtistUris.value.contains(uri)
-            smartListeningRepository.setArtistBlocked(uri, artistName, blocked = !blocked)
-        }
-    }
-}
-
-@HiltViewModel
-class AlbumDetailViewModel @Inject constructor(
-    savedStateHandle: SavedStateHandle,
-    private val musicRepository: MusicRepository,
-    private val playerRepository: PlayerRepository,
-    private val smartListeningRepository: SmartListeningRepository,
-    private val lastFmAlbumInfoResolver: LastFmAlbumInfoResolver,
-    private val lastFmGenreResolver: LastFmGenreResolver
-) : ViewModel() {
-
-    val itemId: String = savedStateHandle["itemId"] ?: ""
-    val provider: String = savedStateHandle["provider"] ?: ""
-
-    private val _album = MutableStateFlow<Album?>(null)
-    val album: StateFlow<Album?> = _album.asStateFlow()
-
-    private val _albumInLibrary = MutableStateFlow(false)
-    val albumInLibrary: StateFlow<Boolean> = _albumInLibrary.asStateFlow()
-
-    private val _tracks = MutableStateFlow<List<Track>>(emptyList())
-    val tracks: StateFlow<List<Track>> = _tracks.asStateFlow()
-
-    private val _albumName = MutableStateFlow(savedStateHandle.get<String>("name") ?: "Album")
-    val albumName: StateFlow<String> = _albumName.asStateFlow()
-
-    private val _error = MutableSharedFlow<String>(extraBufferCapacity = 1)
-    val error: SharedFlow<String> = _error.asSharedFlow()
-
-    private val _isRefreshing = MutableStateFlow(false)
-    val isRefreshing: StateFlow<Boolean> = _isRefreshing.asStateFlow()
-    private val _blockedArtistUris = MutableStateFlow<Set<String>>(emptySet())
-    val blockedArtistUris: StateFlow<Set<String>> = _blockedArtistUris.asStateFlow()
-
-    val currentTrackUri: StateFlow<String?> = playerRepository.queueState
-        .map { it?.currentItem?.track?.uri }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
-
-    val isPlaying: StateFlow<Boolean> = playerRepository.selectedPlayer
-        .map { it?.state == PlaybackState.PLAYING }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
-
-    val players = playerRepository.players
-
-    init {
-        viewModelScope.launch { loadData(lazy = true) }
-        viewModelScope.launch {
-            smartListeningRepository.blockedArtistUris.collect { _blockedArtistUris.value = it }
-        }
-    }
-
-    fun refresh() {
-        viewModelScope.launch {
-            _isRefreshing.value = true
-            try {
-                _album.value?.uri?.let { musicRepository.refreshItemByUri(it) }
-                    ?: musicRepository.requestLibrarySync(force = true)
-                loadData(lazy = false)
-            } finally {
-                _isRefreshing.value = false
-            }
-        }
-    }
-
-    private suspend fun loadData(lazy: Boolean) {
-        try {
-            _album.value = musicRepository.getAlbum(itemId, provider, lazy = lazy)
-            _tracks.value = musicRepository.getAlbumTracks(itemId, provider)
-
-            _album.value?.let { a ->
-                if (a.name.isNotBlank()) _albumName.value = a.name
-            } ?: run {
-                if (_albumName.value == "Album") {
-                    _tracks.value.firstOrNull()?.albumName?.let {
-                        if (it.isNotBlank()) _albumName.value = it
-                    }
-                }
-            }
-
-            // Auto-refresh if album has no real image (only imageproxy fallback)
-            val hasRealImage = _album.value?.imageUrl?.let {
-                !it.contains("imageproxy") || it.contains("path=http")
-            } ?: false
-            if (lazy && !hasRealImage) {
-                val refreshed = musicRepository.getAlbum(itemId, provider, lazy = false)
-                if (refreshed != null) {
-                    _album.value = refreshed
-                    if (refreshed.name.isNotBlank()) _albumName.value = refreshed.name
-                    _tracks.value = musicRepository.getAlbumTracks(itemId, provider)
-                }
-            }
-            _albumInLibrary.value = _album.value.isInLibrary()
-        } catch (e: Exception) {
-            Log.w(TAG, "Load album detail failed: ${e.message}")
-        }
-
-        val album = _album.value ?: return
-        val artistName = album.artistNames.split(",").firstOrNull()?.trim().orEmpty()
-        if (artistName.isNotBlank()) {
-            val needsBio = album.description.isNullOrBlank()
-            val needsYear = album.year == null
-            if (needsBio || needsYear) {
-                viewModelScope.launch { loadLastFmAlbumInfo(artistName, album.name, needsBio, needsYear) }
-            }
-            viewModelScope.launch { enrichGenresFromLastFm(artistName) }
-        }
-    }
-
-    private suspend fun enrichGenresFromLastFm(artistName: String) {
-        try {
-            val lastFmGenres = lastFmGenreResolver.resolve(artistName)
-            if (lastFmGenres.isNotEmpty()) {
-                _album.update { current ->
-                    val merged = (current?.genres.orEmpty() + lastFmGenres).distinctBy { it.lowercase() }
-                    current?.copy(genres = merged)
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Enrich genres failed: ${e.message}")
-        }
-    }
-
-    private suspend fun loadLastFmAlbumInfo(
-        artistName: String,
-        albumName: String,
-        needsBio: Boolean,
-        needsYear: Boolean
-    ) {
-        try {
-            val info = lastFmAlbumInfoResolver.resolve(artistName, albumName) ?: return
-            _album.update { current ->
-                current?.copy(
-                    description = if (needsBio && info.summary != null) info.summary else current.description,
-                    year = if (needsYear && info.year != null) info.year else current.year
-                )
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Load Last.fm album info failed: ${e.message}")
-        }
-    }
-
-    fun playUri(uri: String) {
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.NORMAL)
-                musicRepository.playMedia(queueId, uri)
-            } catch (e: Exception) {
-                Log.w(TAG, "play failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun playOnPlayer(uri: String, playerId: String) {
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(playerId, PlayerRepository.QueueFilterMode.NORMAL)
-                musicRepository.playMedia(playerId, uri)
-            } catch (e: Exception) {
-                Log.w(TAG, "playOnPlayer failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun enqueue(uri: String) {
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                musicRepository.playMedia(queueId, uri, option = "add")
-            } catch (e: Exception) {
-                Log.w(TAG, "enqueue failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun startRadio(uri: String) {
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.RADIO_SMART)
-                musicRepository.playMedia(queueId, uri, radioMode = true)
-            } catch (e: Exception) {
-                Log.w(TAG, "startRadio failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun playTrack(track: Track) = playUri(track.uri)
-
-    fun toggleAlbumFavorite() {
-        val a = _album.value ?: return
-        viewModelScope.launch {
-            try {
-                musicRepository.setFavorite(a.uri, MediaType.ALBUM, a.itemId, !a.favorite)
-                _album.update { it?.copy(favorite = !a.favorite) }
-            } catch (e: Exception) {
-                Log.w(TAG, "toggleAlbumFavorite failed: ${e.message}")
-            }
-        }
-    }
-
-    fun toggleAlbumLibrary() {
-        val a = _album.value ?: return
-        val inLibrary = _albumInLibrary.value
-        viewModelScope.launch {
-            try {
-                if (inLibrary) {
-                    musicRepository.removeFromLibrary(MediaType.ALBUM, a.uri, a.itemId)
-                } else {
-                    musicRepository.addToLibrary(a.uri)
-                }
-                _albumInLibrary.value = !inLibrary
-            } catch (e: Exception) {
-                Log.w(TAG, "toggleAlbumLibrary failed: ${e.message}")
-            }
-        }
-    }
-
-    fun toggleLibrary(uri: String, mediaType: MediaType, itemId: String, currentlyInLibrary: Boolean) {
-        viewModelScope.launch {
-            try {
-                if (currentlyInLibrary) {
-                    musicRepository.removeFromLibrary(mediaType, uri, itemId)
-                } else {
-                    musicRepository.addToLibrary(uri)
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "toggleLibrary failed: ${e.message}")
-            }
-        }
-    }
-
-    fun playAll() {
-        val uris = _tracks.value
-            .filter { t ->
-                val uri = t.artistUri ?: return@filter true
-                val name = t.artistNames.split(",").firstOrNull()?.trim().orEmpty()
-                !playerRepository.isArtistBlocked(name, uri)
-            }
-            .map { it.uri }
-        if (uris.isEmpty()) return
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.NORMAL)
-                musicRepository.playMedia(queueId, uris, option = "replace")
-            } catch (e: Exception) {
-                Log.w(TAG, "playAll failed: ${e.message}")
-            }
-        }
-    }
-
-    fun addAllToQueue() {
-        val uris = _tracks.value.map { it.uri }
-        if (uris.isEmpty()) return
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                musicRepository.playMedia(queueId, uris, option = "add")
-            } catch (e: Exception) {
-                Log.w(TAG, "addAllToQueue failed: ${e.message}")
-            }
-        }
-    }
-
-    fun playAllNext() {
-        val uris = _tracks.value.map { it.uri }
-        if (uris.isEmpty()) return
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                musicRepository.playMedia(queueId, uris, option = "next")
-            } catch (e: Exception) {
-                Log.w(TAG, "playAllNext failed: ${e.message}")
-            }
-        }
-    }
-
-    fun replaceQueue() {
-        val uris = _tracks.value.map { it.uri }
-        if (uris.isEmpty()) return
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.NORMAL)
-                musicRepository.playMedia(queueId, uris, option = "replace")
-            } catch (e: Exception) {
-                Log.w(TAG, "replaceQueue failed: ${e.message}")
-            }
-        }
-    }
-
-    fun startRadioAll() {
-        val first = _tracks.value.firstOrNull()?.uri ?: return
-        startRadio(first)
-    }
-
-    fun toggleFavorite(uri: String, mediaType: MediaType, itemId: String, currentFavorite: Boolean) {
-        viewModelScope.launch {
-            try {
-                musicRepository.setFavorite(uri, mediaType, itemId, !currentFavorite)
-                if (mediaType == MediaType.TRACK) {
-                    _tracks.update { list ->
-                        list.map { if (it.itemId == itemId) it.copy(favorite = !currentFavorite) else it }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "toggleFavorite failed: ${e.message}")
-            }
-        }
-    }
-
-    fun toggleArtistBlocked(artistUri: String?, artistName: String?) {
-        val uri = MediaIdentity.canonicalArtistKey(uri = artistUri) ?: return
-        viewModelScope.launch {
-            val blocked = _blockedArtistUris.value.contains(uri)
-            smartListeningRepository.setArtistBlocked(uri, artistName, blocked = !blocked)
-        }
-    }
-
-    // Playlist management for track action sheet
-    private val _editablePlaylists = MutableStateFlow<List<Playlist>>(emptyList())
-    val editablePlaylists: StateFlow<List<Playlist>> = _editablePlaylists.asStateFlow()
-    private val _isLoadingEditablePlaylists = MutableStateFlow(false)
-    val isLoadingEditablePlaylists: StateFlow<Boolean> = _isLoadingEditablePlaylists.asStateFlow()
-    private val _addingToPlaylistId = MutableStateFlow<String?>(null)
-    val addingToPlaylistId: StateFlow<String?> = _addingToPlaylistId.asStateFlow()
-    private val _playlistContainsTrack = MutableStateFlow<Set<String>>(emptySet())
-    val playlistContainsTrack: StateFlow<Set<String>> = _playlistContainsTrack.asStateFlow()
-
-    fun loadEditablePlaylists(trackUri: String) {
-        if (_isLoadingEditablePlaylists.value) return
-        viewModelScope.launch {
-            _isLoadingEditablePlaylists.value = true
-            try {
-                val loaded = musicRepository.getPlaylists(limit = 200).filter { it.isEditable }
-                _editablePlaylists.value = loaded
-                val containing = mutableSetOf<String>()
-                for (pl in loaded) {
-                    try {
-                        val t = musicRepository.getPlaylistTracks(pl.itemId, pl.provider)
-                        if (t.any { it.uri == trackUri }) containing += pl.uri
-                    } catch (_: Exception) { }
-                }
-                _playlistContainsTrack.value = containing
-            } catch (e: Exception) {
-                Log.w("AlbumDetailVM", "loadEditablePlaylists failed: ${e.message}")
-            } finally {
-                _isLoadingEditablePlaylists.value = false
-            }
-        }
-    }
-
-    fun addTrackToPlaylist(playlist: Playlist, trackUri: String) {
-        if (_addingToPlaylistId.value != null) return
-        viewModelScope.launch {
-            _addingToPlaylistId.value = playlist.itemId
-            try {
-                musicRepository.addTrackToPlaylist(playlist, trackUri)
-                _playlistContainsTrack.value = _playlistContainsTrack.value + playlist.uri
-            } catch (e: Exception) {
-                Log.w("AlbumDetailVM", "addTrackToPlaylist failed: ${e.message}")
-            } finally {
-                _addingToPlaylistId.value = null
-            }
-        }
-    }
-
-    fun removeTrackFromPlaylist(playlist: Playlist, trackUri: String) {
-        if (_addingToPlaylistId.value != null) return
-        viewModelScope.launch {
-            _addingToPlaylistId.value = playlist.itemId
-            try {
-                val tracks = musicRepository.getPlaylistTracks(playlist.itemId, playlist.provider)
-                val pos = tracks.indexOfFirst { it.uri == trackUri }
-                if (pos >= 0) {
-                    musicRepository.removeTrackFromPlaylist(playlist, pos)
-                    _playlistContainsTrack.value = _playlistContainsTrack.value - playlist.uri
-                }
-            } catch (e: Exception) {
-                Log.w("AlbumDetailVM", "removeTrackFromPlaylist failed: ${e.message}")
-            } finally {
-                _addingToPlaylistId.value = null
-            }
-        }
-    }
-
-    fun createPlaylistAndAddTrack(name: String, trackUri: String) {
-        viewModelScope.launch {
-            try {
-                val playlist = musicRepository.createPlaylist(name)
-                musicRepository.addTrackToPlaylist(playlist, trackUri)
-                _editablePlaylists.value = _editablePlaylists.value + playlist
-                _playlistContainsTrack.value = _playlistContainsTrack.value + playlist.uri
-            } catch (e: Exception) {
-                Log.w("AlbumDetailVM", "createPlaylistAndAddTrack failed: ${e.message}")
-            }
-        }
-    }
-}
-
-enum class PlaylistSortKey(val label: String) {
-    POSITION("Position"),
-    NAME("Name"),
-    ARTIST("Artist"),
-    ALBUM("Album"),
-    DURATION("Duration"),
-    RECENTLY_ADDED("Recently Added")
-}
-
-@HiltViewModel
-class PlaylistDetailViewModel @Inject constructor(
-    savedStateHandle: SavedStateHandle,
-    private val musicRepository: MusicRepository,
-    private val playerRepository: PlayerRepository,
-    private val smartListeningRepository: SmartListeningRepository
-) : ViewModel() {
-
-    val itemId: String = savedStateHandle["itemId"] ?: ""
-    val provider: String = savedStateHandle["provider"] ?: ""
-    private val playlistUri: String = savedStateHandle["uri"] ?: ""
-
-    private val _rawTracks = MutableStateFlow<List<Track>>(emptyList())
-    private val _sortKey = MutableStateFlow(PlaylistSortKey.POSITION)
-    val sortKey: StateFlow<PlaylistSortKey> = _sortKey.asStateFlow()
-    private val _sortDescending = MutableStateFlow(false)
-    val sortDescending: StateFlow<Boolean> = _sortDescending.asStateFlow()
-    private val _favoritesOnly = MutableStateFlow(false)
-    val favoritesOnly: StateFlow<Boolean> = _favoritesOnly.asStateFlow()
-
-    val tracks: StateFlow<List<Track>> = combine(
-        _rawTracks, _sortKey, _sortDescending, _favoritesOnly
-    ) { raw, key, desc, favsOnly ->
-        val filtered = if (favsOnly) raw.filter { it.favorite } else raw
-        val sorted = when (key) {
-            PlaylistSortKey.POSITION -> if (desc) filtered else filtered.reversed()
-            PlaylistSortKey.NAME -> filtered.sortedBy { it.name.lowercase() }
-            PlaylistSortKey.ARTIST -> filtered.sortedBy { it.artistNames.lowercase() }
-            PlaylistSortKey.ALBUM -> filtered.sortedBy { it.albumName.lowercase() }
-            PlaylistSortKey.DURATION -> filtered.sortedBy { it.duration ?: 0.0 }
-            PlaylistSortKey.RECENTLY_ADDED -> filtered.sortedByDescending { it.dateAdded ?: "" }
-        }
-        if (desc && key != PlaylistSortKey.POSITION && key != PlaylistSortKey.RECENTLY_ADDED) sorted.reversed() else sorted
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-
-    val currentTrackUri: StateFlow<String?> = playerRepository.queueState
-        .map { it?.currentItem?.track?.uri }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
-
-    val isPlaying: StateFlow<Boolean> = playerRepository.selectedPlayer
-        .map { it?.state == PlaybackState.PLAYING }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
-
-    fun setSortKey(key: PlaylistSortKey) {
-        if (_sortKey.value == key) {
-            _sortDescending.value = !_sortDescending.value
-        } else {
-            _sortKey.value = key
-            _sortDescending.value = false
-        }
-    }
-
-    fun toggleFavoritesOnly() {
-        _favoritesOnly.value = !_favoritesOnly.value
-    }
-
-    private val _playlistName = MutableStateFlow(savedStateHandle.get<String>("name") ?: "Playlist")
-    val playlistName: StateFlow<String> = _playlistName.asStateFlow()
-
-    private val _favorite = MutableStateFlow(savedStateHandle.get<Boolean>("favorite") ?: false)
-    val favorite: StateFlow<Boolean> = _favorite.asStateFlow()
-    private val _playlists = MutableStateFlow<List<Playlist>>(emptyList())
-    val playlists: StateFlow<List<Playlist>> = _playlists.asStateFlow()
-    private val _busyTrackUri = MutableStateFlow<String?>(null)
-    val busyTrackUri: StateFlow<String?> = _busyTrackUri.asStateFlow()
-
-    private val _error = MutableSharedFlow<String>(extraBufferCapacity = 1)
-    val error: SharedFlow<String> = _error.asSharedFlow()
-    private val _blockedArtistUris = MutableStateFlow<Set<String>>(emptySet())
-    val blockedArtistUris: StateFlow<Set<String>> = _blockedArtistUris.asStateFlow()
-
-    val players = playerRepository.players
-
-    init {
-        viewModelScope.launch {
-            try {
-                _rawTracks.value = musicRepository.getPlaylistTracks(itemId, provider)
-            } catch (e: Exception) {
-                Log.w(TAG, "Load playlist tracks failed: ${e.message}")
-            }
-        }
-        viewModelScope.launch {
-            try {
-                _playlists.value = musicRepository.getPlaylists(limit = 200)
-            } catch (e: Exception) {
-                Log.w(TAG, "Load playlists failed: ${e.message}")
-            }
-        }
-        viewModelScope.launch {
-            smartListeningRepository.blockedArtistUris.collect { _blockedArtistUris.value = it }
-        }
-    }
-
-    fun playUri(uri: String) {
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.NORMAL)
-                musicRepository.playMedia(queueId, uri)
-            } catch (e: Exception) {
-                Log.w(TAG, "play failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun playOnPlayer(uri: String, playerId: String) {
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(playerId, PlayerRepository.QueueFilterMode.NORMAL)
-                musicRepository.playMedia(playerId, uri)
-            } catch (e: Exception) {
-                Log.w(TAG, "playOnPlayer failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun enqueue(uri: String) {
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                musicRepository.playMedia(queueId, uri, option = "add")
-            } catch (e: Exception) {
-                Log.w(TAG, "enqueue failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun startRadio(uri: String) {
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                playerRepository.setQueueFilterMode(queueId, PlayerRepository.QueueFilterMode.RADIO_SMART)
-                musicRepository.playMedia(queueId, uri, radioMode = true)
-            } catch (e: Exception) {
-                Log.w(TAG, "startRadio failed: ${e.message}")
-                _error.tryEmit("Not connected to server")
-            }
-        }
-    }
-
-    fun playTrack(track: Track) = playUri(track.uri)
-
-    fun playAll() {
-        val uris = tracks.value.map { it.uri }
-        if (uris.isEmpty()) return
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                musicRepository.playMedia(queueId, uris, option = "replace")
-            } catch (e: Exception) {
-                Log.w(TAG, "playAll failed: ${e.message}")
-            }
-        }
-    }
-
-    fun addAllToQueue() {
-        val uris = tracks.value.map { it.uri }
-        if (uris.isEmpty()) return
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                musicRepository.playMedia(queueId, uris, option = "add")
-            } catch (e: Exception) {
-                Log.w(TAG, "addAllToQueue failed: ${e.message}")
-            }
-        }
-    }
-
-    fun playAllNext() {
-        val uris = tracks.value.map { it.uri }
-        if (uris.isEmpty()) return
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                musicRepository.playMedia(queueId, uris, option = "next")
-            } catch (e: Exception) {
-                Log.w(TAG, "playAllNext failed: ${e.message}")
-            }
-        }
-    }
-
-    fun replaceQueue() {
-        val uris = tracks.value.map { it.uri }
-        if (uris.isEmpty()) return
-        val queueId = playerRepository.requireSelectedPlayerId() ?: return
-        viewModelScope.launch {
-            try {
-                musicRepository.playMedia(queueId, uris, option = "replace")
-            } catch (e: Exception) {
-                Log.w(TAG, "replaceQueue failed: ${e.message}")
-            }
-        }
-    }
-
-    fun startRadioAll() {
-        val first = tracks.value.firstOrNull()?.uri ?: return
-        startRadio(first)
-    }
-
-    fun removeTrackFromPlaylist(track: Track, fallbackPosition: Int) {
-        val playlist = currentPlaylist() ?: return
-        val position = track.position ?: fallbackPosition
-        viewModelScope.launch {
-            _busyTrackUri.value = track.uri
-            try {
-                musicRepository.removeTrackFromPlaylist(playlist, position)
-                _rawTracks.update { list -> list.filterNot { it.uri == track.uri && (it.position ?: fallbackPosition) == position } }
-            } catch (e: Exception) {
-                Log.w(TAG, "removeTrackFromPlaylist failed: ${e.message}")
-                _error.tryEmit("Failed to remove track from playlist")
-            } finally {
-                _busyTrackUri.value = null
-            }
-        }
-    }
-
-    fun moveTrackToPlaylist(track: Track, fallbackPosition: Int, destination: Playlist) {
-        val source = currentPlaylist() ?: return
-        if (destination.uri == source.uri) return
-        val position = track.position ?: fallbackPosition
-        viewModelScope.launch {
-            _busyTrackUri.value = track.uri
-            try {
-                musicRepository.addTrackToPlaylist(destination, track.uri)
-                musicRepository.removeTrackFromPlaylist(source, position)
-                _rawTracks.update { list -> list.filterNot { it.uri == track.uri && (it.position ?: fallbackPosition) == position } }
-            } catch (e: Exception) {
-                Log.w(TAG, "moveTrackToPlaylist failed: ${e.message}")
-                _error.tryEmit("Failed to move track to playlist")
-            } finally {
-                _busyTrackUri.value = null
-            }
-        }
-    }
-
-    fun togglePlaylistFavorite() {
-        val current = _favorite.value
-        viewModelScope.launch {
-            try {
-                musicRepository.setFavorite(playlistUri, MediaType.PLAYLIST, itemId, !current)
-                _favorite.value = !current
-            } catch (e: Exception) {
-                Log.w(TAG, "togglePlaylistFavorite failed: ${e.message}")
-            }
-        }
-    }
-
-    fun toggleFavorite(uri: String, mediaType: MediaType, itemId: String, currentFavorite: Boolean) {
-        viewModelScope.launch {
-            try {
-                musicRepository.setFavorite(uri, mediaType, itemId, !currentFavorite)
-                if (mediaType == MediaType.TRACK) {
-                    _rawTracks.update { list ->
-                        list.map { if (it.itemId == itemId) it.copy(favorite = !currentFavorite) else it }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "toggleFavorite failed: ${e.message}")
-            }
-        }
-    }
-
-    fun toggleLibrary(uri: String, mediaType: MediaType, itemId: String, currentlyInLibrary: Boolean) {
-        viewModelScope.launch {
-            try {
-                if (currentlyInLibrary) {
-                    musicRepository.removeFromLibrary(mediaType, uri, itemId)
-                } else {
-                    musicRepository.addToLibrary(uri)
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "toggleLibrary failed: ${e.message}")
-            }
-        }
-    }
-
-    fun toggleArtistBlocked(artistUri: String?, artistName: String?) {
-        val uri = MediaIdentity.canonicalArtistKey(uri = artistUri) ?: return
-        viewModelScope.launch {
-            val blocked = _blockedArtistUris.value.contains(uri)
-            smartListeningRepository.setArtistBlocked(uri, artistName, blocked = !blocked)
-        }
-    }
-
-    private fun currentPlaylist(): Playlist? {
-        if (itemId.isBlank()) return null
-        return Playlist(
-            itemId = itemId,
-            provider = provider,
-            name = _playlistName.value,
-            uri = playlistUri,
-            favorite = _favorite.value
-        )
-    }
-}
-
-/**
- * Library membership signal, mirroring how the MA web UI gates its add/remove-from-library
- * actions: an item is in the library when its (resolved) provider is `library`, i.e. its URI
- * is a `library://` URI. Provider-specific items (spotify, deezer, ...) are not yet in the
- * library and can be added.
- */
-/**
- * Per-call timeout for the MA RPCs that resolve a Last.fm similar-artist name to a playable
- * MA artist. `music/search` gathers every provider server-side with no per-provider timeout, so
- * a single slow/throttled provider can hang the call for minutes. We cap it short and degrade.
- */
-private const val SIMILAR_RESOLVE_TIMEOUT_MS = 7_000L
-
-private fun isLibraryMember(provider: String?, uri: String?): Boolean =
-    provider == "library" || uri?.startsWith("library://") == true
-
-private fun Album?.isInLibrary(): Boolean = isLibraryMember(this?.provider, this?.uri)
-private fun Artist?.isInLibrary(): Boolean = isLibraryMember(this?.provider, this?.uri)

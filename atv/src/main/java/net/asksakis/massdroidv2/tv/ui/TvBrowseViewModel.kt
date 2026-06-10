@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import net.asksakis.massdroidv2.data.util.LibraryPager
 import net.asksakis.massdroidv2.domain.model.Album
 import net.asksakis.massdroidv2.domain.model.Artist
 import net.asksakis.massdroidv2.domain.model.Playlist
@@ -114,7 +115,7 @@ class TvBrowseViewModel @Inject constructor(
 
     fun selectCategory(cat: BrowseCategory) {
         _category.value = cat
-        pagerFor(cat).loadMoreIfEmpty()
+        pagerFor(cat).reloadIfEmpty()
     }
 
     /** Fetch the next page of the current category as the grid nears its end. */

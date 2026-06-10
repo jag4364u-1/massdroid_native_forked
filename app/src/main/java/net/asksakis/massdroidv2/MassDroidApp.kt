@@ -184,6 +184,19 @@ class MassDroidApp : Application(), ImageLoaderFactory {
             .okHttpClient { wsClient.getHttpClient() }
             .components { add(coil.decode.SvgDecoder.Factory()) }
             .crossfade(true)
+            // Coil's default disk cache caps at 250MB; a full artwork library at size=500 is
+            // ~250MB+, so the LRU evicts constantly and covers re-download on every launch.
+            // Same directory as the default so existing entries survive the upgrade.
+            .diskCache {
+                coil.disk.DiskCache.Builder()
+                    .directory(cacheDir.resolve("image_cache"))
+                    .maxSizeBytes(IMAGE_DISK_CACHE_BYTES)
+                    .build()
+            }
             .build()
+    }
+
+    private companion object {
+        const val IMAGE_DISK_CACHE_BYTES = 1024L * 1024 * 1024 // 1 GB
     }
 }

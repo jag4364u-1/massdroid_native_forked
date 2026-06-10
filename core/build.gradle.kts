@@ -22,7 +22,9 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments("-DANDROID_STL=c++_shared")
+                // 16 KB page-size ELF alignment: not the default on NDK r27 (default from r28).
+                // Required for Android 16 KB-page devices and Play targetSdk 35+ uploads.
+                arguments("-DANDROID_STL=c++_shared", "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON")
             }
         }
         consumerProguardFiles("consumer-rules.pro")
