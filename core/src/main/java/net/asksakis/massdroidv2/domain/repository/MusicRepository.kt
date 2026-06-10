@@ -1,8 +1,15 @@
 package net.asksakis.massdroidv2.domain.repository
 
+import kotlinx.coroutines.flow.Flow
 import net.asksakis.massdroidv2.domain.model.*
 
 interface MusicRepository {
+    /**
+     * Server `media_item_updated` events mapped to domain items, for in-place patching of
+     * already-loaded lists (artwork/metadata refreshes) without a reload or scroll reset.
+     */
+    val mediaItemUpdates: Flow<MediaItemUpdate>
+
     suspend fun getRecommendations(): List<RecommendationFolder>
     suspend fun getArtists(search: String? = null, limit: Int = 50, offset: Int = 0, orderBy: String? = null, favoriteOnly: Boolean = false, providerFilter: List<String>? = null): List<Artist>
     suspend fun getAlbums(search: String? = null, limit: Int = 50, offset: Int = 0, orderBy: String? = null, favoriteOnly: Boolean = false, providerFilter: List<String>? = null): List<Album>

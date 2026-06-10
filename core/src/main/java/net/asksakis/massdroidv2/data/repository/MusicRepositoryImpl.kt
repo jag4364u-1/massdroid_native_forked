@@ -2,6 +2,8 @@ package net.asksakis.massdroidv2.data.repository
 
 import android.util.Log
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
@@ -32,6 +34,25 @@ class MusicRepositoryImpl @Inject constructor(
     }
     private val librarySyncMutex = Mutex()
     private var lastLibrarySyncAtMs = 0L
+
+    override val mediaItemUpdates: Flow<MediaItemUpdate> = wsClient.events.mapNotNull { event ->
+        if (event.event != EventType.MEDIA_ITEM_UPDATED) return@mapNotNull null
+        val root = event.data as? JsonObject ?: return@mapNotNull null
+        // The updated item is the payload itself, or nested under media_item on some events.
+        val itemJson = if ("media_type" in root) root else root["media_item"] as? JsonObject
+        val serverItem = itemJson?.let {
+            runCatching { json.decodeFromJsonElement<ServerMediaItem>(it) }.getOrNull()
+        } ?: return@mapNotNull null
+        when (serverItem.mediaType) {
+            "artist" -> serverItem.toArtist()?.let { MediaItemUpdate.ArtistUpdated(it) }
+            "album" -> serverItem.toAlbum()?.let { MediaItemUpdate.AlbumUpdated(it) }
+            "track" -> serverItem.toTrack()?.let { MediaItemUpdate.TrackUpdated(it) }
+            "audiobook" -> serverItem.toTrack()?.let { MediaItemUpdate.AudiobookUpdated(it) }
+            "playlist" -> serverItem.toPlaylist()?.let { MediaItemUpdate.PlaylistUpdated(it) }
+            "radio" -> serverItem.toRadio()?.let { MediaItemUpdate.RadioUpdated(it) }
+            else -> null
+        }
+    }
 
     override suspend fun getArtists(search: String?, limit: Int, offset: Int, orderBy: String?, favoriteOnly: Boolean, providerFilter: List<String>?): List<Artist> {
         val result = wsClient.sendCommand(

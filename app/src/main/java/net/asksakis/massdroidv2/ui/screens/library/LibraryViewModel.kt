@@ -443,14 +443,44 @@ class LibraryViewModel @Inject constructor(
                         pendingReload = true
                     }
                     EventType.MEDIA_ITEM_UPDATED -> {
-                        // Skip: updates don't change list structure, avoid scroll reset
+                        // Handled below via mediaItemUpdates: patched in place (stable URI keys),
+                        // never a structural reload, so no scroll reset.
                     }
                 }
             }
         }
+        // Metadata refreshes (e.g. artwork fetched when a detail screen triggers a server-side
+        // lookup) reach already-loaded lists by swapping the matching row in place.
+        viewModelScope.launch {
+            musicRepository.mediaItemUpdates.collect { applyMediaItemUpdate(it) }
+        }
         viewModelScope.launch {
             sessionEventBus.resets.collect { resetForAccountSwitch() }
         }
+    }
+
+    private fun applyMediaItemUpdate(update: MediaItemUpdate) {
+        when (update) {
+            is MediaItemUpdate.ArtistUpdated ->
+                artistsPager.update { replaceByUri(it, update.item) { a -> a.uri } }
+            is MediaItemUpdate.AlbumUpdated ->
+                albumsPager.update { replaceByUri(it, update.item) { a -> a.uri } }
+            is MediaItemUpdate.TrackUpdated ->
+                tracksPager.update { replaceByUri(it, update.item) { t -> t.uri } }
+            is MediaItemUpdate.AudiobookUpdated ->
+                audiobooksPager.update { replaceByUri(it, update.item) { t -> t.uri } }
+            is MediaItemUpdate.PlaylistUpdated ->
+                playlistsPager.update { replaceByUri(it, update.item) { p -> p.uri } }
+            is MediaItemUpdate.RadioUpdated ->
+                radiosPager.update { replaceByUri(it, update.item) { r -> r.uri } }
+        }
+    }
+
+    /** Same list instance when the URI isn't present, so unrelated events don't recompose. */
+    private fun <T> replaceByUri(list: List<T>, item: T, uriOf: (T) -> String): List<T> {
+        val uri = uriOf(item)
+        if (list.none { uriOf(it) == uri }) return list
+        return list.map { if (uriOf(it) == uri) item else it }
     }
 
     fun onScreenVisible() {

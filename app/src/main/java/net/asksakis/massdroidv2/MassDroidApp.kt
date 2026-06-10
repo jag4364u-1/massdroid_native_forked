@@ -184,6 +184,12 @@ class MassDroidApp : Application(), ImageLoaderFactory {
             .okHttpClient { wsClient.getHttpClient() }
             .components { add(coil.decode.SvgDecoder.Factory()) }
             .crossfade(true)
+            // Artwork sources differ wildly in HTTP cache headers: fanart.tv sends NONE (no
+            // Cache-Control/Last-Modified/ETag), which the default header-respecting policy
+            // treats as always-stale, so those images re-download on EVERY display. Artwork is
+            // content-addressed (URL changes when the image changes), so ignore HTTP caching
+            // semantics and serve everything from the disk cache unconditionally.
+            .respectCacheHeaders(false)
             // Coil's default disk cache caps at 250MB; a full artwork library at size=500 is
             // ~250MB+, so the LRU evicts constantly and covers re-download on every launch.
             // Same directory as the default so existing entries survive the upgrade.
