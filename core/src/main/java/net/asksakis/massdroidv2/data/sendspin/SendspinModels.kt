@@ -81,7 +81,14 @@ private val defaultFormats = listOf(
     // resample/convert variable from the timing path (AudioTrack is PCM16).
     AudioFormatSpec(codec = "flac", sampleRate = 48000, bitDepth = 16, channels = 2),
     AudioFormatSpec(codec = "opus", sampleRate = 48000, bitDepth = 16, channels = 2),
-    AudioFormatSpec(codec = "pcm", sampleRate = 48000, bitDepth = 16, channels = 2)
+    AudioFormatSpec(codec = "pcm", sampleRate = 48000, bitDepth = 16, channels = 2),
+    // Also advertise 44.1 kHz lossless so a player can explicitly request bit-perfect
+    // native playback of the (44.1-dominant) library and avoid the server's 44.1->48
+    // resample. Listed AFTER the 48 kHz entries on purpose: the order is the server's
+    // automatic/no-override fallback, which must stay flac:48000 (the grouped-sync
+    // default). Only an explicit "FLAC 44.1" preference selects 44.1.
+    AudioFormatSpec(codec = "flac", sampleRate = 44100, bitDepth = 16, channels = 2),
+    AudioFormatSpec(codec = "pcm", sampleRate = 44100, bitDepth = 16, channels = 2)
 )
 
 @Serializable
