@@ -97,6 +97,17 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
         // transition (~1 s) and a measured seek restart (~2 s) so it never
         // pre-empts a legitimate fresh stream.
         private const val GATE_FRESH_STREAM_TIMEOUT_MS = 4_000L
+        // A native-output reopen (route preempt / bound device gone) is DEBOUNCED:
+        // a BT/car connect makes the bound output flap A2DP<->SCO<->earpiece<->speaker
+        // for a second or two. Reopening on each transient binds the stream to a
+        // momentary device (SCO/earpiece -> no car audio, "playing" but silent). We
+        // wait for the route to go quiet for [REOPEN_SETTLE_MS] (i.e. A2DP fully
+        // established) and only then reopen once, onto the settled route. Bounded by
+        // [REOPEN_MAX_WAIT_MS] so continuous flapping or a genuine speaker-only route
+        // still reopens. The producer parks on reopenInFlight meanwhile, so the ring
+        // is held (bounded), not grown.
+        private const val REOPEN_SETTLE_MS = 350L
+        private const val REOPEN_MAX_WAIT_MS = 4_000L
     }
 
     // Holds the raw WS frame (header included) with an offset/length view of
@@ -177,6 +188,11 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
     @Volatile private var outputPausedForIdle = false
     // Guards against posting multiple reopen requests while one is in flight.
     @Volatile private var reopenInFlight = false
+    // Debounced reopen (see REOPEN_SETTLE_MS): the pending settle callback and the
+    // wall-clock instant the current reopen cycle was first requested (for the max
+    // wait). Touched only on the main thread; 0 = no cycle in flight.
+    private var reopenSettleRunnable: Runnable? = null
+    @Volatile private var reopenRequestedAtMs = 0L
     // True while the output is frozen for a transient focus loss (solo/DIRECT).
     // startNativeOutput recreates the native object (which defaults to unfrozen),
     // so a reopen mid-freeze (phone call) must re-apply it or the preserved
@@ -632,49 +648,124 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
     /**
      * System device add/remove. Reopen the native stream only if OUR bound
      * output device is gone (a spurious add/remove of an unrelated device must
-     * not glitch playback). Then re-resolve and notify so the existing
-     * route-change chain runs the relock.
+     * not glitch playback) — but DEBOUNCED (see [scheduleReopen]): a BT/car
+     * connect flaps the device set, and reopening on each transient binds the
+     * stream to a momentary SCO/earpiece. While a reopen is already pending, every
+     * further device change just pushes the settle window out (the route is still
+     * moving). Then re-resolve + notify so the route-change chain runs the relock.
      */
     private fun handleDeviceChange() {
         if (!configured) return
+        if (reopenInFlight) {
+            // Route still changing while we wait to reopen: keep waiting for quiet.
+            scheduleReopen("device-change while settling")
+            return
+        }
         val boundId = nativeOutput.deviceId()
         val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
         val stillPresent = boundId > 0 && outputs.any { it.id == boundId }
         if (!stillPresent) {
-            Log.d(TAG, "Bound output device $boundId gone; reopening native output")
-            startNativeOutput()
+            scheduleReopen("bound device $boundId gone")
+        } else {
+            refreshRoutedDevice()
         }
-        refreshRoutedDevice()
     }
 
     /**
      * Reopen the native output after Oboe reported the stream disconnected with
      * the bound device still present (a phone call / nav prompt preempts the
      * route without removing the device, so handleDeviceChange does not fire).
-     * Reopens on the current route and relocks under the startup mute.
+     * Routed through the debounced [scheduleReopen]. The loop already set
+     * reopenInFlight to park the producer.
      */
     private fun reopenAfterDisconnect() {
         if (!configured) {
             reopenInFlight = false
             return
         }
-        // The producer parks on reopenInFlight, so it MUST be cleared on every
-        // exit or the producer (and audio) stalls forever.
+        scheduleReopen("oboe disconnect")
+    }
+
+    /**
+     * Coalesce reopen requests and wait for the output route to stabilise before
+     * binding (see [REOPEN_SETTLE_MS]). Re-armed on every trigger; commits once the
+     * route has been quiet for the settle window, or after [REOPEN_MAX_WAIT_MS].
+     * Runs on the main thread (device callbacks + the loop's mainHandler.post).
+     */
+    private fun scheduleReopen(reason: String) {
+        if (!configured) {
+            reopenInFlight = false
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (!reopenInFlight || reopenRequestedAtMs == 0L) {
+            reopenInFlight = true
+            reopenRequestedAtMs = now
+            Log.d(TAG, "Reopen requested ($reason): waiting for route to settle")
+        }
+        reopenSettleRunnable?.let { mainHandler.removeCallbacks(it) }
+        reopenSettleRunnable = null
+        if (now - reopenRequestedAtMs >= REOPEN_MAX_WAIT_MS) {
+            Log.d(TAG, "Reopen: max settle wait elapsed, reopening on current route")
+            commitReopen(reason)
+            return
+        }
+        val r = Runnable { commitReopen(reason) }
+        reopenSettleRunnable = r
+        mainHandler.postDelayed(r, REOPEN_SETTLE_MS)
+    }
+
+    /**
+     * Perform the deferred reopen once the route settled. If our bound device is
+     * gone and no external sink (A2DP/BLE/wired/USB — deliberately NOT SCO, which
+     * is the voice channel, not a music route) is present yet, keep waiting for
+     * A2DP to establish (until the max wait); a genuine speaker-only route falls
+     * through after the timeout (the controller's route-loss-settle handles the
+     * pause meanwhile). Reopens WITHOUT flushing so the preserved encoded buffer
+     * (e.g. across a phone-call freeze) refills the fresh ring.
+     */
+    private fun commitReopen(reason: String) {
+        reopenSettleRunnable = null
+        if (!configured) {
+            reopenInFlight = false
+            reopenRequestedAtMs = 0L
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (now - reopenRequestedAtMs < REOPEN_MAX_WAIT_MS) {
+            val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            val boundId = nativeOutput.deviceId()
+            val boundGone = boundId <= 0 || outputs.none { it.id == boundId }
+            val hasExternalSink = outputs.any { isExternalSink(it.type) }
+            if (boundGone && !hasExternalSink) {
+                Log.d(TAG, "Reopen ($reason): no external sink established yet, waiting")
+                val r = Runnable { commitReopen(reason) }
+                reopenSettleRunnable = r
+                mainHandler.postDelayed(r, REOPEN_SETTLE_MS)
+                return
+            }
+        }
         try {
-            Log.d(TAG, "Native output disconnected (route preempted); reopening")
-            // Reopen ONLY the native Oboe stream — do NOT flush. start() resets the
-            // native ring, but the encoded frameQueue (often a deep buffer preserved
-            // by a freeze across a phone call) stays intact and refills the fresh
-            // ring, so playback resumes from the preserved audio. Flushing here was a
-            // bug: it discarded the preserved buffer (~27 s -> 0), the server then
-            // throttled its feed and playback wedged at the start gate. DIRECT is a
-            // pure FIFO so the stale timeline anchor across the call is harmless.
-            startNativeOutput()        // fresh stream on the current route; clears disconnected_
+            Log.d(TAG, "Reopen committing ($reason)")
+            startNativeOutput()        // fresh stream on the now-settled route; clears disconnected_
             refreshRoutedDevice()
             onRoutingChanged?.invoke()
         } finally {
             reopenInFlight = false
+            reopenRequestedAtMs = 0L
         }
+    }
+
+    /** A real music sink we are willing to bind to. SCO (voice channel) is excluded. */
+    private fun isExternalSink(type: Int): Boolean = when (type) {
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+        AudioDeviceInfo.TYPE_BLE_HEADSET,
+        AudioDeviceInfo.TYPE_BLE_SPEAKER,
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+        AudioDeviceInfo.TYPE_WIRED_HEADSET,
+        AudioDeviceInfo.TYPE_USB_HEADSET,
+        AudioDeviceInfo.TYPE_USB_DEVICE -> true
+        else -> false
     }
 
     /**
@@ -1214,6 +1305,9 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
     private fun releaseInternal() {
         cancelIdleStop()
         outputPausedForIdle = false
+        reopenSettleRunnable?.let { mainHandler.removeCallbacks(it) }
+        reopenSettleRunnable = null
+        reopenRequestedAtMs = 0L
         reopenInFlight = false
         outputFrozen = false
         playbackActive = false
