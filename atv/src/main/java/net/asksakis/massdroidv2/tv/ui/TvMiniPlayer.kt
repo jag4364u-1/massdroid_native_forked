@@ -1,8 +1,14 @@
 package net.asksakis.massdroidv2.tv.ui
 
-import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -40,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -86,6 +93,11 @@ private const val HINT_VISIBLE_MS = 12_000L
 private val PILL_ART = 44.dp
 private val EXPANDED_ART = 64.dp
 
+// Self-drawn focus visuals (see CollapsedPill): a subtle magnify + a rounded accent border,
+// driven purely by focus. We do NOT use the tv-material3 Surface focus border/scale because
+// its hidden focused<->pressed transitions flash the default white square on OK.
+private const val PILL_FOCUS_SCALE = 1.05f
+
 /**
  * Floating mini player, bottom-right: collapsed it is a small artwork pill (with a
  * playing glyph); OK expands it into track info + transport + the player-switch
@@ -112,12 +124,9 @@ fun TvMiniPlayer(
     // Bumped on every focus move/press inside the component; restarts the idle timer.
     var interactionTick by remember { mutableIntStateOf(0) }
     var hasFocusInside by remember { mutableStateOf(false) }
-    // Set by the long-press-BACK shortcut: grab focus on expand even from elsewhere.
-    var forceFocusOnExpand by remember { mutableStateOf(false) }
     val internalPillFocus = remember { FocusRequester() }
-    // The pill doubles as the "last row" focus target the root jumps to on DPAD-DOWN.
+    // The island doubles as the "last row" focus target the root jumps to on DPAD-DOWN.
     val pillFocus = entryFocus ?: internalPillFocus
-    val expandedFocus = remember { FocusRequester() }
 
     LaunchedEffect(expanded, hasFocusInside) { onActiveChange?.invoke(expanded || hasFocusInside) }
     DisposableEffect(Unit) { onDispose { onActiveChange?.invoke(false) } }
@@ -142,13 +151,13 @@ fun TvMiniPlayer(
         LaunchedEffect(expandSignal) {
             expandSignal.collect {
                 interactionTick++
-                forceFocusOnExpand = true
                 val prefs = context.getSharedPreferences(HINT_PREFS, android.content.Context.MODE_PRIVATE)
                 if (!prefs.getBoolean(HINT_KEY_OPEN_PLAYER, false)) {
                     prefs.edit().putBoolean(HINT_KEY_OPEN_PLAYER, true).apply()
                     showOpenHint = true
                 }
-                if (expanded) expandedFocus.requestFocusRetrying() else expanded = true
+                expanded = true
+                pillFocus.requestFocusRetrying()
             }
         }
     }
@@ -157,15 +166,11 @@ fun TvMiniPlayer(
         delay(AUTO_COLLAPSE_MS)
         expanded = false
     }
-    // Hand focus over on every state flip so the D-pad never lands in a removed node. The
-    // requesters attach a frame or two later inside AnimatedContent, hence the retry.
+    // On collapse a transport button may have been focused and is now gone; pull focus back
+    // to the always-present island so the D-pad never lands on a removed node. On expand the
+    // island stays focused (it is the same node), so no hand-off is needed.
     LaunchedEffect(expanded) {
-        if (expanded && (hasFocusInside || forceFocusOnExpand)) {
-            expandedFocus.requestFocusRetrying()
-        } else if (!expanded && hasFocusInside) {
-            pillFocus.requestFocusRetrying()
-        }
-        forceFocusOnExpand = false
+        if (!expanded && hasFocusInside) pillFocus.requestFocusRetrying()
     }
 
     val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
@@ -208,38 +213,28 @@ fun TvMiniPlayer(
             HintBalloon("Press OK to open the full player")
             Spacer(Modifier.height(8.dp))
         }
-        // Genuine expand/collapse: the container's size animates (one-shot tween, fine per
-        // the project animation rules) and the content is revealed by the growing clip, no
-        // crossfade. Bottom/end anchoring comes from the parent alignment, so it grows up-left.
-        Box(
-            modifier = Modifier.animateContentSize(
-                animationSpec = tween(EXPAND_ANIM_MS, easing = FastOutSlowInEasing)
-            )
-        ) {
-            val isExpanded = expanded
-            if (isExpanded) {
-                ExpandedMiniPlayer(
-                    player = selected,
-                    bodyFocus = expandedFocus,
-                    touch = touch,
-                    onOpenPlayer = {
-                        showOpenHint = false
-                        selected?.let { onOpenPlayer(it.playerId) }
-                    },
-                    onPlayPause = viewModel::playPause,
-                    onNext = viewModel::next,
-                    onVolumeDown = viewModel::volumeDown,
-                    onVolumeUp = viewModel::volumeUp,
-                    onSwitchPlayer = { showPicker = true }
-                )
-            } else {
-                CollapsedPill(
-                    player = selected,
-                    modifier = touch.focusRequester(pillFocus),
-                    onClick = { expanded = true }
-                )
-            }
-        }
+        // Single island: artwork + title are always present (the "pill"); the transport row
+        // slides in/out with a genuine horizontal size animation. No content swap, so the
+        // expand/collapse is smooth both ways and focus never leaves the island.
+        MiniPlayerIsland(
+            player = selected,
+            expanded = expanded,
+            pillFocus = pillFocus,
+            touch = touch,
+            onPrimaryClick = {
+                if (expanded) {
+                    showOpenHint = false
+                    selected?.let { onOpenPlayer(it.playerId) }
+                } else {
+                    expanded = true
+                }
+            },
+            onPlayPause = viewModel::playPause,
+            onNext = viewModel::next,
+            onVolumeDown = viewModel::volumeDown,
+            onVolumeUp = viewModel::volumeUp,
+            onSwitchPlayer = { showPicker = true }
+        )
     }
     LaunchedEffect(expanded) { if (expanded) showHint = false }
     LaunchedEffect(showOpenHint) {
@@ -264,135 +259,149 @@ fun TvMiniPlayer(
     }
 }
 
+/**
+ * One island for both states. Artwork + title are always present (the "pill"); pressing OK
+ * expands when collapsed and opens the full player when expanded. The transport row is the
+ * only thing that appears/disappears, via a genuine horizontal size animation, so there is no
+ * content swap: the expand/collapse is smooth both ways and focus stays on the (always present)
+ * primary surface — it never falls back to the content underneath.
+ */
 @Composable
-private fun CollapsedPill(
+private fun MiniPlayerIsland(
     player: Player?,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit
-) {
-    Surface(
-        onClick = onClick,
-        shape = androidx.tv.material3.ClickableSurfaceDefaults.shape(RoundedCornerShape(14.dp)),
-        modifier = modifier
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(8.dp).widthIn(max = 300.dp)
-        ) {
-            MiniArtwork(player, Modifier.size(PILL_ART))
-            Spacer(Modifier.width(10.dp))
-            Column(modifier = Modifier.padding(end = 6.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (player?.state == PlaybackState.PLAYING) {
-                        Icon(
-                            Icons.Filled.GraphicEq,
-                            contentDescription = "Playing",
-                            modifier = Modifier.padding(end = 5.dp).size(13.dp)
-                        )
-                    }
-                    Text(
-                        player?.currentMedia?.title?.takeIf { it.isNotBlank() } ?: "Nothing playing",
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Filled.Speaker,
-                        contentDescription = null,
-                        tint = LocalContentColor.current.copy(alpha = 0.7f),
-                        modifier = Modifier.padding(end = 4.dp).size(12.dp)
-                    )
-                    Text(
-                        player?.displayName ?: "No player",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = LocalContentColor.current.copy(alpha = 0.7f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ExpandedMiniPlayer(
-    player: Player?,
-    bodyFocus: FocusRequester,
+    expanded: Boolean,
+    pillFocus: FocusRequester,
     touch: Modifier,
-    onOpenPlayer: () -> Unit,
+    onPrimaryClick: () -> Unit,
     onPlayPause: () -> Unit,
     onNext: () -> Unit,
     onVolumeDown: () -> Unit,
     onVolumeUp: () -> Unit,
     onSwitchPlayer: () -> Unit
 ) {
-    Surface(shape = RoundedCornerShape(16.dp)) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp).widthIn(max = 560.dp)
+    var focused by remember { mutableStateOf(false) }
+    val artSize by animateDpAsState(
+        targetValue = if (expanded) EXPANDED_ART else PILL_ART,
+        animationSpec = tween(EXPAND_ANIM_MS, easing = FastOutSlowInEasing),
+        label = "miniArt"
+    )
+    val anim = tween<Float>(EXPAND_ANIM_MS, easing = FastOutSlowInEasing)
+    // Bar background only when expanded. Drawn on the Row (background draws but does NOT clip
+    // its children), not via a wrapping Surface: a Surface would clip the focused pill's
+    // magnify and leave a dark rounded frame around the grey selection when collapsed.
+    val barColor by animateColorAsState(
+        targetValue = if (expanded) MaterialTheme.colorScheme.surface else Color.Transparent,
+        animationSpec = tween(EXPAND_ANIM_MS, easing = FastOutSlowInEasing),
+        label = "miniBar"
+    )
+    val barPadding by animateDpAsState(
+        targetValue = if (expanded) 6.dp else 0.dp,
+        animationSpec = tween(EXPAND_ANIM_MS, easing = FastOutSlowInEasing),
+        label = "miniBarPad"
+    )
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .background(barColor, RoundedCornerShape(16.dp))
+            .padding(barPadding)
+    ) {
+        // Primary target: artwork + title. Its own fill is the visible pill when collapsed
+        // (surfaceVariant) and transparent when expanded (it blends into the bar). Focus cue is
+        // a brighter fill + a slight magnify (collapsed only, so it can't overflow the bar);
+        // pressed pinned to the same fill so OK never flashes the white inverseSurface default.
+        Surface(
+            onClick = onPrimaryClick,
+            shape = androidx.tv.material3.ClickableSurfaceDefaults.shape(RoundedCornerShape(14.dp)),
+            scale = androidx.tv.material3.ClickableSurfaceDefaults.scale(focusedScale = 1f),
+            colors = androidx.tv.material3.ClickableSurfaceDefaults.colors(
+                containerColor = if (expanded) Color.Transparent else MaterialTheme.colorScheme.surfaceVariant,
+                // Explicit unfocused content color: with a transparent container the default
+                // is contentColorFor(Transparent) = black, which makes the title unreadable on
+                // the dark bar while a transport button (not the pill) holds focus.
+                contentColor = MaterialTheme.colorScheme.onSurface,
+                focusedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                focusedContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                pressedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                pressedContentColor = MaterialTheme.colorScheme.onPrimaryContainer
+            ),
+            modifier = touch
+                .focusRequester(pillFocus)
+                .onFocusChanged { focused = it.isFocused }
+                .scale(if (focused && !expanded) PILL_FOCUS_SCALE else 1f)
         ) {
-            // Main body: artwork + track info; OK opens the full player view. Focus feedback is
-            // color-only (scale 1.0): the default zoom would overflow the outer container.
-            Surface(
-                onClick = onOpenPlayer,
-                shape = androidx.tv.material3.ClickableSurfaceDefaults.shape(RoundedCornerShape(12.dp)),
-                scale = androidx.tv.material3.ClickableSurfaceDefaults.scale(focusedScale = 1f),
-                modifier = touch.focusRequester(bodyFocus)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.padding(8.dp)
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.padding(6.dp)
-                ) {
-                    MiniArtwork(player, Modifier.size(EXPANDED_ART))
-                    Spacer(Modifier.width(12.dp))
-                    Column(modifier = Modifier.widthIn(max = 220.dp).padding(end = 6.dp)) {
+                MiniArtwork(player, Modifier.size(artSize))
+                Spacer(Modifier.width(10.dp))
+                Column(modifier = Modifier.widthIn(max = 220.dp).padding(end = 6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (player?.state == PlaybackState.PLAYING) {
+                            Icon(
+                                Icons.Filled.GraphicEq,
+                                contentDescription = "Playing",
+                                modifier = Modifier.padding(end = 5.dp).size(13.dp)
+                            )
+                        }
                         Text(
                             player?.currentMedia?.title?.takeIf { it.isNotBlank() } ?: "Nothing playing",
-                            style = MaterialTheme.typography.titleMedium,
+                            style = MaterialTheme.typography.bodyMedium,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                        val subtitle = listOfNotNull(
-                            player?.currentMedia?.artist?.takeIf { it.isNotBlank() },
-                            player?.displayName
-                        ).joinToString(" · ")
-                        if (subtitle.isNotBlank()) {
-                            Text(
-                                subtitle,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = LocalContentColor.current.copy(alpha = 0.7f),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
+                    }
+                    val subtitle = listOfNotNull(
+                        player?.currentMedia?.artist?.takeIf { it.isNotBlank() },
+                        player?.displayName
+                    ).joinToString(" · ")
+                    if (subtitle.isNotBlank()) {
+                        Text(
+                            subtitle,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = LocalContentColor.current.copy(alpha = 0.7f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
             }
-            Spacer(Modifier.width(8.dp))
-            IconButton(onClick = onPlayPause, modifier = touch) {
-                Icon(
-                    if (player?.state == PlaybackState.PLAYING) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                    contentDescription = "Play/Pause"
-                )
-            }
-            Spacer(Modifier.width(6.dp))
-            IconButton(onClick = onNext, modifier = touch) {
-                Icon(Icons.Filled.SkipNext, contentDescription = "Next")
-            }
-            Spacer(Modifier.width(6.dp))
-            IconButton(onClick = onVolumeDown, modifier = touch) {
-                Icon(Icons.AutoMirrored.Filled.VolumeDown, contentDescription = "Volume down")
-            }
-            Spacer(Modifier.width(6.dp))
-            IconButton(onClick = onVolumeUp, modifier = touch) {
-                Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Volume up")
-            }
-            Spacer(Modifier.width(6.dp))
-            IconButton(onClick = onSwitchPlayer, modifier = touch) {
-                Icon(Icons.Filled.Speaker, contentDescription = "Switch player")
+        }
+        // Transport controls: slide in/out with a genuine horizontal size animation,
+        // clipped while animating so nothing pops. Only composed while expanded, so they
+        // are focusable only then.
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandHorizontally(animationSpec = tween(EXPAND_ANIM_MS, easing = FastOutSlowInEasing)) +
+                fadeIn(anim),
+            exit = shrinkHorizontally(animationSpec = tween(EXPAND_ANIM_MS, easing = FastOutSlowInEasing)) +
+                fadeOut(anim)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.width(4.dp))
+                IconButton(onClick = onPlayPause, modifier = touch) {
+                    Icon(
+                        if (player?.state == PlaybackState.PLAYING) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                        contentDescription = "Play/Pause"
+                    )
+                }
+                Spacer(Modifier.width(6.dp))
+                IconButton(onClick = onNext, modifier = touch) {
+                    Icon(Icons.Filled.SkipNext, contentDescription = "Next")
+                }
+                Spacer(Modifier.width(6.dp))
+                IconButton(onClick = onVolumeDown, modifier = touch) {
+                    Icon(Icons.AutoMirrored.Filled.VolumeDown, contentDescription = "Volume down")
+                }
+                Spacer(Modifier.width(6.dp))
+                IconButton(onClick = onVolumeUp, modifier = touch) {
+                    Icon(Icons.AutoMirrored.Filled.VolumeUp, contentDescription = "Volume up")
+                }
+                Spacer(Modifier.width(6.dp))
+                IconButton(onClick = onSwitchPlayer, modifier = touch) {
+                    Icon(Icons.Filled.Speaker, contentDescription = "Switch player")
+                }
+                Spacer(Modifier.width(2.dp))
             }
         }
     }

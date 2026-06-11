@@ -66,10 +66,18 @@ fun TvBrowseScreen(
     // Track the focused card so the mini player can hand the cursor back to it on exit.
     var lastFocusedKey by remember { mutableStateOf<String?>(null) }
     val restoreRequester = remember { FocusRequester() }
+    // Where the cursor returns when leaving the mini player: the remembered card if it is
+    // still in the current list, otherwise the first item. Falling back to a grid item (not
+    // null) keeps restore inside the grid; a null target would let the host clear focus and
+    // land on the first focusable on screen instead (the "Artists" category chip).
+    val restoreKey = lastFocusedKey?.takeIf { k -> items.any { it.uri == k } }
+        ?: items.firstOrNull()?.uri
     val focusMemory = LocalTvFocusMemory.current
     DisposableEffect(focusMemory) {
         val hook: () -> Boolean = {
-            lastFocusedKey != null && runCatching { restoreRequester.requestFocus() }.isSuccess
+            val target = lastFocusedKey?.takeIf { k -> items.any { it.uri == k } }
+                ?: items.firstOrNull()?.uri
+            target != null && runCatching { restoreRequester.requestFocus() }.isSuccess
         }
         focusMemory.restoreToLastFocused = hook
         // Only clear our own hook: on navigation the NEW screen registers before the old
@@ -81,7 +89,7 @@ fun TvBrowseScreen(
     val focusModifierFor: (String) -> Modifier = { key ->
         Modifier
             .onFocusChanged { if (it.isFocused) lastFocusedKey = key }
-            .then(if (key == lastFocusedKey) Modifier.focusRequester(restoreRequester) else Modifier)
+            .then(if (key == restoreKey) Modifier.focusRequester(restoreRequester) else Modifier)
     }
 
     LaunchedEffect(gridState, items.size) {
