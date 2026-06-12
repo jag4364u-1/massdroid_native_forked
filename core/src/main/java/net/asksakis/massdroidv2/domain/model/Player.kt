@@ -69,7 +69,6 @@ enum class SendspinAudioFormat(val label: String) {
     SMART("Smart"),
     OPUS("Opus"),
     FLAC("FLAC"),
-    FLAC_44("FLAC 44.1"),
     PCM("PCM");
 
     fun toApiValue(isWifi: Boolean): String = when (this) {
@@ -79,10 +78,6 @@ enum class SendspinAudioFormat(val label: String) {
         SMART -> if (isWifi) "flac:48000:16:2" else "opus:48000:16:2"
         OPUS -> "opus:48000:16:2"
         FLAC -> "flac:48000:16:2"
-        // Native 44.1 lossless: the MA server resamples the whole session to one
-        // rate, so for a 44.1-dominant library this keeps most tracks bit-perfect
-        // (no 44.1->48 server resample). Solo only; a group still forces FLAC 48k.
-        FLAC_44 -> "flac:44100:16:2"
         PCM -> "pcm:48000:16:2"
     }
 
@@ -91,7 +86,6 @@ enum class SendspinAudioFormat(val label: String) {
         SMART -> if (isWifi) "flac" else "opus"
         OPUS -> "opus"
         FLAC -> "flac"
-        FLAC_44 -> "flac"
         PCM -> "pcm"
     }
 

@@ -645,7 +645,6 @@ fun PlayerSettingsDialog(
                                     val localFormat = when {
                                         newFormat == "smart" -> SendspinAudioFormat.SMART
                                         newFormat.startsWith("opus") -> SendspinAudioFormat.OPUS
-                                        newFormat.startsWith("flac:44100") -> SendspinAudioFormat.FLAC_44
                                         newFormat.startsWith("flac") -> SendspinAudioFormat.FLAC
                                         newFormat.startsWith("pcm") -> SendspinAudioFormat.PCM
                                         else -> null
