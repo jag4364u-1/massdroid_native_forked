@@ -586,6 +586,15 @@ private fun MassDroidApp(
         }
     }
 
+    LaunchedEffect(Unit) {
+        appNoticesViewModel.permissionDenied.collect {
+            snackbarHostState.showSnackbar(
+                message = "This action needs an administrator account on your Music Assistant server.",
+                duration = SnackbarDuration.Long
+            )
+        }
+    }
+
     val miniPlayerCollapsedHeight = 72.dp
     val miniPlayerMargin = 8.dp
     var bottomBarHeight by remember { mutableStateOf(0.dp) }

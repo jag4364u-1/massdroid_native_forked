@@ -24,7 +24,8 @@ sealed class ConnectionState {
 
 class MaWebSocketClient(
     private val baseOkHttpClient: OkHttpClient,
-    private val json: Json
+    private val json: Json,
+    private val accountNoticeReporter: net.asksakis.massdroidv2.data.util.AccountNoticeReporter? = null
 ) {
     companion object {
         private const val TAG = "MaWsClient"
@@ -35,6 +36,8 @@ class MaWebSocketClient(
         private const val MAX_RETRY_COUNT = AGGRESSIVE_RETRY_COUNT + PATIENT_RETRY_COUNT
         private const val STABLE_CONNECTION_RESET_MS = 30_000L
         private const val COMMAND_RETRY_DELAY_MS = 140L
+        // music_assistant_models InsufficientPermissions (admin-gated command, MA 2.9.0+).
+        private const val ERROR_INSUFFICIENT_PERMISSIONS = 22
     }
 
     private var okHttpClient: OkHttpClient = baseOkHttpClient
@@ -394,6 +397,13 @@ class MaWebSocketClient(
                             ?: obj["details"]?.jsonPrimitive?.contentOrNull
                             ?: "Unknown error"
                         Log.e(TAG, "RPC error [$messageId]: $errorMsg (code=$errorCode)")
+                        // MA 2.9.0+ gates some write commands (create/remove group, save player
+                        // config, ...) behind an admin role and returns InsufficientPermissions
+                        // for everyone else. Surface a single friendly app-level notice from this
+                        // one choke point so every admin-gated command is covered.
+                        if (errorCode == ERROR_INSUFFICIENT_PERMISSIONS) {
+                            accountNoticeReporter?.reportPermissionDenied()
+                        }
                         pendingRequests.remove(messageId)?.completeExceptionally(
                             MaApiException(errorMsg, errorCode ?: -1)
                         )
@@ -619,7 +629,11 @@ class MaWebSocketClient(
         partialResults.clear()
     }
 
-    fun getImageUrl(imagePath: String, size: Int = 500, provider: String? = null): String? {
+    // MA 2.9.0 (imageproxy hardening, server PR #3960) enforces a size whitelist on the legacy
+    // /imageproxy endpoint: {0, 80, 160, 256, 512, 1024}. A non-whitelisted size (the old 500)
+    // is now rejected, so every proxied cover fails. 512 is the nearest whitelisted value and is
+    // accepted by older servers too (they took any size), so it is safe across versions.
+    fun getImageUrl(imagePath: String, size: Int = 512, provider: String? = null): String? {
         // Use the user-configured server URL (external), not the internal base_url
         val base = serverUrl?.trimEnd('/') ?: return null
         val encodedPath = java.net.URLEncoder.encode(imagePath, "UTF-8")

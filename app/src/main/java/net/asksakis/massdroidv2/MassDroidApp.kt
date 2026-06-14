@@ -190,7 +190,7 @@ class MassDroidApp : Application(), ImageLoaderFactory {
             // content-addressed (URL changes when the image changes), so ignore HTTP caching
             // semantics and serve everything from the disk cache unconditionally.
             .respectCacheHeaders(false)
-            // Coil's default disk cache caps at 250MB; a full artwork library at size=500 is
+            // Coil's default disk cache caps at 250MB; a full artwork library at size=512 is
             // ~250MB+, so the LRU evicts constantly and covers re-download on every launch.
             // Same directory as the default so existing entries survive the upgrade.
             .diskCache {

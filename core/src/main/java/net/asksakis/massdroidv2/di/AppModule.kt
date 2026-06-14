@@ -79,8 +79,9 @@ object AppModule {
     @Singleton
     fun provideMaWebSocketClient(
         okHttpClient: OkHttpClient,
-        json: Json
-    ): MaWebSocketClient = MaWebSocketClient(okHttpClient, json)
+        json: Json,
+        accountNoticeReporter: net.asksakis.massdroidv2.data.util.AccountNoticeReporter
+    ): MaWebSocketClient = MaWebSocketClient(okHttpClient, json, accountNoticeReporter)
 
     @Provides
     @Singleton
