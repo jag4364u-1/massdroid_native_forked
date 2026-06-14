@@ -45,6 +45,8 @@ class SettingsRepositoryImpl @Inject constructor(
         private val KEY_LIBRARY_SORT_DESC = stringPreferencesKey("library_sort_desc")
         private val KEY_LIBRARY_FAV_ONLY = stringPreferencesKey("library_fav_only")
         private val KEY_LIBRARY_PROVIDER_FILTERS = stringPreferencesKey("library_provider_filters")
+        private val KEY_PLAYLIST_SORT_KEY = stringPreferencesKey("playlist_sort_key")
+        private val KEY_PLAYLIST_SORT_DESC = booleanPreferencesKey("playlist_sort_desc")
         private val KEY_LASTFM_API_KEY = stringPreferencesKey("lastfm_api_key")
         private val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
         private val KEY_SENDSPIN_AUDIO_FORMAT = stringPreferencesKey("sendspin_audio_format")
@@ -201,6 +203,22 @@ class SettingsRepositoryImpl @Inject constructor(
 
     override suspend fun setThemeMode(mode: String) {
         context.dataStore.edit { it[KEY_THEME_MODE] = mode }
+    }
+
+    override val playlistSortKey: Flow<String> = safeData.map { prefs ->
+        prefs[KEY_PLAYLIST_SORT_KEY] ?: "POSITION"
+    }
+
+    override suspend fun setPlaylistSortKey(key: String) {
+        context.dataStore.edit { it[KEY_PLAYLIST_SORT_KEY] = key }
+    }
+
+    override val playlistSortDescending: Flow<Boolean> = safeData.map { prefs ->
+        prefs[KEY_PLAYLIST_SORT_DESC] ?: false
+    }
+
+    override suspend fun setPlaylistSortDescending(descending: Boolean) {
+        context.dataStore.edit { it[KEY_PLAYLIST_SORT_DESC] = descending }
     }
 
     override val sendspinAudioFormat: Flow<String> = safeData.map { prefs ->

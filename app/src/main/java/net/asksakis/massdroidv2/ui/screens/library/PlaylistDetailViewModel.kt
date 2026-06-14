@@ -11,6 +11,7 @@ import net.asksakis.massdroidv2.domain.model.*
 import net.asksakis.massdroidv2.domain.recommendation.MediaIdentity
 import net.asksakis.massdroidv2.domain.repository.MusicRepository
 import net.asksakis.massdroidv2.domain.repository.PlayerRepository
+import net.asksakis.massdroidv2.domain.repository.SettingsRepository
 import net.asksakis.massdroidv2.domain.repository.SmartListeningRepository
 import javax.inject.Inject
 
@@ -30,7 +31,8 @@ class PlaylistDetailViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val musicRepository: MusicRepository,
     private val playerRepository: PlayerRepository,
-    private val smartListeningRepository: SmartListeningRepository
+    private val smartListeningRepository: SmartListeningRepository,
+    private val settingsRepository: SettingsRepository
 ) : ViewModel() {
 
     val itemId: String = savedStateHandle["itemId"] ?: ""
@@ -38,19 +40,25 @@ class PlaylistDetailViewModel @Inject constructor(
     private val playlistUri: String = savedStateHandle["uri"] ?: ""
 
     private val _rawTracks = MutableStateFlow<List<Track>>(emptyList())
-    private val _sortKey = MutableStateFlow(PlaylistSortKey.POSITION)
-    val sortKey: StateFlow<PlaylistSortKey> = _sortKey.asStateFlow()
-    private val _sortDescending = MutableStateFlow(false)
-    val sortDescending: StateFlow<Boolean> = _sortDescending.asStateFlow()
+    // Sort is a single global preference (persisted), applied to every playlist and surviving
+    // navigation/restart — not per-playlist. Backed by DataStore via [SettingsRepository].
+    val sortKey: StateFlow<PlaylistSortKey> = settingsRepository.playlistSortKey
+        .map { stored -> runCatching { PlaylistSortKey.valueOf(stored) }.getOrDefault(PlaylistSortKey.POSITION) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), PlaylistSortKey.POSITION)
+    val sortDescending: StateFlow<Boolean> = settingsRepository.playlistSortDescending
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
     private val _favoritesOnly = MutableStateFlow(false)
     val favoritesOnly: StateFlow<Boolean> = _favoritesOnly.asStateFlow()
 
     val tracks: StateFlow<List<Track>> = combine(
-        _rawTracks, _sortKey, _sortDescending, _favoritesOnly
+        _rawTracks, sortKey, sortDescending, _favoritesOnly
     ) { raw, key, desc, favsOnly ->
         val filtered = if (favsOnly) raw.filter { it.favorite } else raw
         val sorted = when (key) {
-            PlaylistSortKey.POSITION -> if (desc) filtered else filtered.reversed()
+            // Default (ascending) is the playlist's own order as the server returns it (matches
+            // MA web and other players); descending reverses it. This was inverted, so every
+            // playlist showed bottom-to-top until the user manually toggled descending.
+            PlaylistSortKey.POSITION -> if (desc) filtered.reversed() else filtered
             PlaylistSortKey.NAME -> filtered.sortedBy { it.name.lowercase() }
             PlaylistSortKey.ARTIST -> filtered.sortedBy { it.artistNames.lowercase() }
             PlaylistSortKey.ALBUM -> filtered.sortedBy { it.albumName.lowercase() }
@@ -69,11 +77,13 @@ class PlaylistDetailViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     fun setSortKey(key: PlaylistSortKey) {
-        if (_sortKey.value == key) {
-            _sortDescending.value = !_sortDescending.value
-        } else {
-            _sortKey.value = key
-            _sortDescending.value = false
+        viewModelScope.launch {
+            if (sortKey.value == key) {
+                settingsRepository.setPlaylistSortDescending(!sortDescending.value)
+            } else {
+                settingsRepository.setPlaylistSortKey(key.name)
+                settingsRepository.setPlaylistSortDescending(false)
+            }
         }
     }
 
