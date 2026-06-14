@@ -49,6 +49,25 @@ class PlayerRepositoryImpl @Inject constructor(
         // PLAYER_ADDED/REMOVED events (e.g. an MA server restart re-registering
         // players one by one). Long enough to collapse the burst into one refresh.
         private const val PLAYER_RESYNC_DEBOUNCE_MS = 2_500L
+        // Max wall-clock gap we forward-project a server-captured elapsed_time
+        // across. During live playback (now - elapsed_time_last_updated) is just
+        // WS latency (well under a second on LAN), so projecting it yields the
+        // true current position. But the MA server FREEZES last_updated while
+        // paused, so a QUEUE_UPDATED that lands right after a long pause/background
+        // carries a capture stale by the whole pause duration — projecting that
+        // forward jumps the position ahead by the paused seconds (and can shoot
+        // past the track end, e.g. 4:04 on a 3:31 track). Beyond this cap the
+        // capture is treated as stale and the elapsed value is anchored as-is.
+        private const val MAX_POSITION_PROJECTION_S = 2.0
+        // Bounded wait for the saved player to (re)appear after a reconnect/reboot
+        // before selecting it. players/all can return empty/partial while the
+        // server is still registering players, which then arrive later (via a
+        // players/all resync, PLAYER_ADDED, or PLAYER_UPDATED). A one-shot
+        // "present?" check + PLAYER_ADDED-only deferral could leave the player
+        // set-but-never-selected (ghost: selected id set, _selectedPlayer null,
+        // queue coordinator never fetches). We wait for it to actually show up in
+        // the player list, then select it for real.
+        private const val PLAYER_RESTORE_WAIT_MS = 15_000L
         // Distance from the track end below which we still consider a seek
         // "into the track" rather than "to the end". 1.0 s is plenty:
         // playback always stops short of the very last sample anyway, and
@@ -157,8 +176,16 @@ class PlayerRepositoryImpl @Inject constructor(
     @Volatile private var positionBaseTime = 0.0
     @Volatile private var positionBaseTimestamp = 0L
     @Volatile private var isPlaying = false
-    private var trackDuration = 0.0
+    // Written from the QUEUE_UPDATED event collector, read from the ticker
+    // coroutine — both on the multi-threaded IO pool — so it must be volatile to
+    // match positionBaseTime/positionBaseTimestamp (the other position hot-path
+    // fields) and avoid a stale clamp bound on a tick.
+    @Volatile private var trackDuration = 0.0
     private var positionTickJob: Job? = null
+    // In-flight saved-player restore await (see the Connected branch). Held so a
+    // reconnect flap cancels the previous wait instead of stacking stale ones
+    // that could re-select an out-of-date player.
+    private var restoreSelectionJob: Job? = null
     private var favoriteOverride: Boolean? = null
     private var favoriteOverrideUri: String? = null
 
@@ -277,15 +304,33 @@ class PlayerRepositoryImpl @Inject constructor(
                         pendingRestoredPlayerId = restoredPlayerId
                         selectedPlayerId = restoredPlayerId
                         refreshPlayers()
-                        restoredPlayerId?.let { id ->
-                            if (_players.value.any { it.playerId == id }) {
-                                // selectPlayer launches its own refreshQueueForPlayerWithRetry,
-                                // so do NOT call it again here — that produced the duplicate
-                                // get_active_queue RPC on every cold-start.
-                                selectPlayer(id)
-                                Log.d(TAG, "Restored saved player: $id")
-                            } else {
-                                Log.d(TAG, "Waiting for late-arriving restored player: $id")
+                        restoreSelectionJob?.cancel()
+                        restoreSelectionJob = restoredPlayerId?.let { id ->
+                            // Don't treat "not in _players yet" as final. After a
+                            // (re)connect or server reboot, players/all can return an
+                            // empty/partial list and the saved player then appears LATER
+                            // by any of: a players/all resync populating the list with no
+                            // per-player event, a PLAYER_ADDED (full reconnect / reboot
+                            // re-registers from empty — the common path), or a
+                            // PLAYER_UPDATED (quick "hello changed" reconnect). The old
+                            // one-shot present-check + PLAYER_ADDED-only deferral missed
+                            // the first two, leaving the player set-but-never-selected
+                            // (ghost UI: _selectedPlayer null + queue never fetched, even
+                            // though queueState/title stay live off selectedPlayerId).
+                            // Waiting on the players list itself covers all three; the
+                            // PLAYER_UPDATED consumer below is the belt-and-suspenders for
+                            // the quick-reconnect case. selectPlayer fans out to
+                            // refreshQueueForPlayerWithRetry.
+                            scope.launch {
+                                val appeared = withTimeoutOrNull(PLAYER_RESTORE_WAIT_MS) {
+                                    players.first { list -> list.any { it.playerId == id } }
+                                }
+                                if (appeared != null) {
+                                    if (_selectedPlayer.value?.playerId != id) selectPlayer(id)
+                                    Log.d(TAG, "Restored saved player: $id")
+                                } else {
+                                    Log.d(TAG, "Restored player $id not present within ${PLAYER_RESTORE_WAIT_MS}ms")
+                                }
                             }
                         }
                     }
@@ -367,6 +412,17 @@ class PlayerRepositoryImpl @Inject constructor(
                     _players.update { list ->
                         list.map { if (it.playerId == player.playerId) player else it }
                     }
+                    // A quick ("hello changed") reconnect re-announces an
+                    // already-registered player via PLAYER_UPDATED rather than
+                    // PLAYER_ADDED, so complete a pending saved-player restore here
+                    // too. (Full reconnect / server reboot re-register from empty and
+                    // come through PLAYER_ADDED; the bounded wait in the Connected
+                    // branch covers a players/all resync with no per-player event.)
+                    if (player.playerId == pendingRestoredPlayerId) {
+                        selectPlayer(player.playerId)
+                        pendingRestoredPlayerId = null
+                        Log.d(TAG, "Restored saved player via update: ${player.playerId}")
+                    }
                     if (player.playerId == selectedPlayerId) {
                         if (!player.available) {
                             Log.d(TAG, "Selected player became unavailable, deselecting: ${player.displayName}")
@@ -383,8 +439,17 @@ class PlayerRepositoryImpl @Inject constructor(
                             _selectedPlayer.value = player
                             val wasPlaying = isPlaying
                             isPlaying = player.state == PlaybackState.PLAYING
-                            if (isPlaying && !wasPlaying) startPositionTicker()
-                            else if (!isPlaying && wasPlaying) stopPositionTicker()
+                            if (isPlaying && !wasPlaying) {
+                                // Re-anchor to now so the ticker resumes from the
+                                // paused position instead of adding the paused
+                                // wall-clock gap (the base timestamp is frozen at
+                                // the pre-pause update; without this the position
+                                // jumps forward by the whole pause duration).
+                                positionBaseTimestamp = System.currentTimeMillis()
+                                startPositionTicker()
+                            } else if (!isPlaying && wasPlaying) {
+                                stopPositionTicker()
+                            }
                         }
                     }
                 }
@@ -460,6 +525,15 @@ class PlayerRepositoryImpl @Inject constructor(
                             favoriteOverride = null
                             favoriteOverrideUri = null
                         }
+                        // On a track change, reset the displayed position BEFORE
+                        // publishing the new queue state. Position (_elapsedTime) and
+                        // duration (queueState.currentItem.duration) are separate
+                        // flows; if the new — often shorter — duration emits while
+                        // _elapsedTime still holds the previous track's end position,
+                        // the UI flashes e.g. "9:54 / 4:11" for a frame. Resetting
+                        // first makes the only possible transient "0:00 / old-duration"
+                        // (harmless); updatePosition below re-publishes 0 consistently.
+                        if (currentItemChanged) publishPosition(0.0)
                         _queueState.value = domainState
                         trackDuration = serverQueue.currentItem?.duration ?: 0.0
                         val resolved = if (currentItemChanged) 0.0 else serverQueue.elapsedTime
@@ -1006,14 +1080,24 @@ class PlayerRepositoryImpl @Inject constructor(
         serverElapsedAtMs: Long = System.currentTimeMillis(),
         startTicker: Boolean = true,
     ) {
-        positionBaseTime = serverElapsed
-        positionBaseTimestamp = serverElapsedAtMs
-        val interpolated = if (positionBaseTimestamp <= 0L) {
+        val now = System.currentTimeMillis()
+        // Project the server-captured elapsed forward to "now", but only across a
+        // sane window — a stale capture (post-pause/background) must not add its
+        // gap (see MAX_POSITION_PROJECTION_S).
+        val projected = if (serverElapsedAtMs <= 0L) {
             serverElapsed
         } else {
-            (serverElapsed + (System.currentTimeMillis() - positionBaseTimestamp) / 1000.0).coerceAtLeast(0.0)
+            val deltaS = (now - serverElapsedAtMs) / 1000.0
+            serverElapsed + deltaS.coerceIn(0.0, MAX_POSITION_PROJECTION_S)
         }
-        publishPosition(interpolated)
+        val current = (if (trackDuration > 0) projected.coerceAtMost(trackDuration) else projected)
+            .coerceAtLeast(0.0)
+        // Anchor the local ticker to NOW (not the server capture time) so every
+        // subsequent tick advances from the resolved current position instead of
+        // re-deriving it from a possibly-stale capture and over-counting.
+        positionBaseTime = current
+        positionBaseTimestamp = now
+        publishPosition(current)
         // Emit a server-confirmed position event distinct from the 500ms
         // interpolation ticker. AndroidAutoController subscribes to this to
         // invalidate the AA host's state on every authoritative update,
