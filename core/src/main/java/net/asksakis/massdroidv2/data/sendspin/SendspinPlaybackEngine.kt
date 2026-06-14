@@ -605,7 +605,14 @@ abstract class SendspinPlaybackEngine(context: Context) : SendspinAudioEngine {
     // endregion
 
     private fun startNativeOutput() {
-        outputPausedForIdle = false
+        // NOTE: deliberately does NOT touch outputPausedForIdle. A route reopen
+        // (commitReopen, e.g. BT disconnect) calls this while we are idle-stopped
+        // purely to rebind the Oboe stream to the settled route — the producer
+        // stays parked. Clearing the idle flag here would lie about that state:
+        // ensureOutputRunning() would then no-op on resume and the producer would
+        // never restart (encoded buffer floods, device wedges IDLE, no audio). The
+        // flag is owned solely by stopOutputForIdle / ensureOutputRunning /
+        // releaseInternal, which keep it consistent with the producer's liveness.
         // SYNC aligns to the group timeline; DIRECT (solo) is a pure FIFO.
         if (!nativeOutput.start(activeSampleRate, activeChannels, isSync)) {
             Log.e(TAG, "Native output failed to start ${activeSampleRate}Hz ch=$activeChannels; stream will be silent")
