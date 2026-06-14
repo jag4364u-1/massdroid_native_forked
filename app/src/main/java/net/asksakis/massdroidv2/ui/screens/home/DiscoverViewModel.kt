@@ -110,6 +110,13 @@ private const val RECENT_ARTIST_HISTORY_DEPTH = 4
 private const val RECENT_GENRE_EXCLUSION_DEPTH = 3
 private const val SMART_MIX_FAVORITES_QUERY_LIMIT = 500
 private const val ARTIST_TRACK_CACHE_TTL_MS = 12 * 60 * 60 * 1000L
+// Cap tracks kept per artist before the (Last.fm) genre enrichment. The MA
+// artist_tracks endpoint ignores a limit arg and returns the full catalogue
+// (e.g. 437 for a prolific Deezer artist), and enriching that whole list is what
+// made one slow artist stall the Smart Mix build ~22s. The mix only ever picks a
+// few tracks per artist (interleaved), so a generous cap keeps the variety the
+// scorer/genre-filter needs while bounding the per-artist work.
+private const val MAX_TRACKS_PER_ARTIST = 40
 private const val GENRE_RADIO_DISCOVERY_SEEDS = 10
 private const val GENRE_RADIO_SIMILAR_RESOLVE_LIMIT = 5
 private const val GENRE_RADIO_SPAM_WINDOW_MS = 1_500L
@@ -1886,9 +1893,13 @@ class DiscoverViewModel @Inject constructor(
             try {
                 val tracks = musicRepository.getArtistTracks(itemId, provider)
                 if (tracks.isNotEmpty()) {
-                    val enriched = enrichTracksWithLastFmGenres(tracks)
+                    // Cap BEFORE enrichment: artist_tracks returns the full catalogue
+                    // (MA ignores a limit arg), and enriching hundreds of tracks is
+                    // what stalled the mix build on a prolific artist.
+                    val capped = tracks.take(MAX_TRACKS_PER_ARTIST)
+                    val enriched = enrichTracksWithLastFmGenres(capped)
                     playHistoryRepository.cacheArtistTracks(cacheKey, enriched)
-                    Log.d(TAG, "Artist track cache fill: $cacheKey (${enriched.size} tracks)")
+                    Log.d(TAG, "Artist track cache fill: $cacheKey (${enriched.size}/${tracks.size} tracks)")
                     return enriched
                 }
             } catch (_: Exception) {
