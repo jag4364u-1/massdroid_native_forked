@@ -51,18 +51,12 @@ MassDroid is a full-featured Music Assistant companion app built around music ex
 
 ## What's New ![NEW](https://img.shields.io/badge/-NEW-brightgreen)
 
-- Android TV app (Shield / Google TV / Android TV): browse the full library, control any player, and use the TV as a synced speaker with an adjustable delay for AV receivers.
-- Rewrote the phone's audio output (native, low-latency): fixes random dropouts and sync drift, and auto-aligns with other speakers.
-- Audiobooks: library section, chapter list with skip-to-chapter, H:M:S timing, chapter-aware transport.
-- Bluetooth/car: auto-play once the connection settles (skipped during a call/meeting); fixed intermittent no-audio on connect.
-- Library: swipe between tabs, the provider filter is remembered per tab, and you can play a whole folder (e.g. an album) straight from Browse.
-- Player settings: choose the streaming codec for speakers that expose it (e.g. Sonos).
-- Sync speakers sheet: nudge each speaker's timing earlier/later.
-- Add/remove items to your library from search and detail screens (long-press actions, in-library badge).
-- Follow Me: better room scoring, per-room sensitivity, on-room-change modes (ask / move here / select only), lower battery use.
-- Ethernet devices stream lossless.
-- Finer volume steps with the hardware buttons, plus a cleaner volume popup.
-- Fixes: audio skips on some phones, playback no longer starts over a phone call, synced members track the leader's position, faster group re-lock, connection-drop indicator on home, the library provider filter now works for multi-account providers (e.g. Deezer) and local files, and some local cover art that failed on mobile data / VPN now loads.
+- Fixed: artwork not loading after the Music Assistant 2.9.0 update.
+- Audiobooks: quick 30-second skip back and forward.
+- Playlists: tracks now show in the correct order, and your sort choice is remembered.
+- Android TV: smoother, more reliable mini player.
+- Bluetooth/car: more reliable audio when connecting.
+- Clearer message when an action needs an admin account.
 
 ## Screenshots
 
@@ -95,17 +89,19 @@ MassDroid is a full-featured Music Assistant companion app built around music ex
 ## Core Features
 
 - **Discover Home** : Dynamic recommendation sections with recently played, top picks, genre radio, and Smart Mix
-- **Library Browsing** : Artists, Albums, Tracks, Playlists, Radio, and Browse with search, sort, grid/list views, and provider filtering. Genre-based search finds artists, albums, and tracks by genre when your library has been enriched with Last.fm tags.
+- **Library Browsing** : Artists, Albums, Tracks, Playlists, Radio, Audiobooks, and Browse with search, sort, grid/list views, and provider filtering. Genre-based search finds artists, albums, and tracks by genre when your library has been enriched with Last.fm tags.
 - **Artist & Album Detail** : Rich detail views with descriptions, genres, similar artists, and now-playing indicators
 - **Player Controls** : Play, pause, skip, seek, volume, shuffle, repeat across all MA players
 - **Now Playing** : Full-screen player with album art, seek bar, favorite toggle, synced/plain lyrics, tap-to-seek on synced lyric lines, timing adjustment, and artist blocking
+- **Audiobooks** : Dedicated library section with chapter list, chapter-aware transport, 30-second skip back/forward, and H:M:S timing
 - **Queue Management** : View, drag-to-reorder, transfer between players, and manage the playback queue with action sheets
 - **Favorites** : Mark artists, albums, tracks, and playlists as favorites, filter library by favorites
 - **Phone as Speaker** : Sendspin protocol turns your phone into a Music Assistant player, solo or grouped with other MA players in tight sync. Audio streams as Opus or FLAC over WebSocket, decoded and played through your phone speaker, headphones, or Bluetooth device. Smart mode can switch format automatically based on network conditions. A built-in acoustic calibration measures real Bluetooth latency via microphone so grouped playback stays in sync even on wireless speakers. A streaming status sheet shows live sync graph, output latency, network mode, and a static delay control.
 - **Follow Me** : Room detection with auto-transfer, per-room playlists, volume, and scheduling. Uses BLE fingerprinting by default, with optional Wi-Fi BSSID or SSID matching for distinct locations.
 - **Artist Blocking** : Block any artist from all recommendations, radio stations, and Smart Mix results
 - **Media Session** : Android media notification with playback controls
-- **Player Settings** : Rename players, set icons, configure crossfade and volume normalization
+- **Player Settings** : Rename players, set icons, configure crossfade, volume normalization, and streaming codec
+- **Android TV** : Full client for Shield and Google TV: browse the library, control any player, and use the TV as a synced speaker
 - **Connection Diagnostics** : Live latency graph with roundtrip stats and server version info
 - **mTLS Support** : Client certificate authentication for secure remote access
 - **MiniPlayer** : Persistent mini player bar across all screens
