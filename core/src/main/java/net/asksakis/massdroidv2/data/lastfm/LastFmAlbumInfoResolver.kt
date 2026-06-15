@@ -24,7 +24,8 @@ data class LastFmAlbumInfo(
 class LastFmAlbumInfoResolver @Inject constructor(
     private val okHttpClient: OkHttpClient,
     private val json: Json,
-    private val settingsRepository: SettingsRepository
+    private val settingsRepository: SettingsRepository,
+    private val rateLimiter: LastFmRateLimiter
 ) {
     companion object {
         private const val TAG = "LastFmAlbumInfo"
@@ -62,6 +63,7 @@ class LastFmAlbumInfoResolver @Inject constructor(
                 ?.build() ?: return@withContext null
 
             val request = Request.Builder().url(url).build()
+            rateLimiter.acquire()
             val response = okHttpClient.newCall(request).execute()
             val body = response.use { resp ->
                 if (!resp.isSuccessful) {

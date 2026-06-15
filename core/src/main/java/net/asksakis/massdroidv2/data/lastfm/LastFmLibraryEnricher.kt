@@ -5,7 +5,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import net.asksakis.massdroidv2.data.database.ArtistEntity
 import net.asksakis.massdroidv2.data.database.ArtistGenreEntity
@@ -82,7 +81,8 @@ class LastFmLibraryEnricher @Inject constructor(
                     writeArtistGenres(artist, tags)
                     enriched++
                 }
-                delay(RATE_LIMIT_MS)
+                // Throttling is handled globally by LastFmRateLimiter inside the
+                // resolver, and only for real API calls (cache hits are free).
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to enrich ${artist.name}: ${e.message}")
             }
@@ -159,7 +159,7 @@ class LastFmLibraryEnricher @Inject constructor(
                             }
                             enriched++
                         }
-                        delay(BULK_RATE_LIMIT_MS)
+                        // Throttling handled globally by LastFmRateLimiter.
                     } catch (e: Exception) {
                         Log.w(TAG, "Failed to enrich $name: ${e.message}")
                     }
@@ -202,7 +202,5 @@ class LastFmLibraryEnricher @Inject constructor(
     companion object {
         private const val TAG = "LastFmEnricher"
         private const val PAGE_SIZE = 500
-        private const val RATE_LIMIT_MS = 200L
-        private const val BULK_RATE_LIMIT_MS = 500L
     }
 }
