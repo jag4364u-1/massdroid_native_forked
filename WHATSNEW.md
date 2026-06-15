@@ -1,6 +1,7 @@
-- Fixed: artwork not loading after the Music Assistant 2.9.0 update.
-- Audiobooks: quick 30-second skip back and forward.
-- Playlists: tracks now show in the correct order, and your sort choice is remembered.
-- Android TV: smoother, more reliable mini player.
-- Bluetooth/car: more reliable audio when connecting.
-- Clearer message when an action needs an admin account.
+- Smart Mix: fuller mixes that stay truer to the chosen genre.
+- Smart Mix: new sliders to tune the engine, Variety, Discovery and Length, with a reset.
+- Smart Mix: faster recommendation engine.
+- Better music recommendations from your listening history.
+- Now Playing: fixed track position.
+- Bluetooth: clean pause when the speaker disconnects, auto-resume when it reconnects, and no more silence after disconnecting.
+- Players: clearer card styling for idle, active and selected players.
