@@ -1,0 +1,422 @@
+package net.asksakis.massdroidv2.ui.screens.home
+
+import android.content.Context
+import android.util.Log
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import net.asksakis.massdroidv2.data.repository.QueueDstmCache
+import net.asksakis.massdroidv2.data.websocket.ConnectionState
+import net.asksakis.massdroidv2.data.websocket.MaWebSocketClient
+import net.asksakis.massdroidv2.playback.SleepTimerBridge
+import net.asksakis.massdroidv2.data.proximity.RoomDetector
+import net.asksakis.massdroidv2.auto.AaProjectionObserver
+import net.asksakis.massdroidv2.domain.model.GroupProviderOption
+import net.asksakis.massdroidv2.domain.model.Player
+import net.asksakis.massdroidv2.domain.model.PlayerConfig
+import net.asksakis.massdroidv2.domain.repository.MusicRepository
+import net.asksakis.massdroidv2.domain.repository.PlayerRepository
+import net.asksakis.massdroidv2.domain.repository.SettingsRepository
+import javax.inject.Inject
+
+private const val TAG = "HomeVM"
+
+@HiltViewModel
+class HomeViewModel @Inject constructor(
+    @ApplicationContext context: Context,
+    private val playerRepository: PlayerRepository,
+    private val musicRepository: MusicRepository,
+    private val settingsRepository: SettingsRepository,
+    private val wsClient: MaWebSocketClient,
+    private val proximityConfigStore: net.asksakis.massdroidv2.data.proximity.ProximityConfigStore,
+    private val roomDetector: RoomDetector,
+    private val sendspinManager: net.asksakis.massdroidv2.data.sendspin.SendspinManager,
+    private val queueDstmCache: QueueDstmCache,
+    private val sleepTimerBridge: SleepTimerBridge,
+    val acoustic: net.asksakis.massdroidv2.data.sendspin.AcousticCalibrationCoordinator,
+) : ViewModel() {
+
+    /**
+     * Player id the active sleep timer targets, or null if no timer is
+     * running. PlayersScreen uses this to badge the corresponding row.
+     */
+    val sleepTimerTargetPlayerId: StateFlow<String?> = sleepTimerBridge.state
+        .map { state ->
+            when (state) {
+                is SleepTimerBridge.State.Running -> state.playerId
+                is SleepTimerBridge.State.FadingOut -> state.playerId
+                SleepTimerBridge.State.Idle -> null
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    val players = playerRepository.players
+    val selectedPlayer = playerRepository.selectedPlayer
+    val connectionState = wsClient.connectionState
+    val elapsedTime = playerRepository.elapsedTime
+    val queueState = playerRepository.queueState
+    val queueDstmStates: StateFlow<Map<String, Boolean>> = queueDstmCache.states
+    val sendspinClientId = settingsRepository.sendspinClientId
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    val sendspinAudioFormat = settingsRepository.sendspinAudioFormat
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    val sendspinSyncDelayMs = settingsRepository.sendspinSyncDelayMs
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+    val sendspinSyncHistory = sendspinManager.syncHistory
+    val proximityConfig = proximityConfigStore.config
+    val currentDetectedRoom = roomDetector.currentRoom
+    val isAaProjecting: StateFlow<Boolean> = AaProjectionObserver(context)
+        .isProjecting
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    private val _isInitializing = MutableStateFlow(true)
+    val isInitializing: StateFlow<Boolean> = _isInitializing.asStateFlow()
+    private val _suppressConnectionPrompt = MutableStateFlow(false)
+    val suppressConnectionPrompt: StateFlow<Boolean> = _suppressConnectionPrompt.asStateFlow()
+
+    private val _error = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val error: SharedFlow<String> = _error.asSharedFlow()
+    private var hasConnectedOnce = false
+    private var reconnectUiJob: Job? = null
+
+    init {
+        // Auto-connect on startup if we have saved credentials
+        viewModelScope.launch {
+            wsClient.startupReady.first { it }
+            val state = wsClient.connectionState.value
+            if (state is ConnectionState.Disconnected && !wsClient.userDisconnected) {
+                val url = settingsRepository.serverUrl.first()
+                val token = settingsRepository.authToken.first()
+                if (url.isNotBlank() && token.isNotBlank()) {
+                    wsClient.connect(url, token)
+                    // Wait for successful connection (covers token-fail + credential-fallback cycle)
+                    kotlinx.coroutines.withTimeoutOrNull(5000) {
+                        wsClient.connectionState.first { it is ConnectionState.Connected }
+                    }
+                }
+            }
+            _isInitializing.value = false
+        }
+
+        // PlayerRepositoryImpl handles refreshPlayers + restore saved player on Connected
+        viewModelScope.launch {
+            wsClient.connectionState.collect { state ->
+                when (state) {
+                    is ConnectionState.Connected -> {
+                        hasConnectedOnce = true
+                        reconnectUiJob?.cancel()
+                        _suppressConnectionPrompt.value = false
+                    }
+                    is ConnectionState.Connecting -> {
+                        if (hasConnectedOnce) {
+                            _suppressConnectionPrompt.value = true
+                        }
+                    }
+                    is ConnectionState.Disconnected, is ConnectionState.Error -> {
+                        if (!hasConnectedOnce) {
+                            reconnectUiJob?.cancel()
+                            _suppressConnectionPrompt.value = false
+                            return@collect
+                        }
+                        reconnectUiJob?.cancel()
+                        _suppressConnectionPrompt.value = true
+                        reconnectUiJob = viewModelScope.launch {
+                            delay(8_000)
+                            val latest = wsClient.connectionState.value
+                            if (latest is ConnectionState.Disconnected || latest is ConnectionState.Error) {
+                                _suppressConnectionPrompt.value = false
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun connectIfNeeded() {
+        viewModelScope.launch {
+            wsClient.startupReady.first { it }
+            val state = wsClient.connectionState.value
+            if (state is ConnectionState.Disconnected && !wsClient.userDisconnected) {
+                val url = settingsRepository.serverUrl.first()
+                val token = settingsRepository.authToken.first()
+                if (url.isNotBlank() && token.isNotBlank()) {
+                    wsClient.connect(url, token)
+                }
+            }
+        }
+    }
+
+    fun selectPlayer(player: Player) {
+        playerRepository.selectPlayer(player.playerId)
+    }
+
+    fun setVolume(playerId: String, volume: Int) {
+        viewModelScope.launch {
+            try {
+                playerRepository.setVolume(playerId, volume)
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun setGroupVolume(parentId: String, volume: Int) {
+        viewModelScope.launch {
+            try {
+                playerRepository.setGroupVolume(parentId, volume)
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun onMemberVolumeChanged(parentId: String, memberId: String, volume: Int) {
+        playerRepository.updateGroupMemberOffset(parentId, memberId, volume)
+        viewModelScope.launch {
+            try {
+                playerRepository.setVolume(memberId, volume)
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun playPause() {
+        val player = selectedPlayer.value ?: return
+        viewModelScope.launch {
+            try {
+                if (player.state == net.asksakis.massdroidv2.domain.model.PlaybackState.PLAYING) {
+                    playerRepository.pause(player.playerId)
+                } else {
+                    playerRepository.play(player.playerId)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "playPause failed: ${e.message}")
+                _error.tryEmit("Not connected to server")
+            }
+        }
+    }
+
+    fun next() {
+        val player = selectedPlayer.value ?: return
+        viewModelScope.launch {
+            try {
+                playerRepository.next(player.playerId)
+            } catch (e: Exception) {
+                Log.w(TAG, "next failed: ${e.message}")
+                _error.tryEmit("Not connected to server")
+            }
+        }
+    }
+
+    fun updatePlayerIcon(playerId: String, icon: String) {
+        viewModelScope.launch {
+            try {
+                playerRepository.updatePlayerIcon(playerId, icon)
+            } catch (e: Exception) {
+                Log.w(TAG, "updatePlayerIcon failed: ${e.message}")
+            }
+        }
+    }
+
+    suspend fun getPlayerConfig(playerId: String): PlayerConfig? {
+        return try {
+            playerRepository.getPlayerConfig(playerId)
+        } catch (e: Exception) {
+            Log.w(TAG, "getPlayerConfig failed: ${e.message}")
+            null
+        }
+    }
+
+    fun setDontStopTheMusic(queueId: String, enabled: Boolean) {
+        queueDstmCache.setOptimistic(queueId, enabled)
+        viewModelScope.launch {
+            try {
+                musicRepository.setDontStopTheMusic(queueId, enabled)
+            } catch (e: Exception) {
+                Log.w(TAG, "setDontStopTheMusic failed: ${e.message}")
+            }
+        }
+    }
+
+    fun savePlayerConfig(playerId: String, values: Map<String, Any>) {
+        viewModelScope.launch {
+            try {
+                playerRepository.savePlayerConfig(playerId, values)
+                // Update local display name if changed
+                val newName = values["name"] as? String
+                if (newName != null) {
+                    playerRepository.renamePlayer(playerId, newName)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "savePlayerConfig failed: ${e.message}")
+            }
+        }
+    }
+
+    fun setAudioFormat(format: net.asksakis.massdroidv2.domain.model.SendspinAudioFormat) {
+        viewModelScope.launch {
+            settingsRepository.setSendspinAudioFormat(format.name)
+        }
+    }
+
+    fun setSendspinSyncDelayMs(delayMs: Int) {
+        viewModelScope.launch {
+            settingsRepository.setSendspinSyncDelayMs(delayMs)
+        }
+    }
+
+    fun previous() {
+        val player = selectedPlayer.value ?: return
+        viewModelScope.launch {
+            try {
+                playerRepository.previous(player.playerId)
+            } catch (e: Exception) {
+                Log.w(TAG, "previous failed: ${e.message}")
+                _error.tryEmit("Not connected to server")
+            }
+        }
+    }
+
+    fun clearQueue(playerId: String) {
+        viewModelScope.launch {
+            try {
+                musicRepository.clearQueue(playerId)
+            } catch (e: Exception) {
+                Log.w(TAG, "clearQueue failed: ${e.message}")
+            }
+        }
+    }
+
+    fun startSongRadio(playerId: String, trackUri: String) {
+        viewModelScope.launch {
+            try {
+                playerRepository.setQueueFilterMode(playerId, PlayerRepository.QueueFilterMode.RADIO_SMART)
+                musicRepository.playMedia(playerId, trackUri, radioMode = true)
+            } catch (e: Exception) {
+                Log.w(TAG, "startSongRadio failed: ${e.message}")
+            }
+        }
+    }
+
+    fun transferQueue(sourceId: String, targetId: String) {
+        viewModelScope.launch {
+            withContext(NonCancellable) {
+                try {
+                    musicRepository.transferQueue(sourceId, targetId)
+                    playerRepository.selectPlayer(targetId)
+                } catch (e: Exception) {
+                    Log.w(TAG, "transferQueue failed: ${e.message}")
+                }
+            }
+        }
+    }
+
+    suspend fun loadGroupProviders(): List<GroupProviderOption> = try {
+        playerRepository.getGroupCapableProviders()
+    } catch (e: Exception) {
+        Log.w(TAG, "loadGroupProviders failed: ${e.message}")
+        emptyList()
+    }
+
+    fun createGroup(provider: String, name: String, memberIds: List<String>) {
+        Log.d(TAG, "createGroup: provider=$provider name=$name members=$memberIds")
+        viewModelScope.launch {
+            try {
+                playerRepository.createGroupPlayer(provider, name, memberIds)
+            } catch (e: Exception) {
+                Log.w(TAG, "createGroup failed: ${e.message}")
+            }
+        }
+    }
+
+    fun deleteGroup(playerId: String) {
+        Log.d(TAG, "deleteGroup: $playerId")
+        viewModelScope.launch {
+            try {
+                // MA's remove_group_player only unregisters the group entity; it
+                // leaves the underlying protocol sync between members intact, so
+                // they'd keep appearing grouped. Break the protocol sync first.
+                val group = players.value.find { it.playerId == playerId }
+                val members = group?.groupChilds?.filter { it != playerId } ?: emptyList()
+                if (members.isNotEmpty()) {
+                    runCatching { playerRepository.ungroupPlayers(members) }
+                        .onFailure { Log.w(TAG, "pre-delete ungroup failed: ${it.message}") }
+                }
+                playerRepository.removeGroupPlayer(playerId)
+            } catch (e: Exception) {
+                Log.w(TAG, "deleteGroup failed: ${e.message}")
+            }
+        }
+    }
+
+    fun breakSyncForPlayer(playerId: String) {
+        Log.d(TAG, "breakSyncForPlayer: $playerId")
+        viewModelScope.launch {
+            try {
+                // Collect self plus any current childs so we clean both sides of
+                // the protocol sync regardless of whether this player is the
+                // leader or a synced member.
+                val player = players.value.find { it.playerId == playerId }
+                val ids = buildSet {
+                    add(playerId)
+                    player?.groupChilds?.forEach { if (it != playerId) add(it) }
+                }.toList()
+                playerRepository.ungroupPlayers(ids)
+            } catch (e: Exception) {
+                Log.w(TAG, "breakSyncForPlayer failed: ${e.message}")
+            }
+        }
+    }
+
+    fun addPlayerToGroup(leaderPlayerId: String, memberPlayerId: String) {
+        Log.d(TAG, "addPlayerToGroup: leader=$leaderPlayerId member=$memberPlayerId")
+        viewModelScope.launch {
+            try {
+                playerRepository.setGroupMembers(leaderPlayerId, addIds = listOf(memberPlayerId))
+            } catch (e: Exception) {
+                Log.w(TAG, "addPlayerToGroup failed: ${e.message}")
+            }
+        }
+    }
+
+    fun setPlayerPower(playerId: String, powered: Boolean) {
+        Log.d(TAG, "setPlayerPower: $playerId powered=$powered")
+        viewModelScope.launch {
+            try {
+                playerRepository.setPower(playerId, powered)
+            } catch (e: Exception) {
+                Log.w(TAG, "setPlayerPower failed: ${e.message}")
+            }
+        }
+    }
+
+    fun applyGroupMembers(targetPlayerId: String, currentChilds: List<String>, selectedIds: List<String>) {
+        Log.d(TAG, "applyGroupMembers: target=$targetPlayerId, current=$currentChilds, selected=$selectedIds")
+        viewModelScope.launch {
+            try {
+                // MA includes the parent itself in group_childs. Filter it out of
+                // both sides so we never try to "remove the leader from its own
+                // group" — the server rejects that with an error.
+                val currentMembers = currentChilds.filter { it != targetPlayerId }
+                val selectedMembers = selectedIds.filter { it != targetPlayerId }
+                val toAdd = selectedMembers.filter { it !in currentMembers }
+                val toRemove = currentMembers.filter { it !in selectedMembers }
+                if (selectedMembers.isEmpty() && currentMembers.isNotEmpty()) {
+                    // Unsync all
+                    playerRepository.setGroupMembers(targetPlayerId, removeIds = currentMembers)
+                } else if (toAdd.isNotEmpty() || toRemove.isNotEmpty()) {
+                    playerRepository.setGroupMembers(
+                        targetPlayerId,
+                        addIds = toAdd.ifEmpty { null },
+                        removeIds = toRemove.ifEmpty { null }
+                    )
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "applyGroupMembers failed: ${e.message}")
+            }
+        }
+    }
+}

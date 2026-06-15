@@ -1,0 +1,7 @@
+- Smart Mix: fuller mixes that stay truer to the chosen genre.
+- Smart Mix: new sliders to tune the engine, Variety, Discovery and Length, with a reset.
+- Smart Mix: faster recommendation engine.
+- Better music recommendations from your listening history.
+- Now Playing: fixed track position.
+- Bluetooth: clean pause when the speaker disconnects, auto-resume when it reconnects, and no more silence after disconnecting.
+- Players: clearer card styling for idle, active and selected players.

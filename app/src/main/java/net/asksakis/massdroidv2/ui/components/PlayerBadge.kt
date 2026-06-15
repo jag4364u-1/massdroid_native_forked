@@ -1,0 +1,96 @@
+package net.asksakis.massdroidv2.ui.components
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+
+private val PlayerBadgeColor = Color(0xFFEF5350)
+private val AndroidAutoBadgeColor = Color(0xFF2E7D32)
+private val PlayerBadgeShape = RoundedCornerShape(4.dp)
+
+@Composable
+fun PlayerNameWithBadge(
+    name: String,
+    isLocalPlayer: Boolean,
+    isAndroidAutoPlayer: Boolean = false,
+    isFollowMePlayer: Boolean = false,
+    modifier: Modifier = Modifier,
+    fontWeight: FontWeight? = null
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+    ) {
+        Text(
+            text = name,
+            modifier = Modifier.weight(1f, fill = false),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            fontWeight = fontWeight
+        )
+        if (isLocalPlayer) {
+            Spacer(modifier = Modifier.width(8.dp))
+            PlayerBadgeChip(color = PlayerBadgeColor) {
+                Text(
+                    text = "Local Player",
+                    color = Color.Black,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        }
+        if (isAndroidAutoPlayer) {
+            Spacer(modifier = Modifier.width(4.dp))
+            PlayerBadgeChip(color = AndroidAutoBadgeColor) {
+                Text(
+                    text = "AA",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        }
+        if (isFollowMePlayer) {
+            Spacer(modifier = Modifier.width(4.dp))
+            Icon(
+                imageVector = Icons.Default.LocationOn,
+                contentDescription = "Follow Me selected player",
+                tint = Color.Red.copy(alpha = 0.8f),
+                modifier = Modifier.size(16.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun PlayerBadgeChip(
+    color: Color = PlayerBadgeColor,
+    content: @Composable () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .background(
+                color = color,
+                shape = PlayerBadgeShape
+            )
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        content()
+    }
+}

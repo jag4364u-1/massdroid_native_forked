@@ -1,0 +1,2022 @@
+package net.asksakis.massdroidv2.data.repository
+
+import android.util.Log
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.*
+import kotlinx.serialization.json.*
+import net.asksakis.massdroidv2.data.websocket.*
+import net.asksakis.massdroidv2.domain.model.*
+import net.asksakis.massdroidv2.data.lastfm.LastFmGenreResolver
+import net.asksakis.massdroidv2.data.repository.queue.QueueItemsCoordinator
+import net.asksakis.massdroidv2.domain.model.QueueItemsSnapshot
+import net.asksakis.massdroidv2.domain.recommendation.MediaIdentity
+import net.asksakis.massdroidv2.domain.recommendation.normalizeGenre
+import net.asksakis.massdroidv2.domain.repository.PlayHistoryRepository
+import net.asksakis.massdroidv2.domain.repository.PlaybackPosition
+import net.asksakis.massdroidv2.domain.repository.PlayerDiscontinuityCommand
+import net.asksakis.massdroidv2.domain.repository.PlayerSelectionLock
+import net.asksakis.massdroidv2.domain.repository.PlayerRepository
+import net.asksakis.massdroidv2.domain.repository.SettingsRepository
+import net.asksakis.massdroidv2.domain.repository.SmartListeningRepository
+import javax.inject.Inject
+import javax.inject.Singleton
+
+@Singleton
+class PlayerRepositoryImpl @Inject constructor(
+    private val wsClient: MaWebSocketClient,
+    private val json: Json,
+    private val playHistoryRepository: PlayHistoryRepository,
+    private val settingsRepository: SettingsRepository,
+    private val smartListeningRepository: SmartListeningRepository,
+    private val lastFmGenreResolver: LastFmGenreResolver,
+    private val sessionEventBus: SessionEventBus,
+    private val queueItemsCoordinator: QueueItemsCoordinator,
+) : PlayerRepository {
+
+    companion object {
+        private const val TAG = "PlayerRepo"
+        // MA RPC error code for "no more tracks available" (queue exhausted).
+        private const val NO_MORE_TRACKS_CODE = 11
+        private const val BLOCKED_AUTO_SKIP_COOLDOWN_MS = 2_500L
+        private const val BLOCKED_QUEUE_CLEANUP_COOLDOWN_MS = 2_000L
+        private const val BLOCKED_QUEUE_ITEMS_LIMIT = 500
+        private const val HISTORY_GENRE_LOOKUP_TIMEOUT_MS = 1_200L
+        private const val HISTORY_ARTIST_LOOKUP_LIMIT = 3
+        private const val RECONNECT_QUEUE_REFRESH_ATTEMPTS = 3
+        private const val RECONNECT_QUEUE_REFRESH_DELAY_MS = 450L
+        // Debounce for the authoritative players/all resync after a burst of
+        // PLAYER_ADDED/REMOVED events (e.g. an MA server restart re-registering
+        // players one by one). Long enough to collapse the burst into one refresh.
+        private const val PLAYER_RESYNC_DEBOUNCE_MS = 2_500L
+        // Max wall-clock gap we forward-project a server-captured elapsed_time
+        // across. During live playback (now - elapsed_time_last_updated) is just
+        // WS latency (well under a second on LAN), so projecting it yields the
+        // true current position. But the MA server FREEZES last_updated while
+        // paused, so a QUEUE_UPDATED that lands right after a long pause/background
+        // carries a capture stale by the whole pause duration — projecting that
+        // forward jumps the position ahead by the paused seconds (and can shoot
+        // past the track end, e.g. 4:04 on a 3:31 track). Beyond this cap the
+        // capture is treated as stale and the elapsed value is anchored as-is.
+        // Bounded wait for the saved player to (re)appear after a reconnect/reboot
+        // before selecting it. players/all can return empty/partial while the
+        // server is still registering players, which then arrive later (via a
+        // players/all resync, PLAYER_ADDED, or PLAYER_UPDATED). A one-shot
+        // "present?" check + PLAYER_ADDED-only deferral could leave the player
+        // set-but-never-selected (ghost: selected id set, _selectedPlayer null,
+        // queue coordinator never fetches). We wait for it to actually show up in
+        // the player list, then select it for real.
+        private const val PLAYER_RESTORE_WAIT_MS = 15_000L
+        // Distance from the track end below which we still consider a seek
+        // "into the track" rather than "to the end". 1.0 s is plenty:
+        // playback always stops short of the very last sample anyway, and
+        // float-rounding in the slider range can push values by ~0.2 s. MA
+        // treats positions at/past duration as end-of-track and advances to
+        // the next item instead of issuing a Sendspin stream/clear, so this
+        // margin is what keeps the current track playing on a seek-to-end.
+        private const val SEEK_END_MARGIN_S = 1.0
+        // Audiobook chapter navigation (external transport controls). A press
+        // already past this many seconds into the current chapter rewinds to
+        // the chapter start instead of jumping to the previous chapter (matches
+        // the in-app NowPlaying behavior).
+        private const val PREVIOUS_CHAPTER_RESTART_THRESHOLD_S = 3.0
+        // Tolerance so a position sampled exactly at a chapter boundary resolves
+        // to that chapter, not the one before it.
+        private const val CHAPTER_BOUNDARY_EPSILON_S = 0.001
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private val _players = MutableStateFlow<List<Player>>(emptyList())
+    override val players: StateFlow<List<Player>> = _players.asStateFlow()
+
+    private val _selectedPlayer = MutableStateFlow<Player?>(null)
+    override val selectedPlayer: StateFlow<Player?> = _selectedPlayer.asStateFlow()
+
+    private val _selectionLock = MutableStateFlow<PlayerSelectionLock?>(null)
+    override val selectionLock: StateFlow<PlayerSelectionLock?> = _selectionLock.asStateFlow()
+
+    private val _queueState = MutableStateFlow<QueueState?>(null)
+    override val queueState: StateFlow<QueueState?> = _queueState.asStateFlow()
+
+    private val _elapsedTime = MutableStateFlow(0.0)
+    override val elapsedTime: StateFlow<Double> = _elapsedTime.asStateFlow()
+
+    private val _playbackPosition = MutableStateFlow<PlaybackPosition?>(null)
+    override val playbackPosition: StateFlow<PlaybackPosition?> = _playbackPosition.asStateFlow()
+
+    private val _serverPositionUpdates = MutableSharedFlow<PlaybackPosition>(extraBufferCapacity = 4)
+    override val serverPositionUpdates: SharedFlow<PlaybackPosition> = _serverPositionUpdates.asSharedFlow()
+
+    private val _volumeOsd = MutableStateFlow<PlayerRepository.VolumeOsdState?>(null)
+    override val volumeOsd: StateFlow<PlayerRepository.VolumeOsdState?> = _volumeOsd.asStateFlow()
+    private var volumeOsdHideJob: Job? = null
+    private val volumeOsdTokenCounter = java.util.concurrent.atomic.AtomicLong(0L)
+    private val volumeOsdHideMs = 2500L
+
+    override fun showVolumeOsd(playerName: String, volume: Int, isGroup: Boolean, isMuted: Boolean) {
+        _volumeOsd.value = PlayerRepository.VolumeOsdState(
+            playerName = playerName,
+            volume = volume.coerceIn(0, 100),
+            isGroup = isGroup,
+            isMuted = isMuted,
+            token = volumeOsdTokenCounter.incrementAndGet(),
+        )
+        volumeOsdHideJob?.cancel()
+        volumeOsdHideJob = scope.launch {
+            delay(volumeOsdHideMs)
+            _volumeOsd.value = null
+        }
+    }
+
+    private val _playbackIntent = MutableSharedFlow<Boolean>(extraBufferCapacity = 1)
+    override val playbackIntent: SharedFlow<Boolean> = _playbackIntent.asSharedFlow()
+
+    private val _queueItemsChanged = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    override val queueItemsChanged: SharedFlow<String> = _queueItemsChanged.asSharedFlow()
+
+    private val _noPlayerSelectedEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    override val noPlayerSelectedEvent: SharedFlow<Unit> = _noPlayerSelectedEvent.asSharedFlow()
+
+    private val _queueEndedEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    override val queueEndedEvent: SharedFlow<Unit> = _queueEndedEvent.asSharedFlow()
+
+    private val _discontinuityCommands = MutableSharedFlow<PlayerDiscontinuityCommand>(extraBufferCapacity = 4)
+    override val discontinuityCommands: SharedFlow<PlayerDiscontinuityCommand> = _discontinuityCommands.asSharedFlow()
+
+    override fun requireSelectedPlayerId(): String? {
+        val id = selectedPlayer.value?.playerId
+        if (id == null) _noPlayerSelectedEvent.tryEmit(Unit)
+        return id
+    }
+
+    @Volatile private var selectedPlayerId: String? = null
+
+    /**
+     * When the selected player is a synced group member, the authoritative
+     * queue/time events arrive under the GROUP LEADER's id, not the member's,
+     * and the member's OWN queue is stale (often stuck at end-of-track -> the
+     * seek bar pins to the end). MA frequently leaves `active_group` null on
+     * children, so resolve in order: synced_to (the leader = the group queue id)
+     * -> active_group -> own id. The leader itself has synced_to/active_group
+     * null and correctly resolves to its own id.
+     */
+    private fun effectiveQueueId(): String? {
+        val id = selectedPlayerId ?: return null
+        val player = _players.value.find { it.playerId == id }
+        return player?.syncedTo?.takeIf { it.isNotEmpty() }
+            ?: player?.activeGroup?.takeIf { it.isNotEmpty() }
+            ?: id
+    }
+    @Volatile private var pendingRestoredPlayerId: String? = null
+
+
+    // Position tracking for smooth seek bar updates
+    @Volatile private var positionBaseTime = 0.0
+    @Volatile private var positionBaseTimestamp = 0L
+    @Volatile private var isPlaying = false
+    // Written from the QUEUE_UPDATED event collector, read from the ticker
+    // coroutine — both on the multi-threaded IO pool — so it must be volatile to
+    // match positionBaseTime/positionBaseTimestamp (the other position hot-path
+    // fields) and avoid a stale clamp bound on a tick.
+    @Volatile private var trackDuration = 0.0
+    private var positionTickJob: Job? = null
+    // In-flight saved-player restore await (see the Connected branch). Held so a
+    // reconnect flap cancels the previous wait instead of stacking stale ones
+    // that could re-select an out-of-date player.
+    private var restoreSelectionJob: Job? = null
+    private var favoriteOverride: Boolean? = null
+    private var favoriteOverrideUri: String? = null
+
+    // Play history tracking (per queue)
+    private data class QueueTrackingState(
+        val track: Track,
+        val artists: List<Pair<String, String>>,
+        val startTime: Long
+    )
+    private data class MaItemRef(
+        val itemId: String,
+        val provider: String
+    )
+    private val queueTracking = ConcurrentHashMap<String, QueueTrackingState>()
+    private val artistGenreCache = ConcurrentHashMap<String, List<String>>()
+    private val libraryArtistUriCache = ConcurrentHashMap<String, String>()
+    private val manualSkipByQueue = ConcurrentHashMap<String, String>()
+    private val queueReplacementByQueue = ConcurrentHashMap<String, String>()
+    private val blockedAutoSkipByQueue = ConcurrentHashMap<String, Pair<String, Long>>()
+    private val blockedQueueCleanupAtByQueue = ConcurrentHashMap<String, Long>()
+    private val queueFilterModeByQueue = ConcurrentHashMap<String, PlayerRepository.QueueFilterMode>()
+    private var blockedQueueCleanupJob: Job? = null
+    // Debounced authoritative player resync. PLAYER_ADDED/REMOVED events carry
+    // each player's can_group_with as of ITS registration; when players register
+    // at staggered times (notably an MA server restart, where players re-appear
+    // one by one), the cross-references are incomplete and the server does not
+    // re-emit them. After the burst settles, one full players/all refresh rebuilds
+    // authoritative can_group_with for everyone so the group/"sync with" sheet is
+    // correct. Debounced so a registration storm triggers a single refresh.
+    private var playerResyncJob: Job? = null
+    @Volatile
+    private var blockedArtistUrisSnapshot: Set<String> = emptySet()
+    @Volatile
+    private var suppressedArtistUrisSnapshot: Set<String> = emptySet()
+    @Volatile
+    private var smartListeningEnabledSnapshot: Boolean = false
+
+    override val queueItems: StateFlow<QueueItemsSnapshot?> get() = queueItemsCoordinator.queueItems
+
+    override suspend fun refreshQueueItems(queueId: String) {
+        queueItemsCoordinator.refresh(queueId)
+    }
+
+    init {
+        // Wire the coordinator to our flows so it can run the single
+        // debounced fetcher for every consumer that needs queue items.
+        queueItemsCoordinator.bind(
+            queueState = _queueState.asStateFlow(),
+            queueItemsChanged = _queueItemsChanged.asSharedFlow(),
+        )
+        scope.launch { observeEvents() }
+        scope.launch {
+            sessionEventBus.resets.collect { resetForAccountSwitch() }
+        }
+        scope.launch {
+            settingsRepository.smartListeningEnabled.collect { enabled ->
+                smartListeningEnabledSnapshot = enabled
+            }
+        }
+        scope.launch {
+            smartListeningRepository.blockedArtistUris.collect { blocked ->
+                blockedArtistUrisSnapshot = blocked
+                selectedPlayerId?.let { selectedId ->
+                    val currentTrack = queueTracking[selectedId]?.track
+                    val artistUris = queueTracking[selectedId]?.artists?.map { it.first }.orEmpty()
+                    maybeAutoSkipBlockedTrack(
+                        queueId = selectedId,
+                        track = currentTrack,
+                        artistUris = artistUris,
+                        trigger = "blocked_update"
+                    )
+                    scheduleBlockedQueueCleanup(selectedId, reason = "blocked_update")
+                }
+            }
+        }
+        scope.launch {
+            wsClient.connectionState.collect { state ->
+                when (state) {
+                    is ConnectionState.Disconnected,
+                    is ConnectionState.Connecting,
+                    is ConnectionState.Error -> {
+                        // Error covers the network-handover path: handleTransportChange()
+                        // cancels the WS which fires onFailure → Error state. Without
+                        // this branch, the position ticker keeps interpolating during
+                        // the reconnect window and creates a visible "jump back" when
+                        // the next QUEUE_TIME_UPDATED rebaselines after reconnect.
+                        pendingRestoredPlayerId = selectedPlayerId
+                        _players.value = emptyList()
+                        resetPosition()
+                        stopPositionTicker()
+                        queueTracking.clear()
+                        artistGenreCache.clear()
+                        manualSkipByQueue.clear()
+                        queueReplacementByQueue.clear()
+                        blockedAutoSkipByQueue.clear()
+                        blockedQueueCleanupAtByQueue.clear()
+                        queueFilterModeByQueue.clear()
+                        blockedQueueCleanupJob?.cancel()
+                        suppressedArtistUrisSnapshot = emptySet()
+                    }
+                    is ConnectionState.Connected -> {
+                        scope.launch {
+                            libraryArtistUriCache.putAll(
+                                playHistoryRepository.getLibraryArtistUriMap()
+                            )
+                        }
+                        // Clear stale queue snapshot immediately after reconnect so the UI
+                        // falls back to fresh player media instead of showing pre-restart data.
+                        _queueState.value = null
+                        resetPosition()
+                        trackDuration = 0.0
+                        favoriteOverride = null
+                        favoriteOverrideUri = null
+                        stopPositionTicker()
+                        val restoredPlayerId = settingsRepository.selectedPlayerId.first()
+                        pendingRestoredPlayerId = restoredPlayerId
+                        selectedPlayerId = restoredPlayerId
+                        refreshPlayers()
+                        restoreSelectionJob?.cancel()
+                        restoreSelectionJob = restoredPlayerId?.let { id ->
+                            // Don't treat "not in _players yet" as final. After a
+                            // (re)connect or server reboot, players/all can return an
+                            // empty/partial list and the saved player then appears LATER
+                            // by any of: a players/all resync populating the list with no
+                            // per-player event, a PLAYER_ADDED (full reconnect / reboot
+                            // re-registers from empty — the common path), or a
+                            // PLAYER_UPDATED (quick "hello changed" reconnect). The old
+                            // one-shot present-check + PLAYER_ADDED-only deferral missed
+                            // the first two, leaving the player set-but-never-selected
+                            // (ghost UI: _selectedPlayer null + queue never fetched, even
+                            // though queueState/title stay live off selectedPlayerId).
+                            // Waiting on the players list itself covers all three; the
+                            // PLAYER_UPDATED consumer below is the belt-and-suspenders for
+                            // the quick-reconnect case. selectPlayer fans out to
+                            // refreshQueueForPlayerWithRetry.
+                            scope.launch {
+                                val appeared = withTimeoutOrNull(PLAYER_RESTORE_WAIT_MS) {
+                                    players.first { list -> list.any { it.playerId == id } }
+                                }
+                                if (appeared != null) {
+                                    if (_selectedPlayer.value?.playerId != id) selectPlayer(id)
+                                    Log.d(TAG, "Restored saved player: $id")
+                                } else {
+                                    Log.d(TAG, "Restored player $id not present within ${PLAYER_RESTORE_WAIT_MS}ms")
+                                }
+                            }
+                        }
+                    }
+                    else -> {}
+                }
+            }
+        }
+    }
+
+    /**
+     * Wipes all per-account state. The default disconnect path intentionally
+     * keeps the last selectedPlayer and queue snapshot around so the mini
+     * player remains visible during a flap; that is wrong when the account
+     * itself changes, because the cached entities belong to a different user.
+     */
+    private fun resetForAccountSwitch() {
+        Log.d(TAG, "Session reset: dropping cached player and queue state")
+        blockedQueueCleanupJob?.cancel()
+        blockedQueueCleanupJob = null
+        playerResyncJob?.cancel()
+        playerResyncJob = null
+        stopPositionTicker()
+        selectedPlayerId = null
+        pendingRestoredPlayerId = null
+        favoriteOverride = null
+        favoriteOverrideUri = null
+        trackDuration = 0.0
+        positionBaseTime = 0.0
+        positionBaseTimestamp = 0L
+        isPlaying = false
+        _players.value = emptyList()
+        _selectedPlayer.value = null
+        _queueState.value = null
+        resetPosition()
+        queueTracking.clear()
+        artistGenreCache.clear()
+        libraryArtistUriCache.clear()
+        manualSkipByQueue.clear()
+        queueReplacementByQueue.clear()
+        blockedAutoSkipByQueue.clear()
+        blockedQueueCleanupAtByQueue.clear()
+        queueFilterModeByQueue.clear()
+        volumeOverrideUntilMs.clear()
+        suppressedArtistUrisSnapshot = emptySet()
+    }
+
+    private suspend fun observeEvents() {
+        wsClient.events.collect { event ->
+            when (event.event) {
+                EventType.PLAYER_UPDATED -> {
+                    val serverPlayer = event.data?.let {
+                        json.decodeFromJsonElement<ServerPlayer>(it)
+                    } ?: return@collect
+                    // Use the cached queue-track image ONLY when it belongs to the
+                    // track now playing. A PLAYER_UPDATED can arrive before the
+                    // matching QUEUE_UPDATED refreshes queueTracking, so a blind
+                    // cache read would pin the PREVIOUS track's art on the new
+                    // track (fresh title/artist, stale image). Mismatch -> fall
+                    // back to the player's own fresh image in toDomain.
+                    val trackImg = queueTracking[serverPlayer.playerId]
+                        ?.takeIf { it.track.uri == serverPlayer.currentMedia?.uri }
+                        ?.track?.imageUrl
+                    var player = serverPlayer.toDomain(wsClient, trackImg)
+                    if (player.activeGroup != null || player.groupChilds.isNotEmpty()) {
+                        Log.d(TAG, "Player ${player.displayName} group: activeGroup=${player.activeGroup} childs=${player.groupChilds}")
+                    }
+                    // During volume cooldown for THIS specific player, preserve
+                    // local optimistic values. Other players' echoes still flow
+                    // through (needed when group volume fans out to children).
+                    if (volumeCooldownActive(player.playerId)) {
+                        val local = _players.value.firstOrNull { it.playerId == player.playerId }
+                        if (local != null) {
+                            player = player.copy(
+                                volumeLevel = local.volumeLevel,
+                                groupVolume = local.groupVolume ?: player.groupVolume
+                            )
+                        }
+                    }
+                    _players.update { list ->
+                        list.map { if (it.playerId == player.playerId) player else it }
+                    }
+                    // A quick ("hello changed") reconnect re-announces an
+                    // already-registered player via PLAYER_UPDATED rather than
+                    // PLAYER_ADDED, so complete a pending saved-player restore here
+                    // too. (Full reconnect / server reboot re-register from empty and
+                    // come through PLAYER_ADDED; the bounded wait in the Connected
+                    // branch covers a players/all resync with no per-player event.)
+                    if (player.playerId == pendingRestoredPlayerId) {
+                        selectPlayer(player.playerId)
+                        pendingRestoredPlayerId = null
+                        Log.d(TAG, "Restored saved player via update: ${player.playerId}")
+                    }
+                    if (player.playerId == selectedPlayerId) {
+                        if (!player.available) {
+                            Log.d(TAG, "Selected player became unavailable, deselecting: ${player.displayName}")
+                            pendingRestoredPlayerId = player.playerId
+                            selectedPlayerId = null
+                            _selectedPlayer.value = null
+                            _queueState.value = null
+                            resetPosition()
+                            trackDuration = 0.0
+                            favoriteOverride = null
+                            favoriteOverrideUri = null
+                            stopPositionTicker()
+                        } else {
+                            _selectedPlayer.value = player
+                            val wasPlaying = isPlaying
+                            isPlaying = player.state == PlaybackState.PLAYING
+                            if (isPlaying && !wasPlaying) {
+                                // Re-anchor to now so the ticker resumes from the
+                                // paused position instead of adding the paused
+                                // wall-clock gap (the base timestamp is frozen at
+                                // the pre-pause update; without this the position
+                                // jumps forward by the whole pause duration).
+                                positionBaseTimestamp = System.currentTimeMillis()
+                                startPositionTicker()
+                            } else if (!isPlaying && wasPlaying) {
+                                stopPositionTicker()
+                            }
+                        }
+                    }
+                }
+                EventType.PLAYER_ADDED -> {
+                    Log.d(TAG, "PLAYER_ADDED event: objectId=${event.objectId}, hasData=${event.data != null}")
+                    val serverPlayer = event.data?.let {
+                        json.decodeFromJsonElement<ServerPlayer>(it)
+                    } ?: return@collect
+                    val player = serverPlayer.toDomain(wsClient)
+                    Log.d(TAG, "PLAYER_ADDED: ${player.displayName} (${player.playerId})")
+                    _players.update { list ->
+                        if (list.any { it.playerId == player.playerId }) {
+                            list.map { if (it.playerId == player.playerId) player else it }
+                        } else list + player
+                    }
+                    // Auto-select if this is the saved player and nothing is selected yet.
+                    if (player.playerId == pendingRestoredPlayerId) {
+                        // selectPlayer already fans out to refreshQueueForPlayerWithRetry
+                        // inside its own scope.launch — no second call needed here.
+                        selectPlayer(player.playerId)
+                        pendingRestoredPlayerId = null
+                        Log.d(TAG, "Auto-selected late-arriving player: ${player.displayName}")
+                    }
+                    scheduleAuthoritativePlayerResync()
+                }
+                EventType.PLAYER_REMOVED -> {
+                    Log.d(TAG, "PLAYER_REMOVED event: ${event.objectId}")
+                    val id = event.objectId ?: return@collect
+                    _players.update { list -> list.filter { it.playerId != id } }
+                    queueTracking.remove(id)
+                    blockedAutoSkipByQueue.remove(id)
+                    blockedQueueCleanupAtByQueue.remove(id)
+                    queueFilterModeByQueue.remove(id)
+                    if (selectedPlayerId == id) {
+                        selectedPlayerId = null
+                        _selectedPlayer.value = null
+                        _queueState.value = null
+                        resetPosition()
+                        trackDuration = 0.0
+                        favoriteOverride = null
+                        favoriteOverrideUri = null
+                        stopPositionTicker()
+                        scope.launch { settingsRepository.setSelectedPlayerId(null) }
+                    }
+                    scheduleAuthoritativePlayerResync()
+                }
+                EventType.QUEUE_UPDATED -> {
+                    val serverQueue = event.data?.let {
+                        json.decodeFromJsonElement<ServerQueue>(it)
+                    } ?: return@collect
+
+                    // Play history: track all queues, not just selected
+                    trackPlayHistory(serverQueue)
+
+                    if (serverQueue.queueId == effectiveQueueId()) {
+                        val previousState = _queueState.value
+                        var domainState = preserveCurrentAudioFormat(
+                            previous = previousState,
+                            incoming = serverQueue.toDomain(wsClient)
+                        )
+                        val currentItemChanged = hasCurrentItemChanged(previousState, domainState)
+                        // Apply favorite override if current track matches
+                        val override = favoriteOverride
+                        val overrideUri = favoriteOverrideUri
+                        val currentUri = domainState.currentItem?.track?.uri
+                        if (override != null && overrideUri != null && currentUri == overrideUri) {
+                            domainState = domainState.copy(
+                                currentItem = domainState.currentItem?.copy(
+                                    track = domainState.currentItem.track?.copy(favorite = override)
+                                )
+                            )
+                        } else {
+                            favoriteOverride = null
+                            favoriteOverrideUri = null
+                        }
+                        // On a track change, reset the displayed position BEFORE
+                        // publishing the new queue state. Position (_elapsedTime) and
+                        // duration (queueState.currentItem.duration) are separate
+                        // flows; if the new — often shorter — duration emits while
+                        // _elapsedTime still holds the previous track's end position,
+                        // the UI flashes e.g. "9:54 / 4:11" for a frame. Resetting
+                        // first makes the only possible transient "0:00 / old-duration"
+                        // (harmless); updatePosition below re-publishes 0 consistently.
+                        if (currentItemChanged) publishPosition(0.0)
+                        _queueState.value = domainState
+                        trackDuration = serverQueue.currentItem?.duration ?: 0.0
+                        val resolved = if (currentItemChanged) 0.0 else serverQueue.elapsedTime
+                        // Translate the server-side capture timestamp into a
+                        // local-monotonic value via the WS round-trip clock.
+                        // Falls back to "now" when the server omits the field.
+                        val capturedAtMs = serverQueue.elapsedTimeLastUpdated
+                            ?.let { wsClient.serverWallSecondsToLocalMs(it) }
+                            ?: System.currentTimeMillis()
+                        Log.d(
+                            "PosDbg",
+                            "QUEUE_UPDATED ${serverQueue.queueId} itemChanged=$currentItemChanged " +
+                                "serverElapsed=${serverQueue.elapsedTime} last_updated=${serverQueue.elapsedTimeLastUpdated} " +
+                                "-> resolved=$resolved capturedAt=$capturedAtMs (prev=${_elapsedTime.value}) duration=$trackDuration"
+                        )
+                        updatePosition(
+                            serverElapsed = resolved,
+                            serverElapsedAtMs = if (currentItemChanged) System.currentTimeMillis() else capturedAtMs,
+                            // Always (re)start the local ticker — startPositionTicker
+                            // no-ops when not playing. MA 2.9 emits position updates
+                            // very sparsely (no frequent queue_time_updated; verified
+                            // none in 12 s of playback), so the ticker is the primary
+                            // position driver. On a track change the new item starts at
+                            // 0, so ticking from the reset 0 is correct; leaving it
+                            // stopped (the old behaviour) froze the position until the
+                            // next sparse QUEUE_UPDATED, which can be a minute away.
+                            startTicker = true
+                        )
+                    }
+                }
+                EventType.QUEUE_ITEMS_UPDATED -> {
+                    val queueId = event.objectId ?: return@collect
+                    if (queueId == effectiveQueueId()) {
+                        _queueItemsChanged.tryEmit(queueId)
+                        scheduleBlockedQueueCleanup(queueId, reason = "queue_items_updated")
+                    }
+                }
+                EventType.QUEUE_TIME_UPDATED -> {
+                    if (event.objectId != effectiveQueueId()) return@collect
+                    val elapsed = event.data?.jsonPrimitive?.doubleOrNull ?: return@collect
+                    // Fires ~1/sec during playback; commented out to avoid logcat spam in debug.
+                    // Log.d("PosDbg", "QUEUE_TIME_UPDATED ${event.objectId} elapsed=$elapsed (prev=${_elapsedTime.value})")
+                    updatePosition(elapsed)
+                }
+            }
+        }
+    }
+
+    private fun trackPlayHistory(serverQueue: ServerQueue) {
+        val mediaItem = serverQueue.currentItem?.mediaItem ?: return
+        val trackUri = mediaItem.uri.takeIf { it.isNotBlank() } ?: return
+        val queueId = serverQueue.queueId
+        val now = System.currentTimeMillis()
+
+        val prev = queueTracking[queueId]
+        if (prev != null && prev.track.uri != trackUri) {
+            // Track changed: record previous if listened >30s, not manually skipped, and not queue replacement.
+            val listenedMs = now - prev.startTime
+            val wasManualSkip = manualSkipByQueue.remove(queueId) == prev.track.uri
+            val wasQueueReplacement = queueReplacementByQueue.remove(queueId) == prev.track.uri
+            if (listenedMs > 30_000L && !wasManualSkip && !wasQueueReplacement) {
+                scope.launch {
+                    try {
+                        val enrichedTrack = enrichTrackGenresForHistory(prev.track, prev.artists)
+                        playHistoryRepository.recordPlay(
+                            enrichedTrack, queueId, listenedMs, prev.artists
+                        )
+                        smartListeningRepository.recordListen(
+                            track = enrichedTrack,
+                            artists = prev.artists,
+                            listenedMs = listenedMs
+                        )
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Play history failed: ${e.message}")
+                    }
+                }
+            }
+        }
+
+        if (prev == null || prev.track.uri != trackUri) {
+            Log.d(TAG, "New track: $trackUri")
+            val artists = mediaItem.artists
+                ?.mapNotNull { a ->
+                    val rawKey = MediaIdentity.canonicalArtistKey(itemId = a.itemId, uri = a.uri)
+                        ?: return@mapNotNull null
+                    val key = if (!rawKey.startsWith("library://")) {
+                        resolveLibraryArtistUri(a.name, rawKey)
+                    } else {
+                        rawKey
+                    }
+                    key to a.name
+                } ?: emptyList()
+
+            // Start with track-level metadata genres when present, then enrich from artist cache.
+            val trackMetadataGenres = normalizeGenres(mediaItem.metadata?.genres)
+
+            // Resolve genres from cache immediately if available
+            val cachedGenres = mediaItem.artists
+                ?.flatMap { artistGenreCache[it.uri] ?: emptyList() }
+                ?.distinct()
+                ?: emptyList()
+            val initialGenres = (trackMetadataGenres + cachedGenres)
+                .distinct()
+
+            val track = Track(
+                itemId = mediaItem.itemId,
+                provider = mediaItem.provider,
+                name = mediaItem.name,
+                uri = mediaItem.uri,
+                duration = mediaItem.duration,
+                artistNames = mediaItem.artists?.joinToString(", ") { it.name } ?: "",
+                albumName = mediaItem.album?.name ?: "",
+                imageUrl = mediaItem.resolveImageWithAlbumFallback(wsClient),
+                artistItemId = mediaItem.artists?.firstOrNull()?.itemId,
+                artistProvider = mediaItem.artists?.firstOrNull()?.provider,
+                albumItemId = mediaItem.album?.itemId,
+                albumProvider = mediaItem.album?.provider,
+                artistUri = mediaItem.artists?.firstOrNull()?.let { a ->
+                    val rawKey = MediaIdentity.canonicalArtistKey(itemId = a.itemId, uri = a.uri)
+                    if (rawKey != null && !rawKey.startsWith("library://")) {
+                        resolveLibraryArtistUri(a.name, rawKey)
+                    } else rawKey
+                },
+                artistUris = mediaItem.artists
+                    ?.mapNotNull { artist ->
+                        val rawKey = MediaIdentity.canonicalArtistKey(itemId = artist.itemId, uri = artist.uri)
+                            ?: return@mapNotNull null
+                        if (!rawKey.startsWith("library://")) {
+                            resolveLibraryArtistUri(artist.name, rawKey)
+                        } else rawKey
+                    }
+                    ?.distinct()
+                    ?: emptyList(),
+                albumUri = MediaIdentity.canonicalAlbumKey(
+                    itemId = mediaItem.album?.itemId,
+                    uri = mediaItem.album?.uri
+                ),
+                genres = initialGenres,
+                year = sanitizeYear(mediaItem.album?.year ?: mediaItem.year),
+                lyrics = mediaItem.metadata?.lyrics,
+                lrcLyrics = mediaItem.metadata?.lrcLyrics
+            )
+            queueTracking[queueId] = QueueTrackingState(track, artists, now)
+            maybeAutoSkipBlockedTrack(
+                queueId = queueId,
+                track = track,
+                artistUris = artists.map { it.first },
+                trigger = "queue_update"
+            )
+            scheduleBlockedQueueCleanup(queueId, reason = "queue_update")
+
+            // Fetch genres async for uncached artists
+            val uncachedArtists = mediaItem.artists
+                ?.filter { it.uri.isNotBlank() && !artistGenreCache.containsKey(it.uri) }
+                ?: emptyList()
+            Log.d(TAG, "Uncached artists for genre fetch: ${uncachedArtists.size}")
+            if (uncachedArtists.isNotEmpty()) {
+                scope.launch { fetchAndApplyGenres(uncachedArtists, queueId, trackUri) }
+            }
+        }
+    }
+
+    private suspend fun enrichTrackGenresForHistory(
+        track: Track,
+        artists: List<Pair<String, String>>
+    ): Track {
+        // Always try Last.fm first (curated whitelist, more accurate than raw provider tags)
+        val lastFmGenres = LinkedHashSet<String>()
+        artists.forEach { (_, name) ->
+            val tags = lastFmGenreResolver.resolve(name)
+            if (tags.isNotEmpty()) {
+                Log.d(TAG, "History genres from Last.fm '$name': $tags")
+                lastFmGenres.addAll(tags)
+            }
+        }
+        if (lastFmGenres.isNotEmpty()) {
+            return track.copy(genres = lastFmGenres.toList())
+        }
+
+        // Fall back to MA provider genres + artist cache
+        val mergedGenres = LinkedHashSet<String>()
+        mergedGenres.addAll(normalizeGenres(track.genres))
+        artists.forEach { (artistUri, _) ->
+            artistGenreCache[artistUri]?.let { mergedGenres.addAll(normalizeGenres(it)) }
+        }
+        if (mergedGenres.isNotEmpty()) {
+            return track.copy(genres = mergedGenres.toList())
+        }
+
+        // Fall back to MA metadata chain
+        val trackMeta = fetchMediaItem(
+            command = MaCommands.Music.TRACKS_GET,
+            ref = trackRef(track)
+        )
+        mergedGenres.addAll(normalizeGenres(trackMeta?.metadata?.genres))
+        if (mergedGenres.isNotEmpty()) {
+            Log.d(TAG, "History genres from track metadata for ${track.uri}: $mergedGenres")
+            return track.copy(genres = mergedGenres.toList())
+        }
+
+        val albumMeta = fetchMediaItem(
+            command = MaCommands.Music.ALBUMS_GET,
+            ref = albumRef(track, trackMeta)
+        )
+        mergedGenres.addAll(normalizeGenres(albumMeta?.metadata?.genres))
+        if (mergedGenres.isNotEmpty()) {
+            Log.d(TAG, "History genres from album metadata for ${track.uri}: $mergedGenres")
+            return track.copy(genres = mergedGenres.toList())
+        }
+
+        val artistRefs = artistRefs(track, trackMeta, artists)
+        artistRefs.forEach { ref ->
+            val artistMeta = fetchMediaItem(
+                command = MaCommands.Music.ARTISTS_GET,
+                ref = ref
+            )
+            val artistGenres = normalizeGenres(artistMeta?.metadata?.genres)
+            if (artistGenres.isNotEmpty()) {
+                mergedGenres.addAll(artistGenres)
+            }
+        }
+        if (mergedGenres.isNotEmpty()) {
+            Log.d(TAG, "History genres from MA artist metadata for ${track.uri}: $mergedGenres")
+        } else {
+            Log.d(TAG, "No genres found (Last.fm + MA) for ${track.uri}")
+        }
+        return track.copy(genres = mergedGenres.toList())
+    }
+
+    private suspend fun fetchMediaItem(command: String, ref: MaItemRef?): ServerMediaItem? {
+        if (ref == null) return null
+        return try {
+            val result = wsClient.sendCommand(
+                command = command,
+                args = ItemRefLazyArgs(
+                    itemId = ref.itemId,
+                    provider = ref.provider,
+                    lazy = true
+                ),
+                timeoutMs = HISTORY_GENRE_LOOKUP_TIMEOUT_MS
+            )
+            result?.let { json.decodeFromJsonElement<ServerMediaItem>(it) }
+        } catch (e: Exception) {
+            Log.d(TAG, "History genre lookup failed for $command ${ref.provider}/${ref.itemId}: ${e.message}")
+            null
+        }
+    }
+
+    private fun trackRef(track: Track): MaItemRef? {
+        if (!track.itemId.isBlank() && !track.provider.isBlank()) {
+            return MaItemRef(itemId = track.itemId, provider = track.provider)
+        }
+        return parseMaItemRef(track.uri)
+    }
+
+    private fun albumRef(track: Track, trackMeta: ServerMediaItem?): MaItemRef? {
+        val fromTrackMeta = trackMeta?.album?.let { album ->
+            if (album.itemId.isNotBlank() && album.provider.isNotBlank()) {
+                MaItemRef(itemId = album.itemId, provider = album.provider)
+            } else null
+        }
+        if (fromTrackMeta != null) return fromTrackMeta
+
+        if (!track.albumItemId.isNullOrBlank() && !track.albumProvider.isNullOrBlank()) {
+            return MaItemRef(itemId = track.albumItemId, provider = track.albumProvider)
+        }
+        return parseMaItemRef(track.albumUri)
+    }
+
+    private fun artistRefs(
+        track: Track,
+        trackMeta: ServerMediaItem?,
+        artists: List<Pair<String, String>>
+    ): List<MaItemRef> {
+        val refs = linkedSetOf<MaItemRef>()
+
+        trackMeta?.artists
+            ?.asSequence()
+            ?.mapNotNull { artist ->
+                if (artist.itemId.isNotBlank() && artist.provider.isNotBlank()) {
+                    MaItemRef(itemId = artist.itemId, provider = artist.provider)
+                } else parseMaItemRef(artist.uri)
+            }
+            ?.forEach { refs.add(it) }
+
+        artists
+            .asSequence()
+            .mapNotNull { (uri, _) -> parseMaItemRef(uri) }
+            .forEach { refs.add(it) }
+
+        if (!track.artistItemId.isNullOrBlank() && !track.artistProvider.isNullOrBlank()) {
+            refs.add(MaItemRef(itemId = track.artistItemId, provider = track.artistProvider))
+        } else {
+            parseMaItemRef(track.artistUri)?.let { refs.add(it) }
+        }
+
+        return refs.take(HISTORY_ARTIST_LOOKUP_LIMIT)
+    }
+
+    private fun parseMaItemRef(uri: String?): MaItemRef? {
+        val raw = uri?.trim().orEmpty()
+        if (raw.isEmpty()) return null
+        val provider = raw.substringBefore("://", "").trim()
+        if (provider.isEmpty()) return null
+        val path = raw.substringAfter("://", "")
+            .substringBefore('?')
+            .substringBefore('#')
+            .trim('/')
+        if (path.isEmpty()) return null
+        val itemId = path.substringAfterLast('/').trim()
+        if (itemId.isEmpty()) return null
+        return MaItemRef(itemId = itemId, provider = provider)
+    }
+
+    private fun resolveLibraryArtistUri(name: String, fallback: String): String {
+        libraryArtistUriCache[name]?.let { return it }
+        // Async resolve for next time
+        scope.launch {
+            val resolved = playHistoryRepository.resolveLibraryArtistUri(name)
+            if (resolved != null) libraryArtistUriCache[name] = resolved
+        }
+        return fallback
+    }
+
+    private fun normalizeGenres(genres: List<String>?): List<String> {
+        if (genres.isNullOrEmpty()) return emptyList()
+        val seen = linkedSetOf<String>()
+        val result = mutableListOf<String>()
+        genres.forEach { raw ->
+            val value = raw.trim()
+            if (value.isEmpty()) return@forEach
+            val key = normalizeGenre(value)
+            if (seen.add(key)) {
+                result.add(key)
+            }
+        }
+        return result
+    }
+
+    private fun sanitizeYear(year: Int?): Int? = year?.takeIf { it > 0 }
+
+    private fun maybeAutoSkipBlockedTrack(
+        queueId: String,
+        track: Track?,
+        artistUris: List<String>,
+        trigger: String
+    ) {
+        if (queueId != selectedPlayerId) return
+        val currentTrack = track ?: return
+        if (currentTrack.uri.isBlank()) return
+        val filteredArtists = currentFilteredArtists(queueId)
+        if (filteredArtists.isEmpty()) return
+
+        val distinctUris = artistUris
+            .mapNotNull { MediaIdentity.canonicalArtistKey(uri = it) }
+            .distinct()
+        if (distinctUris.none { it in filteredArtists }) return
+
+        val now = System.currentTimeMillis()
+        val last = blockedAutoSkipByQueue[queueId]
+        if (last != null && last.first == currentTrack.uri && now - last.second < BLOCKED_AUTO_SKIP_COOLDOWN_MS) {
+            return
+        }
+        blockedAutoSkipByQueue[queueId] = currentTrack.uri to now
+
+        scope.launch {
+            try {
+                playerCmd("next", queueId)
+                Log.d(TAG, "Auto-skipped blocked track (${currentTrack.uri}) via $trigger")
+            } catch (e: Exception) {
+                Log.w(TAG, "Auto-skip blocked track failed: ${e.message}")
+            }
+        }
+    }
+
+    private fun scheduleBlockedQueueCleanup(queueId: String, reason: String, force: Boolean = false) {
+        if (queueId != selectedPlayerId) return
+        val now = System.currentTimeMillis()
+        val lastAt = blockedQueueCleanupAtByQueue[queueId] ?: 0L
+        if (!force && now - lastAt < BLOCKED_QUEUE_CLEANUP_COOLDOWN_MS) return
+        blockedQueueCleanupAtByQueue[queueId] = now
+        blockedQueueCleanupJob?.cancel()
+        blockedQueueCleanupJob = scope.launch {
+            purgeBlockedTracksFromQueue(queueId, reason)
+        }
+    }
+
+    private suspend fun purgeBlockedTracksFromQueue(queueId: String, reason: String) {
+        val blocked = blockedArtistUrisSnapshot
+        val suppressed = try {
+            val smartEnabled = settingsRepository.smartListeningEnabled.first()
+            if (smartEnabled && shouldApplySuppressedFiltering(queueId)) {
+                smartListeningRepository.getSuppressedArtistUris(days = 120)
+            } else {
+                emptySet()
+            }
+        } catch (_: Exception) {
+            emptySet()
+        }
+        suppressedArtistUrisSnapshot = suppressed
+        val filteredArtists = blocked + suppressed
+        if (filteredArtists.isEmpty()) return
+
+        try {
+            // Source items from the canonical snapshot when it covers
+            // the queue we're operating on. The coordinator's debounced
+            // fetcher already issues one player_queues/items RPC per
+            // queue change, so cleanup just consumes that data instead
+            // of triggering a parallel RPC. If the snapshot is missing
+            // or stale (different queueId), force a refresh through the
+            // coordinator so we still get a single RPC per attempt and
+            // the result is shared with future readers.
+            val snapshot = queueItemsCoordinator.queueItems.value
+                ?.takeIf { it.queueId == queueId }
+                ?: queueItemsCoordinator.refresh(queueId)
+                ?: return
+            val queueItems = snapshot.items
+            if (queueItems.isEmpty()) return
+
+            val currentTrackUri = queueTracking[queueId]?.track?.uri
+                ?: _queueState.value?.currentItem?.track?.uri
+            val removeQueueItemIds = queueItems.mapNotNull { item ->
+                val track = item.track ?: return@mapNotNull null
+                val trackUri = track.uri.takeIf { it.isNotBlank() }
+                if (!currentTrackUri.isNullOrBlank() && trackUri == currentTrackUri) {
+                    return@mapNotNull null
+                }
+                val rawArtistKeys = buildList {
+                    track.artistUri?.let { add(it) }
+                    addAll(track.artistUris)
+                    track.artistItemId?.let { id ->
+                        MediaIdentity.canonicalArtistKey(itemId = id, uri = track.artistUri)
+                            ?.let { add(it) }
+                    }
+                }
+                val resolvedArtistKeys = rawArtistKeys.mapNotNull { rawKey ->
+                    if (rawKey.startsWith("library://")) {
+                        rawKey
+                    } else {
+                        resolveLibraryArtistUri(track.artistNames, rawKey)
+                    }
+                }
+                if (resolvedArtistKeys.any { it in filteredArtists }) item.queueItemId else null
+            }
+            if (removeQueueItemIds.isEmpty()) return
+
+            removeQueueItemIds.forEach { itemId ->
+                wsClient.sendCommand(
+                    MaCommands.PlayerQueues.DELETE_ITEM,
+                    DeleteQueueItemArgs(queueId = queueId, itemIdOrIndex = itemId),
+                    awaitResponse = false
+                )
+            }
+            Log.d(
+                TAG,
+                "Removed ${removeQueueItemIds.size} filtered track(s) from queue $queueId via $reason " +
+                    "(mode=${queueFilterModeByQueue[queueId] ?: PlayerRepository.QueueFilterMode.NORMAL}, blocked=${blocked.size}, suppressed=${suppressed.size})"
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "purgeBlockedTracksFromQueue failed: ${e.message}")
+        }
+    }
+
+    private fun currentFilteredArtists(queueId: String): Set<String> {
+        val blocked = blockedArtistUrisSnapshot
+        if (!smartListeningEnabledSnapshot || !shouldApplySuppressedFiltering(queueId)) {
+            return blocked
+        }
+        return blocked + suppressedArtistUrisSnapshot
+    }
+
+    private fun shouldApplySuppressedFiltering(queueId: String): Boolean {
+        return when (queueFilterModeByQueue[queueId] ?: PlayerRepository.QueueFilterMode.NORMAL) {
+            PlayerRepository.QueueFilterMode.NORMAL -> false
+            PlayerRepository.QueueFilterMode.SMART_GENERATED,
+            PlayerRepository.QueueFilterMode.RADIO_SMART -> true
+        }
+    }
+
+    private suspend fun fetchAndApplyGenres(
+        artists: List<ServerMediaItem>,
+        queueId: String,
+        trackUri: String
+    ) {
+        Log.d(TAG, "fetchAndApplyGenres: ${artists.map { "${it.name}(${it.itemId})" }}")
+        val allGenres = mutableSetOf<String>()
+        // Try Last.fm first (better genre data when API key is configured)
+        for (artist in artists) {
+            val tags = lastFmGenreResolver.resolve(artist.name)
+            if (tags.isNotEmpty()) {
+                Log.d(TAG, "Last.fm genres for ${artist.name}: $tags")
+                allGenres.addAll(tags)
+                artistGenreCache[artist.uri] = tags
+            }
+        }
+        // Fall back to MA server if Last.fm returned nothing
+        if (allGenres.isEmpty()) {
+            for (artist in artists) {
+                try {
+                    val result = wsClient.sendCommand(
+                        MaCommands.Music.ARTISTS_GET,
+                        ItemRefLazyArgs(
+                            itemId = artist.itemId,
+                            provider = artist.provider,
+                            lazy = true
+                        )
+                    )
+                    val genres = normalizeGenres(
+                        result?.let {
+                            json.decodeFromJsonElement<ServerMediaItem>(it)
+                        }?.metadata?.genres
+                    )
+                    Log.d(TAG, "MA genres for ${artist.name}: $genres")
+                    artistGenreCache[artist.uri] = genres
+                    allGenres.addAll(genres)
+                } catch (e: Exception) {
+                    Log.w(TAG, "MA genre fetch failed for ${artist.name}: ${e.message}")
+                    artistGenreCache[artist.uri] = emptyList()
+                }
+            }
+        }
+        // Include already-known genres already attached to the tracked item (track metadata / previous cache).
+        queueTracking[queueId]?.track?.genres?.let { allGenres.addAll(it) }
+        // Include already-cached genres from other artists on this track
+        queueTracking[queueId]?.artists?.forEach { (uri, _) ->
+            artistGenreCache[uri]?.let { allGenres.addAll(it) }
+        }
+        if (allGenres.isNotEmpty()) {
+            queueTracking.computeIfPresent(queueId) { _, state ->
+                if (state.track.uri == trackUri) {
+                    state.copy(track = state.track.copy(genres = allGenres.toList()))
+                } else state
+            }
+            Log.d(TAG, "Genres resolved for $trackUri: $allGenres")
+        }
+    }
+
+    /**
+     * Update the local position model from a server event.
+     *
+     * @param serverElapsed the elapsed_time the server reports (seconds).
+     * @param serverElapsedAtMs the local-monotonic timestamp (ms since boot
+     *   epoch) corresponding to when `serverElapsed` was actually taken on
+     *   the server. Pass [System.currentTimeMillis] for events that don't
+     *   carry a server timestamp (QUEUE_TIME_UPDATED). For QUEUE_UPDATED
+     *   the caller should translate `elapsed_time_last_updated` into local
+     *   time and pass it here so stale events interpolate correctly instead
+     *   of jumping the ticker.
+     */
+    private fun updatePosition(
+        serverElapsed: Double,
+        serverElapsedAtMs: Long = System.currentTimeMillis(),
+        startTicker: Boolean = true,
+    ) {
+        // Mirror MA's web UI (helpers/elapsed.ts): the displayed position is a
+        // continuous function of (elapsed_time, elapsed_time_last_updated, now)
+        // while PLAYING, and frozen at elapsed_time otherwise. We therefore anchor
+        // the base to the SERVER CAPTURE time (not "now"), so the ticker re-derives
+        // the same value every event arrives — no backward/forward jump when sparse
+        // QUEUE_UPDATEDs land. Projecting only while playing means we never advance
+        // over paused/stopped time (no over-count past the track end). The
+        // paused->play boundary re-anchors the timestamp to "now" (see the
+        // PLAYER_UPDATED resume branch) so a stale capture can't jump the position.
+        positionBaseTime = serverElapsed
+        positionBaseTimestamp = serverElapsedAtMs.takeIf { it > 0L } ?: System.currentTimeMillis()
+        publishPosition(interpolatedPosition())
+        // Emit a server-confirmed position event distinct from the 500ms
+        // interpolation ticker. AndroidAutoController subscribes to this to
+        // invalidate the AA host's state on every authoritative update,
+        // without the ticker (which only re-derives an interpolated value)
+        // spamming AA with re-queries that risk the gearhead queue rebuild.
+        _playbackPosition.value?.let { _serverPositionUpdates.tryEmit(it) }
+        if (startTicker) startPositionTicker() else stopPositionTicker()
+    }
+
+    /**
+     * The current position derived from the server anchor: advance from the
+     * captured elapsed by the wall-clock delta ONLY while playing (frozen
+     * otherwise), clamped to the track duration. Single source of truth for both
+     * the immediate publish and the ticker, so they never disagree (no jumps).
+     */
+    private fun interpolatedPosition(): Double {
+        val advanced = if (isPlaying) {
+            positionBaseTime + ((System.currentTimeMillis() - positionBaseTimestamp) / 1000.0).coerceAtLeast(0.0)
+        } else {
+            positionBaseTime
+        }
+        return (if (trackDuration > 0) advanced.coerceAtMost(trackDuration) else advanced).coerceAtLeast(0.0)
+    }
+
+    private fun publishPosition(position: Double) {
+        _elapsedTime.value = position
+        _playbackPosition.value = currentPlaybackPosition(position)
+    }
+
+    private fun resetPosition() {
+        _elapsedTime.value = 0.0
+        _playbackPosition.value = null
+    }
+
+    private fun currentPlaybackPosition(position: Double): PlaybackPosition {
+        val queue = _queueState.value
+        val item = queue?.currentItem
+        return PlaybackPosition(
+            queueId = queue?.queueId,
+            queueItemId = item?.queueItemId,
+            trackUri = item?.track?.uri,
+            position = position
+        )
+    }
+
+    private fun preserveCurrentAudioFormat(
+        previous: QueueState?,
+        incoming: QueueState
+    ): QueueState {
+        val prevItem = previous?.currentItem ?: return incoming
+        val nextItem = incoming.currentItem ?: return incoming
+        if (nextItem.audioFormat != null) return incoming
+
+        val sameQueueItem = prevItem.queueItemId.isNotBlank() && prevItem.queueItemId == nextItem.queueItemId
+        val prevTrackUri = prevItem.track?.uri
+        val nextTrackUri = nextItem.track?.uri
+        val sameTrack = !prevTrackUri.isNullOrBlank() && prevTrackUri == nextTrackUri
+        if (!sameQueueItem && !sameTrack) return incoming
+
+        val preserved = prevItem.audioFormat ?: return incoming
+        return incoming.copy(
+            currentItem = nextItem.copy(audioFormat = preserved)
+        )
+    }
+
+    private fun hasCurrentItemChanged(previous: QueueState?, incoming: QueueState): Boolean {
+        val previousItem = previous?.currentItem ?: return false
+        val nextItem = incoming.currentItem ?: return false
+
+        val previousQueueItemId = previousItem.queueItemId
+        val nextQueueItemId = nextItem.queueItemId
+        if (previousQueueItemId.isNotBlank() && nextQueueItemId.isNotBlank()) {
+            return previousQueueItemId != nextQueueItemId
+        }
+
+        val previousTrackUri = previousItem.track?.uri
+        val nextTrackUri = nextItem.track?.uri
+        if (!previousTrackUri.isNullOrBlank() && !nextTrackUri.isNullOrBlank()) {
+            return previousTrackUri != nextTrackUri
+        }
+
+        return false
+    }
+
+    private fun startPositionTicker() {
+        positionTickJob?.cancel()
+        if (!isPlaying) {
+            Log.d("PosDbg", "ticker skip start (not playing)")
+            return
+        }
+        Log.d("PosDbg", "ticker start base=$positionBaseTime")
+        positionTickJob = scope.launch {
+            while (isActive) {
+                delay(500)
+                publishPosition(interpolatedPosition())
+            }
+        }
+    }
+
+    private fun stopPositionTicker() {
+        if (positionTickJob != null) Log.d("PosDbg", "ticker stop")
+        positionTickJob?.cancel()
+        positionTickJob = null
+    }
+
+    override suspend fun refreshPlayers() {
+        try {
+            val result = wsClient.sendCommand(MaCommands.Players.ALL)
+            val serverPlayers = result?.let { json.decodeFromJsonElement<List<ServerPlayer>>(it) } ?: emptyList()
+            Log.d(TAG, "Loaded ${serverPlayers.size} players")
+            val fromServer = serverPlayers.map { sp ->
+                // Only trust the cached queue-track image when it matches the
+                // track currently playing (see PLAYER_UPDATED note); else use the
+                // player's own fresh image so art never lags a track change.
+                val trackImg = queueTracking[sp.playerId]
+                    ?.takeIf { it.track.uri == sp.currentMedia?.uri }
+                    ?.track?.imageUrl
+                sp.toDomain(wsClient, trackImg)
+            }
+            // Merge: server snapshot + recently event-added players not yet in snapshot
+            val serverIds = fromServer.map { it.playerId }.toSet()
+            val retained = _players.value.filter { it.playerId !in serverIds && it.available }
+            if (retained.isNotEmpty()) {
+                Log.d(TAG, "Retaining ${retained.size} event-added players: ${retained.map { it.displayName }}")
+            }
+            _players.value = fromServer + retained
+
+            if (selectedPlayerId != null) {
+                val refreshedSelected = _players.value.find { it.playerId == selectedPlayerId }
+                if (refreshedSelected != null) {
+                    _selectedPlayer.value = refreshedSelected
+                    // Re-sync the playing flag from the authoritative snapshot and
+                    // (re)start the ticker. Closes the launch race where selectPlayer
+                    // ran against a stale not-playing state, leaving isPlaying false
+                    // and the position frozen until the next sparse event.
+                    val wasPlaying = isPlaying
+                    isPlaying = refreshedSelected.state == PlaybackState.PLAYING
+                    if (isPlaying && !wasPlaying) startPositionTicker()
+                    else if (!isPlaying && wasPlaying) stopPositionTicker()
+                    if (pendingRestoredPlayerId == refreshedSelected.playerId) {
+                        pendingRestoredPlayerId = null
+                    }
+                } else if (pendingRestoredPlayerId == selectedPlayerId) {
+                    Log.d(TAG, "Selected player not in refresh snapshot yet, waiting for late-arriving player: $selectedPlayerId")
+                } else {
+                    clearSelectedPlayer("Selected player missing after refresh")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to refresh players: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Debounced full player resync after the player set changes via incremental
+     * events. refreshPlayers() merges the authoritative players/all snapshot
+     * (correct can_group_with for every player) over the event-added entries, so
+     * the group / "sync with" sheet reflects the real server topology even when
+     * players registered at staggered times (e.g. an MA server restart). The
+     * debounce collapses a registration burst into one refresh; refreshPlayers
+     * retains event-added players missing from the snapshot, so a refresh that
+     * lands mid-boot (server still returning a partial list) never drops anyone.
+     */
+    private fun scheduleAuthoritativePlayerResync() {
+        playerResyncJob?.cancel()
+        playerResyncJob = scope.launch {
+            delay(PLAYER_RESYNC_DEBOUNCE_MS)
+            if (wsClient.connectionState.value is ConnectionState.Connected) {
+                refreshPlayers()
+            }
+        }
+    }
+
+    private fun clearSelectedPlayer(reason: String) {
+        Log.d(TAG, reason)
+        selectedPlayerId = null
+        pendingRestoredPlayerId = null
+        _selectedPlayer.value = null
+        _queueState.value = null
+        resetPosition()
+        trackDuration = 0.0
+        favoriteOverride = null
+        favoriteOverrideUri = null
+        stopPositionTicker()
+        scope.launch { settingsRepository.setSelectedPlayerId(null) }
+    }
+
+    override fun selectPlayer(playerId: String) {
+        val lockedPlayerId = _selectionLock.value?.playerId
+        val effectivePlayerId = lockedPlayerId ?: playerId
+        if (lockedPlayerId != null && playerId != lockedPlayerId) {
+            Log.d(TAG, "Selection locked to $lockedPlayerId; ignored selectPlayer($playerId)")
+        }
+        val player = _players.value.find { it.playerId == effectivePlayerId }
+        // refreshPlayers() can populate _selectedPlayer.value during a
+        // restore-from-settings sequence before selectPlayer runs.
+        // Skip the body only when we already have a queue snapshot for
+        // this player; otherwise we must still fan out to
+        // refreshQueueForPlayerWithRetry so the queue state isn't
+        // stuck at null forever.
+        if (
+            selectedPlayerId == effectivePlayerId &&
+            _selectedPlayer.value?.playerId == effectivePlayerId &&
+            _queueState.value?.queueId == effectivePlayerId
+        ) {
+            return
+        }
+
+        selectedPlayerId = effectivePlayerId
+        pendingRestoredPlayerId = if (pendingRestoredPlayerId == effectivePlayerId) null else pendingRestoredPlayerId
+        _selectedPlayer.value = player
+        isPlaying = player?.state == PlaybackState.PLAYING
+        stopPositionTicker()
+        scope.launch {
+            settingsRepository.setSelectedPlayerId(effectivePlayerId)
+            refreshQueueForPlayerWithRetry(effectivePlayerId)
+            scheduleBlockedQueueCleanup(effectivePlayerId, reason = "select_player", force = true)
+        }
+    }
+
+    override fun setSelectionLock(lock: PlayerSelectionLock?) {
+        val previous = _selectionLock.value
+        if (previous == lock) return
+        _selectionLock.value = lock
+        if (lock != null && selectedPlayerId != lock.playerId) {
+            Log.d(TAG, "Applying selection lock to ${lock.playerId} (${lock.reason})")
+            selectPlayer(lock.playerId)
+        } else if (lock == null && previous != null) {
+            Log.d(TAG, "Selection lock cleared (${previous.reason})")
+        }
+    }
+
+    override fun setQueueFilterMode(playerId: String, mode: PlayerRepository.QueueFilterMode) {
+        queueFilterModeByQueue[playerId] = mode
+        if (playerId == selectedPlayerId) {
+            scheduleBlockedQueueCleanup(playerId, reason = "queue_filter_mode", force = true)
+        }
+    }
+
+    override suspend fun refreshActiveQueue() {
+        val id = effectiveQueueId() ?: return
+        refreshQueueForPlayerWithRetry(id)
+    }
+
+    private suspend fun refreshQueueForPlayer(playerId: String) {
+        try {
+            val result = wsClient.sendCommand(
+                MaCommands.PlayerQueues.GET_ACTIVE_QUEUE,
+                ActiveQueueArgs(playerId = playerId)
+            )
+            val serverQueue = result?.let { json.decodeFromJsonElement<ServerQueue>(it) }
+            _queueState.value = serverQueue?.toDomain(wsClient)
+            if (serverQueue != null) {
+                trackDuration = serverQueue.currentItem?.duration ?: 0.0
+                // Re-sync the playing flag from the freshly-known player state so the
+                // ticker actually runs on open/select. The isPlaying snapshot can be
+                // stale (e.g. captured as not-playing at restore while the player is
+                // really playing), which left the ticker doing "skip start (not
+                // playing)" and the position frozen until the next sparse event.
+                _players.value.find { it.playerId == selectedPlayerId }?.let {
+                    isPlaying = it.state == PlaybackState.PLAYING
+                }
+                // Anchor to the server capture time (not "now") so the fetched
+                // position lands continuous with the running ticker — no jump when
+                // the full player opens / a player is (re)selected.
+                val capturedAtMs = serverQueue.elapsedTimeLastUpdated
+                    ?.let { wsClient.serverWallSecondsToLocalMs(it) }
+                    ?: System.currentTimeMillis()
+                updatePosition(serverQueue.elapsedTime, capturedAtMs)
+            } else {
+                resetPosition()
+                trackDuration = 0.0
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "refreshQueueForPlayer($playerId) failed: ${e.message}")
+            throw e
+        }
+    }
+
+    private suspend fun refreshQueueForPlayerWithRetry(playerId: String) {
+        repeat(RECONNECT_QUEUE_REFRESH_ATTEMPTS) { attempt ->
+            try {
+                refreshQueueForPlayer(playerId)
+                return
+            } catch (_: Exception) {
+                if (attempt == RECONNECT_QUEUE_REFRESH_ATTEMPTS - 1) return@repeat
+                delay(RECONNECT_QUEUE_REFRESH_DELAY_MS * (attempt + 1))
+            }
+        }
+    }
+
+    override suspend fun play(playerId: String) {
+        _playbackIntent.tryEmit(true)
+        playerCmd("play", playerId)
+    }
+
+    override suspend fun pause(playerId: String) {
+        _playbackIntent.tryEmit(false)
+        playerCmd("pause", playerId)
+    }
+
+    override suspend fun playPause(playerId: String) {
+        val willPlay = _selectedPlayer.value?.state != PlaybackState.PLAYING
+        _playbackIntent.tryEmit(willPlay)
+        playerCmd("play_pause", playerId)
+    }
+
+    override fun notifyPlaybackIntent(willPlay: Boolean) {
+        _playbackIntent.tryEmit(willPlay)
+    }
+
+    override fun isArtistUriBlocked(artistUri: String): Boolean =
+        artistUri in blockedArtistUrisSnapshot
+
+    override fun isArtistBlocked(artistName: String, artistUri: String): Boolean {
+        val resolved = if (!artistUri.startsWith("library://")) {
+            resolveLibraryArtistUri(artistName, artistUri)
+        } else artistUri
+        return resolved in blockedArtistUrisSnapshot
+    }
+
+    override fun hasBlockedArtists(): Boolean =
+        blockedArtistUrisSnapshot.isNotEmpty()
+
+    override suspend fun next(playerId: String) {
+        if (audiobookChapterSkip(playerId, forward = true)) return
+        Log.d("sendspindbg", "WS>>> next($playerId)")
+        maybeRecordManualSkip(playerId)
+        _discontinuityCommands.tryEmit(PlayerDiscontinuityCommand(playerId, PlayerDiscontinuityCommand.Kind.NEXT))
+        playerCmd("next", playerId)
+    }
+
+    override suspend fun previous(playerId: String) {
+        if (audiobookChapterSkip(playerId, forward = false)) return
+        Log.d("sendspindbg", "WS>>> previous($playerId)")
+        maybeRecordManualSkip(playerId)
+        _discontinuityCommands.tryEmit(PlayerDiscontinuityCommand(playerId, PlayerDiscontinuityCommand.Kind.PREVIOUS))
+        playerCmd("previous", playerId)
+    }
+
+    /**
+     * An audiobook is ONE queue item; chapters are seek targets within it. A
+     * queue next/previous on it has no next item, so MA never opens a fresh
+     * stream and the Sendspin gate ([awaitingFreshStream]) wedges -> frozen
+     * playback. External transport controls (Android Auto, MediaSession, AVRCP,
+     * watch, voice) call next()/previous() directly, so route them to a chapter
+     * seek here, matching the in-app NowPlaying behavior. The in-app screen
+     * already calls its own chapter navigation, so it never reaches this path.
+     *
+     * Returns true when the current item is an audiobook (handled here; caller
+     * must NOT fall through to the queue command). A skip past the last chapter
+     * (or on an audiobook with no chapter marks) is a deliberate no-op rather
+     * than a queue advance, so it can never trigger the wedge.
+     */
+    private suspend fun audiobookChapterSkip(playerId: String, forward: Boolean): Boolean {
+        val track = _queueState.value?.currentItem?.track ?: return false
+        if (track.mediaType != MediaType.AUDIOBOOK) return false
+        val chapters = track.chapters
+        if (chapters.isEmpty()) return true
+        val elapsed = _elapsedTime.value
+        val current = chapters.indexOfLast { elapsed + CHAPTER_BOUNDARY_EPSILON_S >= it.start }.coerceAtLeast(0)
+        val targetStart: Double? = if (forward) {
+            chapters.getOrNull(current + 1)?.start
+        } else {
+            val restartCurrent = current > 0 &&
+                elapsed - chapters[current].start > PREVIOUS_CHAPTER_RESTART_THRESHOLD_S
+            val target = when {
+                current == 0 -> 0
+                restartCurrent -> current
+                else -> current - 1
+            }
+            chapters[target].start
+        }
+        targetStart?.let {
+            Log.d("sendspindbg", "audiobook ${if (forward) "next" else "previous"} chapter -> seek ${it}s")
+            seek(playerId, it)
+        }
+        return true
+    }
+
+    override suspend fun seek(playerId: String, position: Double) {
+        // Clamp to [0, duration - SEEK_END_MARGIN_S]. The MA server treats a
+        // position at or past the track end as "end of track" and advances to
+        // the next item instead of issuing a stream/clear — exactly what the
+        // Sendspin spec defines for a seek operation. Sliders use a floating
+        // point range capped at `duration.toFloat()`, which loses precision
+        // (e.g. duration 314.0 sec → slider max 314.0f → reported as
+        // 314.1953125 in the WS payload), so clamping in the float UI layer
+        // alone is unreliable. Doing it here protects every caller (now-
+        // playing slider, lyrics jump, AA, MediaSession, voice commands).
+        val durationSec = currentTrackDurationFor(playerId)
+        val maxAllowed = if (durationSec > 0.0) (durationSec - SEEK_END_MARGIN_S).coerceAtLeast(0.0) else position
+        val clamped = position.coerceIn(0.0, maxAllowed)
+        if (clamped != position) {
+            Log.d("sendspindbg", "seek clamp: $position → $clamped (duration=$durationSec)")
+        }
+        Log.d("sendspindbg", "WS>>> seek($playerId, ${clamped}s)")
+        _discontinuityCommands.tryEmit(PlayerDiscontinuityCommand(playerId, PlayerDiscontinuityCommand.Kind.SEEK))
+        sendPlayerCommandWithRetry(
+            MaCommands.Players.CMD_SEEK,
+            SeekArgs(playerId = playerId, position = clamped)
+        )
+    }
+
+    private fun currentTrackDurationFor(playerId: String): Double {
+        // Trust the active queue first regardless of whether the playerId
+        // matches its queueId. In a Sendspin group setup the queue belongs
+        // to the group leader while the slider seeks against the child
+        // playerId, so a strict `queueId == playerId` check would miss the
+        // duration and `_players[child].currentMedia.duration` is often
+        // 0 for non-leader children — leaving the clamp to coerce every
+        // seek to 0. The repository only tracks one active queue at a
+        // time, so the queue's currentItem.duration is the right source
+        // for both solo and grouped Sendspin.
+        val fromQueue = _queueState.value?.currentItem?.duration
+        if (fromQueue != null && fromQueue > 0.0) return fromQueue
+        return _players.value.find { it.playerId == playerId }
+            ?.currentMedia?.duration
+            ?: 0.0
+    }
+
+    // Per-player cooldowns so that an optimistic update on one player doesn't
+    // suppress server echoes for OTHER players. Group volume fans out to
+    // children — we need their echoes to arrive.
+    private val volumeOverrideUntilMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun volumeCooldownActive(playerId: String): Boolean =
+        System.currentTimeMillis() < (volumeOverrideUntilMs[playerId] ?: 0L)
+
+    /**
+     * Synchronous optimistic volume update + cooldown.
+     * Call from the UI thread BEFORE launching the async WS command
+     * to prevent PLAYER_UPDATED echoes from flickering the slider.
+     *
+     * For group-type players we also update [Player.groupVolume] so that the
+     * hardware rocker keeps incrementing from the new basis instead of the
+     * stale server average.
+     */
+    override fun applyVolumeOptimistic(playerId: String, volumeLevel: Int) {
+        volumeOverrideUntilMs[playerId] = System.currentTimeMillis() + 800
+        _players.update { list ->
+            list.map {
+                if (it.playerId != playerId) return@map it
+                val patched = it.copy(volumeLevel = volumeLevel)
+                if (it.groupVolume != null) patched.copy(groupVolume = volumeLevel) else patched
+            }
+        }
+        if (_selectedPlayer.value?.playerId == playerId) {
+            _selectedPlayer.update {
+                val s = it ?: return@update null
+                val patched = s.copy(volumeLevel = volumeLevel)
+                if (s.groupVolume != null) patched.copy(groupVolume = volumeLevel) else patched
+            }
+        }
+    }
+
+    override suspend fun setVolume(playerId: String, volumeLevel: Int) {
+        applyVolumeOptimistic(playerId, volumeLevel)
+        wsClient.sendCommand(
+            MaCommands.Players.CMD_VOLUME_SET,
+            VolumeSetArgs(playerId = playerId, volumeLevel = volumeLevel)
+        )
+    }
+
+    override suspend fun setGroupVolume(parentId: String, volume: Int) {
+        // Delegate to the server-side group-volume command. It handles the fan-out
+        // to members while preserving their current volume ratios, for both
+        // proper group players (type=GROUP) and ad-hoc sync leaders.
+        applyVolumeOptimistic(parentId, volume)
+        wsClient.sendCommand(
+            MaCommands.Players.CMD_GROUP_VOLUME,
+            VolumeSetArgs(playerId = parentId, volumeLevel = volume)
+        )
+    }
+
+    override fun updateGroupMemberOffset(parentId: String, memberId: String, volume: Int) {
+        // No-op: group volume ratios are now tracked server-side. Individual
+        // member volume changes go straight through setVolume() and the server
+        // preserves the new ratio on the next group-volume command.
+    }
+
+    override suspend fun toggleMute(playerId: String, muted: Boolean) {
+        wsClient.sendCommand(
+            MaCommands.Players.CMD_VOLUME_MUTE,
+            VolumeMuteArgs(playerId = playerId, muted = muted)
+        )
+    }
+
+    override suspend fun setPower(playerId: String, powered: Boolean) {
+        // Optimistic local flip so the switch in Player Settings reacts
+        // immediately; the authoritative value lands with the next
+        // PLAYER_UPDATED event.
+        _players.update { list ->
+            list.map { if (it.playerId == playerId) it.copy(powered = powered) else it }
+        }
+        if (_selectedPlayer.value?.playerId == playerId) {
+            _selectedPlayer.update { it?.copy(powered = powered) }
+        }
+        wsClient.sendCommand(
+            MaCommands.Players.CMD_POWER,
+            PowerArgs(playerId = playerId, powered = powered)
+        )
+    }
+
+    override suspend fun updatePlayerIcon(playerId: String, icon: String) {
+        wsClient.sendCommand(
+            MaCommands.ConfigPlayers.SAVE,
+            ConfigPlayerSaveArgs(
+                playerId = playerId,
+                values = buildJsonObject { put("icon", icon) }
+            )
+        )
+        // Update local state immediately
+        _players.update { list ->
+            list.map { if (it.playerId == playerId) it.copy(icon = icon) else it }
+        }
+        if (selectedPlayerId == playerId) {
+            _selectedPlayer.update { it?.copy(icon = icon) }
+        }
+    }
+
+    override suspend fun renamePlayer(playerId: String, name: String) {
+        wsClient.sendCommand(
+            MaCommands.ConfigPlayers.SAVE,
+            ConfigPlayerSaveArgs(
+                playerId = playerId,
+                values = buildJsonObject { put("name", name) }
+            )
+        )
+        _players.update { list ->
+            list.map { if (it.playerId == playerId) it.copy(displayName = name) else it }
+        }
+        if (selectedPlayerId == playerId) {
+            _selectedPlayer.update { it?.copy(displayName = name) }
+        }
+    }
+
+    override suspend fun getPlayerConfig(playerId: String): PlayerConfig? {
+        val result = wsClient.sendCommand(
+            MaCommands.ConfigPlayers.GET,
+            ConfigPlayerGetArgs(playerId = playerId)
+        )
+        return try {
+            val obj = result?.jsonObject ?: return null
+            val values = obj["values"]?.jsonObject
+            fun JsonElement.configValue(): String? = when (this) {
+                is JsonPrimitive -> contentOrNull
+                is JsonObject -> this["value"]?.jsonPrimitive?.contentOrNull
+                else -> null
+            }
+            fun JsonElement.configBool(): Boolean? = when (this) {
+                is JsonPrimitive -> booleanOrNull
+                is JsonObject -> this["value"]?.jsonPrimitive?.booleanOrNull
+                else -> null
+            }
+            fun JsonElement.configInt(): Int? = when (this) {
+                is JsonPrimitive -> intOrNull
+                is JsonObject -> this["value"]?.jsonPrimitive?.intOrNull
+                else -> null
+            }
+
+            val configName = obj["name"]?.jsonPrimitive?.contentOrNull
+                ?: obj["default_name"]?.jsonPrimitive?.contentOrNull ?: ""
+
+            val formatEntry = values?.get("preferred_sendspin_format")
+            val formatOptions = (formatEntry as? JsonObject)?.get("options")
+                ?.jsonArray
+                ?.mapNotNull { opt ->
+                    val o = opt.jsonObject
+                    val title = o["title"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    val value = o["value"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    FormatOption(title, value)
+                }
+                ?: emptyList()
+
+            // The per-player Sendspin sync-delay config key varies (plain
+            // `sendspin_sync_delay`, or `<sub>||protocol||sendspin_sync_delay`
+            // for a protocol-wrapped player), so match by suffix and carry the
+            // exact key for the save.
+            val syncDelayKey = values?.keys?.firstOrNull { it.endsWith("sendspin_sync_delay") }
+            val syncDelayEntry = syncDelayKey?.let { values[it] }
+
+            // Generic per-provider output codec (e.g. Sonos `output_codec`: flac/mp3/aac/wav).
+            val outputCodecEntry = values?.get("output_codec")
+            val outputCodecOptions = (outputCodecEntry as? JsonObject)?.get("options")
+                ?.jsonArray
+                ?.mapNotNull { opt ->
+                    when (opt) {
+                        is JsonObject -> {
+                            val value = opt["value"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                            val title = opt["title"]?.jsonPrimitive?.contentOrNull ?: value.uppercase()
+                            FormatOption(title, value)
+                        }
+                        is JsonPrimitive -> opt.contentOrNull?.let { FormatOption(it.uppercase(), it) }
+                        else -> null
+                    }
+                }
+                ?: emptyList()
+
+            PlayerConfig(
+                name = configName,
+                crossfadeMode = CrossfadeMode.fromApi(
+                    values?.get("smart_fades_mode")?.configValue() ?: "disabled"
+                ),
+                volumeNormalization = values?.get("volume_normalization")?.configBool() ?: false,
+                sendspinFormat = formatEntry?.configValue(),
+                sendspinFormatOptions = formatOptions,
+                outputCodec = outputCodecEntry?.configValue(),
+                outputCodecOptions = outputCodecOptions,
+                sendspinStaticDelayMs = values?.get("sendspin_static_delay")?.configInt(),
+                sendspinSyncDelayKey = syncDelayKey,
+                sendspinSyncDelayMs = syncDelayEntry?.configInt(),
+                sendspinSyncDelayDefault =
+                    (syncDelayEntry as? JsonObject)?.get("default_value")?.jsonPrimitive?.intOrNull,
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "getPlayerConfig failed: ${e.message}")
+            null
+        }
+    }
+
+    override suspend fun savePlayerConfig(playerId: String, values: Map<String, Any>) {
+        wsClient.sendCommand(
+            MaCommands.ConfigPlayers.SAVE,
+            ConfigPlayerSaveArgs(
+                playerId = playerId,
+                values = buildJsonObject {
+                    values.forEach { (key, value) ->
+                        when (value) {
+                            is String -> put(key, value)
+                            is Boolean -> put(key, value)
+                            is Int -> put(key, value)
+                            else -> put(key, value.toString())
+                        }
+                    }
+                }
+            )
+        )
+    }
+
+    override fun updateCurrentTrackFavorite(favorite: Boolean) {
+        favoriteOverride = favorite
+        favoriteOverrideUri = _queueState.value?.currentItem?.track?.uri
+        _queueState.update { qs ->
+            qs?.copy(currentItem = qs.currentItem?.copy(
+                track = qs.currentItem.track?.copy(favorite = favorite)
+            ))
+        }
+    }
+
+    override fun updateCurrentTrackLyrics(plainLyrics: String?, lrcLyrics: String?) {
+        val currentUri = _queueState.value?.currentItem?.track?.uri ?: return
+        _queueState.update { qs ->
+            val track = qs?.currentItem?.track ?: return@update qs
+            if (track.uri != currentUri) return@update qs
+            qs.copy(
+                currentItem = qs.currentItem.copy(
+                    track = track.copy(
+                        lyrics = plainLyrics,
+                        lrcLyrics = lrcLyrics
+                    )
+                )
+            )
+        }
+    }
+
+    override fun notifyQueueReplacement(queueId: String) {
+        val current = queueTracking[queueId] ?: return
+        queueReplacementByQueue[queueId] = current.track.uri
+        Log.d(TAG, "Queue replacement flagged for ${current.track.name}")
+    }
+
+    override suspend fun getGroupCapableProviders(): List<GroupProviderOption> {
+        val result = wsClient.sendCommand(MaCommands.Providers.LIST) ?: return emptyList()
+        return try {
+            val instances = json.decodeFromJsonElement(
+                kotlinx.serialization.builtins.ListSerializer(ProviderInstance.serializer()),
+                result
+            )
+            instances
+                .filter { it.type == "player" && "create_group_player" in it.supportedFeatures }
+                .map { GroupProviderOption(instanceId = it.instanceId, domain = it.domain, name = it.name) }
+        } catch (e: Exception) {
+            Log.w(TAG, "getGroupCapableProviders parse failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    override suspend fun createGroupPlayer(provider: String, name: String, memberIds: List<String>) {
+        wsClient.sendCommand(
+            MaCommands.Players.CREATE_GROUP,
+            CreateGroupPlayerArgs(provider = provider, name = name, members = memberIds)
+        )
+    }
+
+    override suspend fun setGroupMembers(targetPlayerId: String, addIds: List<String>?, removeIds: List<String>?) {
+        wsClient.sendCommand(
+            MaCommands.Players.CMD_SET_MEMBERS,
+            SetMembersArgs(targetPlayer = targetPlayerId, playerIdsToAdd = addIds, playerIdsToRemove = removeIds)
+        )
+    }
+
+    override suspend fun ungroupPlayer(playerId: String) {
+        wsClient.sendCommand(
+            MaCommands.Players.UNGROUP,
+            UngroupArgs(playerId = playerId)
+        )
+    }
+
+    override suspend fun ungroupPlayers(playerIds: List<String>) {
+        if (playerIds.isEmpty()) return
+        wsClient.sendCommand(
+            MaCommands.Players.UNGROUP_MANY,
+            UngroupManyArgs(playerIds = playerIds)
+        )
+    }
+
+    override suspend fun removeGroupPlayer(playerId: String) {
+        wsClient.sendCommand(
+            MaCommands.Players.REMOVE_GROUP,
+            RemoveGroupPlayerArgs(playerId = playerId)
+        )
+    }
+
+    private fun maybeRecordManualSkip(playerId: String) {
+        val current = queueTracking[playerId] ?: return
+        if (!smartListeningEnabledSnapshot) return
+        manualSkipByQueue[playerId] = current.track.uri
+        val listenedMs = System.currentTimeMillis() - current.startTime
+        scope.launch {
+            try {
+                smartListeningRepository.recordSkip(current.track, current.artists, listenedMs)
+            } catch (e: Exception) {
+                Log.w(TAG, "Skip signal failed: ${e.message}")
+            }
+        }
+    }
+
+    private suspend fun playerCmd(cmd: String, playerId: String) {
+        try {
+            sendPlayerCommandWithRetry(
+                MaCommands.Players.cmd(cmd),
+                PlayerIdArgs(playerId = playerId)
+            )
+            Log.d(TAG, "playerCmd sent: $cmd($playerId)")
+        } catch (e: MaApiException) {
+            // MA keeps the last track as current_media for display even when the
+            // queue is exhausted, so play/next here fails with "no more tracks
+            // available" (code 11). Surface a notice instead of letting the play
+            // button fail silently; the command itself is a no-op in that case.
+            if (e.code == NO_MORE_TRACKS_CODE ||
+                e.message?.contains("no more tracks", ignoreCase = true) == true
+            ) {
+                Log.d(TAG, "playerCmd $cmd: queue exhausted (code=${e.code})")
+                _queueEndedEvent.tryEmit(Unit)
+                return
+            }
+            throw e
+        }
+    }
+
+    private suspend fun sendPlayerCommandWithRetry(command: String, args: MaCommandArgs) {
+        var attempt = 0
+        var lastError: MaApiException? = null
+        while (attempt < 2) {
+            try {
+                wsClient.sendCommand(command, args, awaitResponse = false)
+                return
+            } catch (e: MaApiException) {
+                if (!isTransientWsCommandError(e)) throw e
+                lastError = e
+                attempt++
+                if (attempt >= 2) break
+                Log.d(TAG, "Transient '$command' failure, waiting for reconnect and retrying")
+                withTimeoutOrNull(2_000) {
+                    wsClient.connectionState.first { it is ConnectionState.Connected }
+                }
+                delay(250)
+            }
+        }
+        throw lastError ?: MaApiException("WebSocket command failed", -1)
+    }
+
+    private fun isTransientWsCommandError(e: MaApiException): Boolean {
+        val msg = e.message?.lowercase() ?: return false
+        return "websocket not connected" in msg ||
+                "connection lost" in msg ||
+                "connection closed" in msg
+    }
+}
+
+fun ServerPlayer.toDomain(
+    wsClient: MaWebSocketClient,
+    queueTrackImageUrl: String? = null
+): Player = Player(
+    playerId = playerId,
+    displayName = displayName.ifBlank { name },
+    provider = provider,
+    type = when (type) {
+        "group" -> PlayerType.GROUP
+        "stereo_pair" -> PlayerType.STEREO_PAIR
+        else -> PlayerType.PLAYER
+    },
+    available = available,
+    state = when (state) {
+        "playing" -> PlaybackState.PLAYING
+        "paused" -> PlaybackState.PAUSED
+        else -> PlaybackState.IDLE
+    },
+    powered = powered,
+    volumeLevel = volumeLevel,
+    groupVolume = groupVolume,
+    volumeMuted = volumeMuted,
+    activeGroup = activeGroup,
+    syncedTo = syncedTo,
+    groupChilds = groupChilds,
+    staticGroupMembers = staticGroupMembers,
+    supportedFeatures = supportedFeatures.toSet(),
+    canGroupWith = canGroupWith,
+    currentMedia = currentMedia?.let {
+        NowPlaying(
+            queueId = it.queueId,
+            title = it.title ?: "",
+            artist = it.artist ?: "",
+            album = it.album ?: "",
+            imageUrl = queueTrackImageUrl
+                ?: it.imageUrl?.let { url -> wsClient.rewriteImageProxyUrl(url) }
+                ?: it.image?.resolveUrl(wsClient),
+            duration = it.duration ?: 0.0,
+            elapsedTime = it.elapsedTime ?: 0.0,
+            uri = it.uri
+        )
+    },
+    icon = icon?.let { value ->
+        when {
+            value.startsWith("/") -> wsClient.getImageUrl(value)
+            value.contains("://") -> value
+            else -> value // MDI name, pass through
+        }
+    }
+)
+
+/**
+ * Map MA `metadata.chapters` (audiobook/podcast) to domain [Chapter]s.
+ *
+ * Deduplicated by start time and sorted by start: some files/providers emit each chapter
+ * twice (observed: 12 chapters delivered as 24 with repeated positions/starts), which would
+ * both crash the chapter LazyColumn on duplicate keys and break chapter navigation.
+ */
+fun ServerMediaItem.toChapters(): List<Chapter> =
+    metadata?.chapters
+        ?.map { Chapter(position = it.position, name = it.name, start = it.start, end = it.end) }
+        ?.distinctBy { it.start }
+        ?.sortedBy { it.start }
+        ?: emptyList()
+
+fun ServerQueue.toDomain(wsClient: MaWebSocketClient): QueueState = QueueState(
+    queueId = queueId,
+    shuffleEnabled = shuffleEnabled,
+    repeatMode = RepeatMode.fromApi(repeatMode),
+    elapsedTime = elapsedTime,
+    currentIndex = currentIndex,
+    dontStopTheMusicEnabled = dontStopTheMusicEnabled,
+    currentItem = currentItem?.let { item ->
+        QueueItem(
+            queueItemId = item.queueItemId,
+            name = item.name,
+            duration = item.duration,
+            track = item.mediaItem?.let { mi ->
+                Track(
+                    itemId = mi.itemId,
+                    provider = mi.provider,
+                    name = mi.name,
+                    uri = mi.uri,
+                    duration = mi.duration,
+                    artistNames = mi.artists?.joinToString(", ") { it.name } ?: "",
+                    albumName = mi.album?.name ?: "",
+                    imageUrl = mi.resolveImageWithAlbumFallback(wsClient),
+                    favorite = mi.favorite,
+                    artistItemId = mi.artists?.firstOrNull()?.itemId,
+                    artistProvider = mi.artists?.firstOrNull()?.provider,
+                    albumItemId = mi.album?.itemId,
+                    albumProvider = mi.album?.provider,
+                    artistUri = MediaIdentity.canonicalArtistKey(
+                        itemId = mi.artists?.firstOrNull()?.itemId,
+                        uri = mi.artists?.firstOrNull()?.uri
+                    ),
+                    artistUris = mi.artists
+                        ?.mapNotNull { artist ->
+                            MediaIdentity.canonicalArtistKey(itemId = artist.itemId, uri = artist.uri)
+                        }
+                        ?.distinct()
+                        ?: emptyList(),
+                    albumUri = MediaIdentity.canonicalAlbumKey(
+                        itemId = mi.album?.itemId,
+                        uri = mi.album?.uri
+                    ),
+                    genres = mi.metadata?.genres ?: emptyList(),
+                    year = (mi.album?.year ?: mi.year)?.takeIf { it > 0 },
+                    lyrics = mi.metadata?.lyrics,
+                    lrcLyrics = mi.metadata?.lrcLyrics,
+                    mediaType = MediaType.fromApi(mi.mediaType) ?: MediaType.TRACK,
+                    chapters = mi.toChapters(),
+                    authors = mi.authors ?: emptyList(),
+                    narrators = mi.narrators ?: emptyList()
+                )
+            },
+            imageUrl = item.mediaItem?.resolveImageUrl(wsClient)
+                ?: item.image?.resolveUrl(wsClient),
+            audioFormat = item.streamdetails?.audioFormat?.let { format ->
+                AudioFormatInfo(
+                    contentType = format.contentType,
+                    sampleRate = format.sampleRate,
+                    bitDepth = format.bitDepth,
+                    bitRate = format.bitRate,
+                    channels = format.channels
+                )
+            }
+        )
+    }
+)

@@ -1,0 +1,964 @@
+package net.asksakis.massdroidv2.ui.components
+
+import net.asksakis.massdroidv2.ui.components.MdButton
+import net.asksakis.massdroidv2.ui.components.MdFilledTonalButton
+import net.asksakis.massdroidv2.ui.components.MdIconButton
+import net.asksakis.massdroidv2.ui.components.MdOutlinedButton
+import net.asksakis.massdroidv2.ui.components.MdSwitch
+import net.asksakis.massdroidv2.ui.components.MdTextButton
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.drop
+import android.util.Log
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import net.asksakis.massdroidv2.data.sendspin.SendspinManager
+import net.asksakis.massdroidv2.domain.model.CrossfadeMode
+import net.asksakis.massdroidv2.domain.model.Player
+import net.asksakis.massdroidv2.domain.model.PlayerConfig
+import net.asksakis.massdroidv2.domain.model.SendspinAudioFormat
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+fun PlayerSettingsDialog(
+    player: Player,
+    initialDstmEnabled: Boolean?,
+    isSendspinPlayer: Boolean = false,
+    isLocalPlayer: Boolean = false,
+    initialAudioFormat: SendspinAudioFormat = SendspinAudioFormat.SMART,
+    initialSyncDelayMs: Int = 0,
+    onLoadConfig: suspend (playerId: String) -> PlayerConfig?,
+    onSave: (playerId: String, values: Map<String, Any>) -> Unit,
+    onDstmChanged: ((enabled: Boolean) -> Unit)?,
+    onAudioFormatChanged: ((SendspinAudioFormat) -> Unit)? = null,
+    onSyncDelayChanged: ((Int) -> Unit)? = null,
+    isBtRoute: Boolean = false,
+    acousticCorrectionMs: Int = 0,
+    acoustic: net.asksakis.massdroidv2.data.sendspin.AcousticCalibrationCoordinator? = null,
+    micPathCalibratedMs: Long = 0L,
+    isPlaybackActive: Boolean = false,
+    btRouteName: String = "",
+    onPausePlayback: (() -> Unit)? = null,
+    onResumePlayback: (() -> Unit)? = null,
+    onResetBtCalibration: (() -> Unit)? = null,
+    onResetMicPath: (() -> Unit)? = null,
+    syncHistory: List<SendspinManager.SyncSample> = emptyList(),
+    onDismiss: () -> Unit
+) {
+    // Key all remembered state on player.playerId so swapping the dialog
+    // target player (without dismissing first) clears everything instead of
+    // carrying over name/format/load-state from the previous player.
+    var isLoading by remember(player.playerId) { mutableStateOf(true) }
+    var name by remember(player.playerId) { mutableStateOf(player.displayName) }
+    var crossfadeMode by remember(player.playerId) { mutableStateOf(CrossfadeMode.DISABLED) }
+    var volumeNormalization by remember(player.playerId) { mutableStateOf(false) }
+    var dontStopTheMusic by remember(player.playerId, initialDstmEnabled) {
+        mutableStateOf(initialDstmEnabled ?: false)
+    }
+    var selectedFormatValue by remember(player.playerId) { mutableStateOf<String?>(null) }
+    var formatOptions by remember(player.playerId) {
+        mutableStateOf<List<net.asksakis.massdroidv2.domain.model.FormatOption>>(emptyList())
+    }
+    var audioFormat by remember(player.playerId, initialAudioFormat) { mutableStateOf(initialAudioFormat) }
+    // Generic per-provider output codec (MA `output_codec`, e.g. Sonos flac/mp3/aac/wav).
+    var outputCodec by remember(player.playerId) { mutableStateOf<String?>(null) }
+    var outputCodecOptions by remember(player.playerId) {
+        mutableStateOf<List<net.asksakis.massdroidv2.domain.model.FormatOption>>(emptyList())
+    }
+    // Local client-side UX sync nudge (DataStore-backed). Range -1000..+1000,
+    // positive shifts playback later (intuitive sign, matches MA web UI's
+    // "Sendspin sync delay" slider).
+    var syncDelayMs by remember(player.playerId, initialSyncDelayMs) {
+        mutableIntStateOf(initialSyncDelayMs)
+    }
+    // Server-side spec field sendspin_static_delay (per-player config).
+    // Range 0..5000, positive compensates for known external delay (spec
+    // sign). Only available on MA servers with PR #3689 deployed; otherwise
+    // the load returns null and the row stays hidden.
+    var staticDelayMs by remember(player.playerId) { mutableIntStateOf(0) }
+    var hasServerStaticDelay by remember(player.playerId) { mutableStateOf(false) }
+    // Server-side per-player Sendspin sync delay (MA "Sync delay (ms)", range
+    // -1000..1000, positive = play later). Tunable on REMOTE sendspin receivers
+    // for acoustic alignment; the exact config key varies per player so it is
+    // carried from the loaded config. Hidden when the player does not expose it.
+    var syncDelayServerMs by remember(player.playerId) { mutableIntStateOf(0) }
+    var syncDelayKey by remember(player.playerId) { mutableStateOf<String?>(null) }
+    var syncDelayDefault by remember(player.playerId) { mutableIntStateOf(0) }
+    var hasServerSyncDelay by remember(player.playerId) { mutableStateOf(false) }
+
+    LaunchedEffect(player.playerId) {
+        val loaded = onLoadConfig(player.playerId)
+        if (loaded != null) {
+            name = loaded.name.ifBlank { player.displayName }
+            crossfadeMode = loaded.crossfadeMode
+            volumeNormalization = loaded.volumeNormalization
+            formatOptions = loaded.sendspinFormatOptions
+            selectedFormatValue = loaded.sendspinFormat
+            outputCodecOptions = loaded.outputCodecOptions
+            // Fall back to the first option so the shown selection always matches what Save persists,
+            // even if the server didn't report a current value.
+            outputCodec = loaded.outputCodec ?: loaded.outputCodecOptions.firstOrNull()?.value
+            val loadedStaticDelay = loaded.sendspinStaticDelayMs
+            if (!isLocalPlayer && loadedStaticDelay != null) {
+                hasServerStaticDelay = true
+                staticDelayMs = loadedStaticDelay
+            }
+            if (!isLocalPlayer && loaded.sendspinSyncDelayKey != null) {
+                hasServerSyncDelay = true
+                syncDelayKey = loaded.sendspinSyncDelayKey
+                syncDelayServerMs = loaded.sendspinSyncDelayMs ?: 0
+                syncDelayDefault = loaded.sendspinSyncDelayDefault ?: 0
+            }
+            Log.d("PlayerSettings", "Loaded: provider=${player.provider} format=${loaded.sendspinFormat} options=${loaded.sendspinFormatOptions.map { it.value }}")
+        }
+        isLoading = false
+    }
+
+    // Debounced server push for remote sendspin players. Triggered only when
+    // the server advertises the config key so we don't fire into v2.8.6
+    // servers that silently ignore the key.
+    if (hasServerStaticDelay) {
+        LaunchedEffect(player.playerId, isLoading) {
+            if (isLoading) return@LaunchedEffect
+            @OptIn(kotlinx.coroutines.FlowPreview::class)
+            androidx.compose.runtime.snapshotFlow { staticDelayMs }
+                .drop(1)
+                .debounce(250L)
+                .collect { v ->
+                    onSave(player.playerId, mapOf("sendspin_static_delay" to v))
+                }
+        }
+    }
+
+    // Debounced server push of the per-player Sendspin sync delay. Writes the
+    // exact discovered key so it lands on plain and protocol-wrapped players
+    // alike; MA applies it to the running sync group for live tuning.
+    if (hasServerSyncDelay) {
+        LaunchedEffect(player.playerId, isLoading) {
+            if (isLoading) return@LaunchedEffect
+            @OptIn(kotlinx.coroutines.FlowPreview::class)
+            androidx.compose.runtime.snapshotFlow { syncDelayServerMs }
+                .drop(1)
+                .debounce(250L)
+                .collect { v ->
+                    syncDelayKey?.let { onSave(player.playerId, mapOf(it to v)) }
+                }
+        }
+    }
+
+    // Debounced apply of the LOCAL client-side nudge. The slider fires rapidly,
+    // and onSyncDelayChanged persists to DataStore + reanchors the engine, so
+    // coalesce drags into one apply (steppers benefit too).
+    if (isLocalPlayer && onSyncDelayChanged != null) {
+        // Restart with initialSyncDelayMs: the apply round-trips through DataStore
+        // and re-keys the syncDelayMs remember (new state object), so the
+        // snapshotFlow must re-bind. Without this the observer goes stale after
+        // the first apply and later changes (e.g. Reset) are silently dropped.
+        LaunchedEffect(player.playerId, isLoading, initialSyncDelayMs) {
+            if (isLoading) return@LaunchedEffect
+            @OptIn(kotlinx.coroutines.FlowPreview::class)
+            androidx.compose.runtime.snapshotFlow { syncDelayMs }
+                .drop(1)
+                .debounce(250L)
+                .collect { v -> onSyncDelayChanged?.invoke(v) }
+        }
+    }
+
+    // BasicAlertDialog + custom layout so the action buttons don't eat the
+    // vertical space that the Material3 AlertDialog reserves for its default
+    // title/content/buttons sections.
+    androidx.compose.material3.BasicAlertDialog(
+        onDismissRequest = onDismiss,
+        modifier = Modifier
+            .widthIn(min = 320.dp, max = 480.dp)
+            // Bumped from 560 → 720 so calibration rows at the bottom of the
+            // scrollable content aren't clipped on phones with ~800-900 dp
+            // available height. Adaptive devices (tablets, foldables) cap at
+            // 720 still — generous but not full-screen.
+            .heightIn(max = 720.dp)
+            .windowInsetsPadding(
+                WindowInsets.navigationBars.union(WindowInsets.displayCutout).only(
+                    WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom
+                )
+            ),
+        properties = androidx.compose.ui.window.DialogProperties(
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        androidx.compose.material3.Surface(
+            shape = MaterialTheme.shapes.extraLarge,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 20.dp)) {
+                Text(
+                    "Player Settings",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(bottom = 18.dp)
+                )
+                if (isLoading) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 20.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                    }
+                } else {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        modifier = Modifier
+                            // weight(1f) (fill = true, default): claim all the
+                            // remaining vertical space inside the dialog so the
+                            // verticalScroll has a bounded viewport. With the
+                            // earlier fill = false, the column took only its
+                            // measured (intrinsic) height — fine until content
+                            // exceeded that — and the bottom Cancel/Save row
+                            // could push it up so the last items got clipped
+                            // without engaging the scroll.
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it },
+                        label = { Text("Player name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Text("Crossfade", style = MaterialTheme.typography.labelMedium)
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        CrossfadeMode.entries.forEachIndexed { index, mode ->
+                            SegmentedButton(
+                                selected = crossfadeMode == mode,
+                                onClick = { crossfadeMode = mode },
+                                shape = SegmentedButtonDefaults.itemShape(
+                                    index = index,
+                                    count = CrossfadeMode.entries.size
+                                ),
+                                label = { Text(mode.label, style = MaterialTheme.typography.labelSmall) }
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("Volume normalization")
+                        Switch(
+                            checked = volumeNormalization,
+                            onCheckedChange = { volumeNormalization = it }
+                        )
+                    }
+
+                    if (initialDstmEnabled != null) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("Don't stop the music", modifier = Modifier.weight(1f))
+                            Switch(
+                                checked = dontStopTheMusic,
+                                onCheckedChange = { dontStopTheMusic = it }
+                            )
+                        }
+                    }
+
+
+                    if (isSendspinPlayer && formatOptions.isNotEmpty()) {
+                        val smartOption = net.asksakis.massdroidv2.domain.model.FormatOption(
+                            title = "Smart", value = "smart"
+                        )
+                        val allOptions = if (isLocalPlayer) listOf(smartOption) + formatOptions else formatOptions
+                        val currentValue = selectedFormatValue ?: "automatic"
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text("Audio format", style = MaterialTheme.typography.labelMedium)
+                            var expanded by remember { mutableStateOf(false) }
+                            val selectedTitle = allOptions.find { it.value == currentValue }?.title
+                                ?: allOptions.firstOrNull()?.title ?: ""
+                            Box {
+                                OutlinedCard(
+                                    modifier = Modifier.fillMaxWidth().clickable { expanded = true }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column {
+                                            Text(selectedTitle, style = MaterialTheme.typography.bodyMedium)
+                                            if (currentValue == "smart") {
+                                                Text(
+                                                    "Auto-switches codec based on network",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                                DropdownMenu(
+                                    expanded = expanded,
+                                    onDismissRequest = { expanded = false }
+                                ) {
+                                    allOptions.forEach { opt ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Column {
+                                                    Text(opt.title, style = MaterialTheme.typography.bodyMedium)
+                                                    if (opt.value == "smart") {
+                                                        Text(
+                                                            "FLAC on WiFi, Opus on mobile",
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                        )
+                                                    }
+                                                }
+                                            },
+                                            onClick = {
+                                                selectedFormatValue = opt.value
+                                                expanded = false
+                                            },
+                                            trailingIcon = if (currentValue == opt.value) {{
+                                                Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                            }} else null
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Generic per-provider output codec (e.g. Sonos: flac/mp3/aac/wav). Shown for
+                    // any non-Sendspin player whose MA config exposes an `output_codec` entry.
+                    if (!isSendspinPlayer && outputCodecOptions.isNotEmpty()) {
+                        val currentCodec = outputCodec ?: outputCodecOptions.firstOrNull()?.value
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text("Output codec", style = MaterialTheme.typography.labelMedium)
+                            var codecExpanded by remember { mutableStateOf(false) }
+                            val codecTitle = outputCodecOptions.find { it.value == currentCodec }?.title
+                                ?: outputCodecOptions.firstOrNull()?.title ?: ""
+                            Box {
+                                OutlinedCard(
+                                    modifier = Modifier.fillMaxWidth().clickable { codecExpanded = true }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(codecTitle, style = MaterialTheme.typography.bodyMedium)
+                                        Icon(Icons.Default.ArrowDropDown, contentDescription = null)
+                                    }
+                                }
+                                DropdownMenu(
+                                    expanded = codecExpanded,
+                                    onDismissRequest = { codecExpanded = false }
+                                ) {
+                                    outputCodecOptions.forEach { opt ->
+                                        DropdownMenuItem(
+                                            text = { Text(opt.title, style = MaterialTheme.typography.bodyMedium) },
+                                            onClick = {
+                                                outputCodec = opt.value
+                                                codecExpanded = false
+                                            },
+                                            trailingIcon = if (currentCodec == opt.value) {{
+                                                Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                            }} else null
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (isLocalPlayer) {
+                        // Sendspin sync delay (LOCAL client-side UX nudge,
+                        // DataStore-backed). Range -1000..+1000 ms, negative plays
+                        // sooner / positive later. Applied locally in
+                        // SendspinSyncEngine; not sent to the server.
+                        SyncDelayCard(
+                            label = "Sendspin sync delay",
+                            valueMs = syncDelayMs,
+                            defaultMs = 0,
+                            // Debounced via the LaunchedEffect below (the slider
+                            // fires rapidly and onSyncDelayChanged persists to
+                            // DataStore + reanchors the engine).
+                            onValueChange = { syncDelayMs = it.coerceIn(-1000, 1000) }
+                        )
+                    }
+
+                    if (hasServerStaticDelay) {
+                        // Static playback delay (SERVER-side spec field
+                        // sendspin_static_delay, available only on MA servers
+                        // with PR #3689 deployed). Range 0..5000 ms, positive
+                        // compensates for external delay beyond the audio
+                        // port (spec sign). Saved via player config; affects
+                        // ALL clients of this player.
+                        DelayStepperCard(
+                            label = "Static playback delay",
+                            helperText = "Server-side spec compensation for external device delay. Affects all clients of this player.",
+                            valueMs = staticDelayMs,
+                            minValue = 0,
+                            maxValue = 5000,
+                            onDecrement = {
+                                staticDelayMs = (staticDelayMs - 2).coerceAtLeast(0)
+                            },
+                            onIncrement = {
+                                staticDelayMs = (staticDelayMs + 2).coerceAtMost(5000)
+                            },
+                            onReset = {
+                                if (staticDelayMs != 0) {
+                                    staticDelayMs = 0
+                                }
+                            }
+                        )
+                    }
+
+                    if (hasServerSyncDelay) {
+                        // Per-player Sendspin sync delay (server-side
+                        // sendspin_sync_delay, -1000..1000 ms; negative = earlier,
+                        // positive = later, matching the MA web UI). Slider for a
+                        // quick sweep, 1 ms steppers for fine acoustic alignment;
+                        // Reset returns to the server default. MA applies it live.
+                        SyncDelayCard(
+                            valueMs = syncDelayServerMs,
+                            defaultMs = syncDelayDefault,
+                            onValueChange = { syncDelayServerMs = it.coerceIn(-1000, 1000) }
+                        )
+                    }
+
+                    // Acoustic calibration for the active Bluetooth output route.
+                    // No phone-speaker row: phone, wired and USB paths sync at
+                    // the audio port via the AudioTrack pipeline measurement
+                    // (per the Sendspin spec), so an acoustic chirp would
+                    // double-count the listener air path. The BT row stays
+                    // visible on local-player settings regardless of the
+                    // current route, but the Calibrate button is enabled only
+                    // while a BT route is connected (so users can review or
+                    // reset a saved value even when BT is currently off).
+                    //
+                    // A second row reports the cached "mic path" reference
+                    // (the phone-side mic chain latency measured once on the
+                    // built-in speaker). It is reused across all BT speakers
+                    // by the two-pass algorithm. A Reset button forces a
+                    // re-measurement on the next BT calibration.
+                    if (isLocalPlayer && acoustic != null) {
+                        var showBtCalibrationDialog by remember { mutableStateOf(false) }
+                        val btDeviceName = btRouteName.ifBlank { "Bluetooth speaker" }
+
+                        // Built-in speaker self-calibration. Measures the true
+                        // acoustic output delay to correct HALs that under-report
+                        // getOutputLatency (e.g. Xiaomi). Auto-runs on group join
+                        // when missing; also tunable here.
+                        val speakerCalibrations by acoustic.acousticRouteCalibrations
+                            .collectAsStateWithLifecycle(initialValue = emptyMap())
+                        val speakerCal = speakerCalibrations[
+                            net.asksakis.massdroidv2.data.sendspin.AcousticCalibrationCoordinator.SPEAKER_ROUTE_KEY
+                        ]
+                        val speakerCorrectionMs = ((speakerCal?.correctionUs ?: 0L) / 1000L).toInt()
+                        var showSpeakerCalibrationDialog by remember { mutableStateOf(false) }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Speaker calibration", style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    if (speakerCal != null) "This phone: ${speakerCorrectionMs}ms (${speakerCal.quality.lowercase()})"
+                                    else "Not calibrated (runs automatically on group join)",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (speakerCal != null) {
+                                    MdTextButton(onClick = { acoustic.resetSpeakerCalibration() }) {
+                                        Text("Reset")
+                                    }
+                                }
+                                MdTextButton(onClick = { showSpeakerCalibrationDialog = true }) {
+                                    Text(if (speakerCal != null) "Recalibrate" else "Calibrate")
+                                }
+                            }
+                        }
+                        if (showSpeakerCalibrationDialog) {
+                            SpeakerCalibrationDialog(
+                                coordinator = acoustic,
+                                onDismiss = { showSpeakerCalibrationDialog = false }
+                            )
+                        }
+
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Bluetooth calibration", style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    when {
+                                        !isBtRoute -> "Connect a Bluetooth device to calibrate"
+                                        acousticCorrectionMs > 0 -> "$btDeviceName: ${acousticCorrectionMs}ms"
+                                        else -> "$btDeviceName not calibrated"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (isBtRoute && acousticCorrectionMs > 0) {
+                                    MdTextButton(onClick = { onResetBtCalibration?.invoke() }) {
+                                        Text("Reset")
+                                    }
+                                }
+                                MdTextButton(
+                                    enabled = isBtRoute,
+                                    onClick = { showBtCalibrationDialog = true }
+                                ) {
+                                    Text(if (acousticCorrectionMs > 0) "Recalibrate" else "Calibrate")
+                                }
+                            }
+                        }
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Mic path reference", style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    if (micPathCalibratedMs > 0L) {
+                                        "Calibrated: ${micPathCalibratedMs}ms (shared across BT routes)"
+                                    } else {
+                                        "Will be measured on the next BT calibration"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            if (micPathCalibratedMs > 0L) {
+                                MdTextButton(onClick = { onResetMicPath?.invoke() }) {
+                                    Text("Reset")
+                                }
+                            }
+                        }
+                        if (showBtCalibrationDialog) {
+                            AcousticCalibrationDialog(
+                                routeName = btDeviceName,
+                                isPlaybackActive = isPlaybackActive,
+                                coordinator = acoustic,
+                                onPausePlayback = { onPausePlayback?.invoke() },
+                                onResumePlayback = { onResumePlayback?.invoke() },
+                                onDismiss = { showBtCalibrationDialog = false }
+                            )
+                        }
+                    }
+                    }
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    MdTextButton(onClick = onDismiss) { Text("Cancel") }
+                    MdTextButton(
+                        onClick = {
+                            val values = mutableMapOf<String, Any>(
+                                "smart_fades_mode" to crossfadeMode.apiValue,
+                                "volume_normalization" to volumeNormalization
+                            )
+                            if (name.isNotBlank() && name.trim() != player.displayName) {
+                                values["name"] = name.trim()
+                            }
+                            val newFormat = selectedFormatValue
+                            if (isSendspinPlayer && newFormat != null) {
+                                val serverValue = if (newFormat == "smart") "automatic" else newFormat
+                                values["preferred_sendspin_format"] = serverValue
+                                if (isLocalPlayer) {
+                                    val localFormat = when {
+                                        newFormat == "smart" -> SendspinAudioFormat.SMART
+                                        newFormat.startsWith("opus") -> SendspinAudioFormat.OPUS
+                                        newFormat.startsWith("flac") -> SendspinAudioFormat.FLAC
+                                        newFormat.startsWith("pcm") -> SendspinAudioFormat.PCM
+                                        else -> null
+                                    }
+                                    if (localFormat != null) onAudioFormatChanged?.invoke(localFormat)
+                                }
+                            }
+                            if (!isSendspinPlayer && outputCodecOptions.isNotEmpty()) {
+                                outputCodec?.let { values["output_codec"] = it }
+                            }
+                            onSave(player.playerId, values)
+                            if (initialDstmEnabled != null && dontStopTheMusic != initialDstmEnabled) {
+                                onDstmChanged?.invoke(dontStopTheMusic)
+                            }
+                            onDismiss()
+                        },
+                        enabled = !isLoading
+                    ) { Text("Save") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DelayStepperCard(
+    label: String,
+    helperText: String,
+    valueMs: Int,
+    minValue: Int,
+    maxValue: Int,
+    onDecrement: () -> Unit,
+    onIncrement: () -> Unit,
+    onReset: () -> Unit,
+    valueText: String? = null,
+    resetValue: Int = 0,
+) {
+    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(label, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        text = valueText ?: "${valueMs}ms",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                MdTextButton(
+                    onClick = onReset,
+                    enabled = valueMs != resetValue,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        horizontal = 6.dp, vertical = 0.dp
+                    )
+                ) { Text("Reset", style = MaterialTheme.typography.labelMedium) }
+                RepeatingIconButton(
+                    onClick = onDecrement,
+                    enabled = valueMs > minValue,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Remove,
+                        contentDescription = "Decrease $label",
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                RepeatingIconButton(
+                    onClick = onIncrement,
+                    enabled = valueMs < maxValue,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Add,
+                        contentDescription = "Increase $label",
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+            Text(
+                helperText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+    }
+}
+
+/**
+ * Per-player Sendspin sync delay tuner: a coarse slider (earlier..later) plus
+ * 1 ms steppers for fine acoustic alignment, a signed value, and Reset to the
+ * server default. Range -1000..1000 ms; negative = earlier, positive = later.
+ */
+@Composable
+internal fun SyncDelayCard(
+    valueMs: Int,
+    defaultMs: Int,
+    onValueChange: (Int) -> Unit,
+    label: String = "Sync delay",
+    compact: Boolean = false,
+) {
+    OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(
+                horizontal = 16.dp,
+                vertical = if (compact) 8.dp else 12.dp
+            ),
+            verticalArrangement = Arrangement.spacedBy(if (compact) 2.dp else 6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    text = if (valueMs > 0) "+$valueMs ms" else "$valueMs ms",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            Slider(
+                value = valueMs.toFloat().coerceIn(-1000f, 1000f),
+                onValueChange = { onValueChange(Math.round(it)) },
+                valueRange = -1000f..1000f,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(28.dp)
+            )
+            // earlier/later hints are redundant in compact rows (the signed
+            // value + steppers already convey direction); drop them to save
+            // vertical space when many speakers are stacked.
+            if (!compact) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        "earlier",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "later",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                RepeatingIconButton(
+                    onClick = { onValueChange(valueMs - 1) },
+                    enabled = valueMs > -1000,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Remove,
+                        contentDescription = "1 ms earlier",
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                RepeatingIconButton(
+                    onClick = { onValueChange(valueMs + 1) },
+                    enabled = valueMs < 1000,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Add,
+                        contentDescription = "1 ms later",
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.weight(1f))
+                MdTextButton(
+                    onClick = { onValueChange(defaultMs) },
+                    enabled = valueMs != defaultMs,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                        horizontal = 6.dp, vertical = 0.dp
+                    )
+                ) { Text("Reset", style = MaterialTheme.typography.labelMedium) }
+            }
+        }
+    }
+}
+
+@Composable
+internal fun SyncErrorGraph(samples: List<SendspinManager.SyncSample>) {
+    val maxAbsError = samples.maxOfOrNull { kotlin.math.abs(it.errorMs) } ?: 0f
+    val rangeMs = maxOf(25f, kotlin.math.ceil(maxAbsError / 10f).toInt() * 10f).coerceAtMost(250f)
+    val latest = samples.lastOrNull()
+    val goodColor = MaterialTheme.colorScheme.primary
+    val warnColor = MaterialTheme.colorScheme.tertiary
+    val badColor = MaterialTheme.colorScheme.error
+    val gridColor = MaterialTheme.colorScheme.outlineVariant
+    val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val labelStyle = MaterialTheme.typography.labelSmall
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = "Sync convergence",
+            style = labelStyle,
+            color = labelColor,
+            modifier = Modifier.padding(bottom = 4.dp)
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(80.dp)
+        ) {
+            Canvas(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(start = 30.dp, end = 36.dp)
+            ) {
+                val topInset = 4.dp.toPx()
+                val bottomInset = 4.dp.toPx()
+                val graphHeight = size.height - topInset - bottomInset
+                val centerY = topInset + graphHeight / 2f
+                val stepX = size.width / (samples.size.coerceAtLeast(2) - 1).toFloat()
+
+                // Grid: center line (0ms), lock band (±5ms), correction threshold (±20ms).
+                drawLine(gridColor, Offset(0f, centerY), Offset(size.width, centerY), 1.dp.toPx())
+                val lockMsY = graphHeight / 2f * (5f / rangeMs)
+                drawLine(goodColor.copy(alpha = 0.45f), Offset(0f, centerY - lockMsY), Offset(size.width, centerY - lockMsY), 0.5.dp.toPx())
+                drawLine(goodColor.copy(alpha = 0.45f), Offset(0f, centerY + lockMsY), Offset(size.width, centerY + lockMsY), 0.5.dp.toPx())
+                val twentyMsY = graphHeight / 2f * (20f / rangeMs)
+                drawLine(warnColor.copy(alpha = 0.6f), Offset(0f, centerY - twentyMsY), Offset(size.width, centerY - twentyMsY), 0.5.dp.toPx())
+                drawLine(warnColor.copy(alpha = 0.6f), Offset(0f, centerY + twentyMsY), Offset(size.width, centerY + twentyMsY), 0.5.dp.toPx())
+
+                // Actual sync convergence: anchor error moving toward 0ms.
+                val points = samples.mapIndexed { i, s ->
+                    val x = stepX * i
+                    val normalized = (s.errorMs / rangeMs).coerceIn(-1f, 1f)
+                    val y = centerY - normalized * (graphHeight / 2f)
+                    Offset(x, y)
+                }
+
+                if (points.size >= 2) {
+                    val path = Path()
+                    path.moveTo(points.first().x, points.first().y)
+                    for (i in 1 until points.size) {
+                        val prev = points[i - 1]
+                        val curr = points[i]
+                        val midX = (prev.x + curr.x) / 2f
+                        val midY = (prev.y + curr.y) / 2f
+                        path.quadraticTo(prev.x, prev.y, midX, midY)
+                    }
+                    path.lineTo(points.last().x, points.last().y)
+
+                    // Color based on latest error magnitude
+                    val absErr = kotlin.math.abs(latest?.errorMs ?: 0f)
+                    val lineColor = when {
+                        absErr < 5f -> goodColor
+                        absErr < 20f -> warnColor
+                        else -> badColor
+                    }
+
+                    drawPath(path, lineColor, style = Stroke(width = 2.dp.toPx()))
+
+                    // Endpoint dot
+                    drawCircle(lineColor, radius = 3.dp.toPx(), center = points.last())
+                }
+            }
+
+            // Labels
+            Text(
+                text = "+${rangeMs.toInt()}",
+                style = labelStyle,
+                color = labelColor,
+                modifier = Modifier.align(Alignment.TopStart)
+            )
+            Text(
+                text = "-${rangeMs.toInt()}",
+                style = labelStyle,
+                color = labelColor,
+                modifier = Modifier.align(Alignment.BottomStart)
+            )
+            latest?.let {
+                val absErr = kotlin.math.abs(it.errorMs)
+                val errColor = when {
+                    absErr < 5f -> goodColor
+                    absErr < 20f -> warnColor
+                    else -> badColor
+                }
+                Text(
+                    text = "${"%.1f".format(it.errorMs)}ms",
+                    style = labelStyle,
+                    color = errColor,
+                    modifier = Modifier.align(Alignment.CenterEnd)
+                )
+            }
+        }
+
+        // Output latency + filter error info line
+        latest?.let {
+            Text(
+                text = "Sync=${"%.1f".format(it.errorMs)}ms  " +
+                    "Output=${"%.0f".format(it.outputLatencyMs)}ms  Clock=${"%.1f".format(it.filterErrorMs)}ms",
+                style = MaterialTheme.typography.bodySmall,
+                color = labelColor,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+    }
+}

@@ -1,0 +1,210 @@
+package net.asksakis.massdroidv2.ui.navigation
+
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.navigation.NavHostController
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.navArgument
+import net.asksakis.massdroidv2.ui.screens.home.HomeScreen
+import net.asksakis.massdroidv2.ui.screens.home.PlayersScreen
+import net.asksakis.massdroidv2.ui.screens.library.AlbumDetailScreen
+import net.asksakis.massdroidv2.ui.screens.library.ArtistDetailScreen
+import net.asksakis.massdroidv2.ui.screens.library.LibraryScreen
+import net.asksakis.massdroidv2.ui.screens.library.PlaylistDetailScreen
+import net.asksakis.massdroidv2.ui.screens.nowplaying.NowPlayingScreen
+import net.asksakis.massdroidv2.ui.screens.search.SearchScreen
+import net.asksakis.massdroidv2.ui.screens.settings.ProximitySettingsScreen
+import net.asksakis.massdroidv2.ui.screens.settings.RecommendationInsightsScreen
+import net.asksakis.massdroidv2.ui.screens.settings.RoomSetupScreen
+import net.asksakis.massdroidv2.ui.screens.settings.SettingsCategory
+import net.asksakis.massdroidv2.ui.screens.settings.SettingsScreen
+
+object Routes {
+    const val HOME = "home"
+    const val PLAYERS = "players"
+    const val LIBRARY = "library"
+    const val SEARCH = "search"
+    const val NOW_PLAYING = "now_playing"
+    const val SETTINGS = "settings?category={category}"
+    const val RECOMMENDATION_INSIGHTS = "recommendation_insights"
+    const val ROOM_SETUP = "room_setup?roomId={roomId}"
+
+    fun settings(category: SettingsCategory? = null): String =
+        if (category != null) "settings?category=${category.name}" else "settings"
+
+    fun roomSetup(roomId: String? = null) =
+        if (roomId != null) "room_setup?roomId=${android.net.Uri.encode(roomId)}" else "room_setup"
+    const val ARTIST_DETAIL = "artist/{itemId}/{provider}?name={name}"
+    const val ALBUM_DETAIL = "album/{itemId}/{provider}?name={name}"
+    const val PLAYLIST_DETAIL = "playlist/{itemId}/{provider}?name={name}&uri={uri}&favorite={favorite}"
+
+    fun artistDetail(itemId: String, provider: String, name: String = "") =
+        "artist/${android.net.Uri.encode(itemId)}/${android.net.Uri.encode(provider)}?name=${android.net.Uri.encode(name)}"
+    fun albumDetail(itemId: String, provider: String, name: String = "") =
+        "album/${android.net.Uri.encode(itemId)}/${android.net.Uri.encode(provider)}?name=${android.net.Uri.encode(name)}"
+    fun playlistDetail(itemId: String, provider: String, name: String = "", uri: String = "", favorite: Boolean = false) =
+        "playlist/${android.net.Uri.encode(itemId)}/${android.net.Uri.encode(provider)}?name=${android.net.Uri.encode(name)}&uri=${android.net.Uri.encode(uri)}&favorite=$favorite"
+}
+
+@Composable
+fun MassDroidNavHost(
+    navController: NavHostController,
+    modifier: Modifier = Modifier
+) {
+    NavHost(
+        navController = navController,
+        startDestination = Routes.HOME,
+        modifier = modifier
+    ) {
+        composable(Routes.HOME) {
+            HomeScreen(
+                onArtistClick = { artist ->
+                    navController.navigate(Routes.artistDetail(artist.itemId, artist.provider, artist.name))
+                },
+                onAlbumClick = { album ->
+                    navController.navigate(Routes.albumDetail(album.itemId, album.provider, album.name))
+                },
+                onPlaylistClick = { playlist ->
+                    navController.navigate(
+                        Routes.playlistDetail(playlist.itemId, playlist.provider, playlist.name, playlist.uri, playlist.favorite)
+                    )
+                },
+                onNavigateToSettings = { navController.navigate(Routes.settings()) },
+                onConfigureServer = { navController.navigate(Routes.settings(SettingsCategory.CONNECTION)) }
+            )
+        }
+
+        composable(Routes.PLAYERS) {
+            PlayersScreen(
+                onNavigateToNowPlaying = { navController.navigate(Routes.NOW_PLAYING) },
+                onNavigateToSettings = { navController.navigate(Routes.settings()) },
+                onNavigateToRoomSetup = { roomId -> navController.navigate(Routes.roomSetup(roomId)) }
+            )
+        }
+
+        composable(Routes.LIBRARY) {
+            LibraryScreen(
+                onArtistClick = { artist ->
+                    navController.navigate(Routes.artistDetail(artist.itemId, artist.provider, artist.name))
+                },
+                onAlbumClick = { album ->
+                    navController.navigate(Routes.albumDetail(album.itemId, album.provider, album.name))
+                },
+                onPlaylistClick = { playlist ->
+                    navController.navigate(Routes.playlistDetail(playlist.itemId, playlist.provider, playlist.name, playlist.uri, playlist.favorite))
+                }
+            )
+        }
+
+        composable(Routes.SEARCH) {
+            SearchScreen(
+                onArtistClick = { artist ->
+                    navController.navigate(Routes.artistDetail(artist.itemId, artist.provider, artist.name))
+                },
+                onAlbumClick = { album ->
+                    navController.navigate(Routes.albumDetail(album.itemId, album.provider, album.name))
+                },
+                onPlaylistClick = { playlist ->
+                    navController.navigate(Routes.playlistDetail(playlist.itemId, playlist.provider, playlist.name, playlist.uri, playlist.favorite))
+                }
+            )
+        }
+
+        composable(Routes.NOW_PLAYING) {
+            NowPlayingScreen(
+                onBack = { navController.popBackStack() },
+                onNavigateToArtist = { itemId, provider, name ->
+                    navController.navigate(Routes.artistDetail(itemId, provider, name))
+                },
+                onNavigateToAlbum = { itemId, provider, name ->
+                    navController.navigate(Routes.albumDetail(itemId, provider, name))
+                }
+            )
+        }
+
+        composable(
+            route = Routes.SETTINGS,
+            arguments = listOf(
+                navArgument("category") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                }
+            )
+        ) { backStackEntry ->
+            val initialCategory = backStackEntry.arguments
+                ?.getString("category")
+                ?.let { name -> runCatching { SettingsCategory.valueOf(name) }.getOrNull() }
+            SettingsScreen(
+                onBack = { navController.popBackStack() },
+                onOpenRecommendationInsights = { navController.navigate(Routes.RECOMMENDATION_INSIGHTS) },
+                onSetupRoom = { roomId -> navController.navigate(Routes.roomSetup(roomId)) },
+                initialCategory = initialCategory
+            )
+        }
+
+        composable(Routes.RECOMMENDATION_INSIGHTS) {
+            RecommendationInsightsScreen(onBack = { navController.popBackStack() })
+        }
+
+        composable(
+            Routes.ROOM_SETUP,
+            arguments = listOf(navArgument("roomId") { type = NavType.StringType; nullable = true; defaultValue = null })
+        ) { backStackEntry ->
+            RoomSetupScreen(
+                roomId = backStackEntry.arguments?.getString("roomId"),
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(
+            Routes.ARTIST_DETAIL,
+            arguments = listOf(
+                navArgument("itemId") { type = NavType.StringType },
+                navArgument("provider") { type = NavType.StringType },
+                navArgument("name") { type = NavType.StringType; defaultValue = "" }
+            )
+        ) {
+            ArtistDetailScreen(
+                onBack = { navController.popBackStack() },
+                onAlbumClick = { album ->
+                    navController.navigate(Routes.albumDetail(album.itemId, album.provider, album.name))
+                },
+                onArtistClick = { artist ->
+                    navController.navigate(Routes.artistDetail(artist.itemId, artist.provider, artist.name))
+                }
+            )
+        }
+
+        composable(
+            Routes.ALBUM_DETAIL,
+            arguments = listOf(
+                navArgument("itemId") { type = NavType.StringType },
+                navArgument("provider") { type = NavType.StringType },
+                navArgument("name") { type = NavType.StringType; defaultValue = "" }
+            )
+        ) {
+            AlbumDetailScreen(
+                onBack = { navController.popBackStack() },
+                onArtistClick = { artist ->
+                    navController.navigate(Routes.artistDetail(artist.itemId, artist.provider, artist.name))
+                }
+            )
+        }
+
+        composable(
+            Routes.PLAYLIST_DETAIL,
+            arguments = listOf(
+                navArgument("itemId") { type = NavType.StringType },
+                navArgument("provider") { type = NavType.StringType },
+                navArgument("name") { type = NavType.StringType; defaultValue = "" },
+                navArgument("uri") { type = NavType.StringType; defaultValue = "" },
+                navArgument("favorite") { type = NavType.BoolType; defaultValue = false }
+            )
+        ) {
+            PlaylistDetailScreen(onBack = { navController.popBackStack() })
+        }
+    }
+}

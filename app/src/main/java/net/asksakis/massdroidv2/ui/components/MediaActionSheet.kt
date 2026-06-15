@@ -1,0 +1,316 @@
+package net.asksakis.massdroidv2.ui.components
+
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import coil.compose.AsyncImage
+import net.asksakis.massdroidv2.domain.model.MediaType
+import net.asksakis.massdroidv2.domain.model.PlaybackState
+import net.asksakis.massdroidv2.domain.model.Player
+import net.asksakis.massdroidv2.ui.components.icons.Bookshelf
+
+data class ActionSheetItem(
+    val title: String,
+    val subtitle: String = "",
+    val uri: String,
+    val imageUrl: String?,
+    val favorite: Boolean,
+    val mediaType: MediaType,
+    val itemId: String,
+    val position: Int? = null,
+    val primaryArtistUri: String? = null,
+    val primaryArtistName: String? = null,
+    val inLibrary: Boolean = true
+)
+
+data class MediaActionSheetExtraAction(
+    val title: String,
+    val icon: @Composable () -> Unit,
+    val onClick: () -> Unit
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MediaActionSheet(
+    title: String,
+    subtitle: String = "",
+    imageUrl: String?,
+    players: List<Player>,
+    selectedPlayerId: String?,
+    favorite: Boolean = false,
+    artistBlocked: Boolean = false,
+    onToggleFavorite: (() -> Unit)? = null,
+    onToggleArtistBlocked: (() -> Unit)? = null,
+    extraActions: List<MediaActionSheetExtraAction> = emptyList(),
+    inLibrary: Boolean = true,
+    onToggleLibrary: (() -> Unit)? = null,
+    onViewInfo: (() -> Unit)? = null,
+    onPlayNow: () -> Unit,
+    onPlayOnPlayer: (Player) -> Unit,
+    onAddToQueue: () -> Unit,
+    onStartRadio: (() -> Unit)? = null,
+    onDelete: (() -> Unit)? = null,
+    onDismiss: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var showSpeakers by remember { mutableStateOf(false) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = SheetDefaults.containerColor()
+    ) {
+        Column(modifier = Modifier.padding(bottom = 32.dp)) {
+            // Header
+            Row(
+                modifier = Modifier.padding(
+                    horizontal = SheetDefaults.HeaderHorizontalPadding,
+                    vertical = SheetDefaults.HeaderVerticalPadding
+                ),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                AsyncImage(
+                    model = imageUrl,
+                    contentDescription = null,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(MaterialTheme.shapes.small),
+                    contentScale = ContentScale.Crop
+                )
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(start = 12.dp)
+                ) {
+                    Text(
+                        text = title,
+                        style = MaterialTheme.typography.titleLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (subtitle.isNotBlank()) {
+                        Text(
+                            text = subtitle,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
+
+            // --- Playback actions ---
+
+            // Play Now
+            ListItem(
+                colors = SheetDefaults.listItemColors(),
+                headlineContent = { Text("Play Now") },
+                leadingContent = { Icon(Icons.Default.PlayArrow, contentDescription = null) },
+                modifier = Modifier.clickable {
+                    onPlayNow()
+                    onDismiss()
+                }
+            )
+
+            // Play on Speaker
+            ListItem(
+                colors = SheetDefaults.listItemColors(),
+                headlineContent = { Text("Play on Speaker") },
+                leadingContent = { Icon(Icons.Default.Speaker, contentDescription = null) },
+                trailingContent = {
+                    Icon(
+                        if (showSpeakers) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = null
+                    )
+                },
+                modifier = Modifier.clickable { showSpeakers = !showSpeakers }
+            )
+
+            AnimatedVisibility(visible = showSpeakers) {
+                Column {
+                    players.filter { it.available }.sortedBy { it.displayName.lowercase() }.forEach { player ->
+                        ListItem(
+                            colors = SheetDefaults.listItemColors(),
+                            headlineContent = { Text(player.displayName) },
+                            leadingContent = {
+                                Spacer(modifier = Modifier.width(24.dp))
+                            },
+                            trailingContent = {
+                                if (player.state == PlaybackState.PLAYING) {
+                                    Icon(
+                                        Icons.Default.GraphicEq,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            },
+                            modifier = Modifier
+                                .padding(start = 16.dp)
+                                .clickable {
+                                    onPlayOnPlayer(player)
+                                    onDismiss()
+                                }
+                        )
+                    }
+                }
+            }
+
+            // Add to Queue
+            ListItem(
+                colors = SheetDefaults.listItemColors(),
+                headlineContent = { Text("Add to Queue") },
+                leadingContent = {
+                    @Suppress("DEPRECATION")
+                    Icon(Icons.Default.QueueMusic, contentDescription = null)
+                },
+                modifier = Modifier.clickable {
+                    onAddToQueue()
+                    onDismiss()
+                }
+            )
+
+            // Start Radio
+            if (onStartRadio != null) {
+                ListItem(
+                    colors = SheetDefaults.listItemColors(),
+                    headlineContent = { Text("Start Radio") },
+                    leadingContent = { Icon(Icons.Default.Radio, contentDescription = null) },
+                    modifier = Modifier.clickable {
+                        onStartRadio()
+                        onDismiss()
+                    }
+                )
+            }
+
+            // --- Library & management actions ---
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 6.dp))
+
+            // Favorite toggle
+            if (onToggleFavorite != null) {
+                ListItem(
+                    colors = SheetDefaults.listItemColors(),
+                    headlineContent = {
+                        Text(if (favorite) "Remove from Favorites" else "Add to Favorites")
+                    },
+                    leadingContent = {
+                        Icon(
+                            if (favorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                            contentDescription = null,
+                            tint = if (favorite) MaterialTheme.colorScheme.error else LocalContentColor.current
+                        )
+                    },
+                    modifier = Modifier.clickable {
+                        onToggleFavorite()
+                        onDismiss()
+                    }
+                )
+            }
+
+            // Library toggle
+            if (onToggleLibrary != null) {
+                ListItem(
+                    colors = SheetDefaults.listItemColors(),
+                    headlineContent = {
+                        Text(if (inLibrary) "Remove from Library" else "Add to Library")
+                    },
+                    leadingContent = {
+                        Icon(
+                            Icons.Default.Bookshelf,
+                            contentDescription = null,
+                            tint = if (inLibrary) MaterialTheme.colorScheme.primary else LocalContentColor.current
+                        )
+                    },
+                    modifier = Modifier.clickable {
+                        onToggleLibrary()
+                        onDismiss()
+                    }
+                )
+            }
+
+            // View Info
+            if (onViewInfo != null) {
+                ListItem(
+                    colors = SheetDefaults.listItemColors(),
+                    headlineContent = { Text("View Info") },
+                    leadingContent = {
+                        Icon(Icons.Default.Info, contentDescription = null)
+                    },
+                    modifier = Modifier.clickable {
+                        onViewInfo()
+                        onDismiss()
+                    }
+                )
+            }
+
+            // Block artist
+            if (onToggleArtistBlocked != null) {
+                ListItem(
+                    colors = SheetDefaults.listItemColors(),
+                    headlineContent = {
+                        Text(if (artistBlocked) "Allow this Artist" else "Do Not Play this Artist")
+                    },
+                    leadingContent = {
+                        Icon(
+                            if (artistBlocked) Icons.Default.Person else Icons.Default.Block,
+                            contentDescription = null,
+                            tint = if (artistBlocked) LocalContentColor.current else MaterialTheme.colorScheme.error
+                        )
+                    },
+                    modifier = Modifier.clickable {
+                        onToggleArtistBlocked()
+                        onDismiss()
+                    }
+                )
+            }
+
+            // Delete
+            if (onDelete != null) {
+                ListItem(
+                    colors = SheetDefaults.listItemColors(),
+                    headlineContent = {
+                        Text("Delete", color = MaterialTheme.colorScheme.error)
+                    },
+                    leadingContent = {
+                        Icon(
+                            Icons.Default.Delete,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    },
+                    modifier = Modifier.clickable {
+                        onDelete()
+                        onDismiss()
+                    }
+                )
+            }
+
+            // Extra actions
+            extraActions.forEach { action ->
+                ListItem(
+                    colors = SheetDefaults.listItemColors(),
+                    headlineContent = { Text(action.title) },
+                    leadingContent = action.icon,
+                    modifier = Modifier.clickable {
+                        action.onClick()
+                        onDismiss()
+                    }
+                )
+            }
+        }
+    }
+}

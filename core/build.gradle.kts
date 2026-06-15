@@ -1,0 +1,103 @@
+plugins {
+    id("com.android.library")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.serialization")
+    id("com.google.dagger.hilt.android")
+    id("com.google.devtools.ksp")
+    id("io.gitlab.arturbosch.detekt")
+    kotlin("kapt")
+}
+
+android {
+    namespace = "net.asksakis.massdroidv2.core"
+    compileSdk = 35
+    ndkVersion = "27.3.13750724"
+
+    defaultConfig {
+        minSdk = 26
+
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+
+        externalNativeBuild {
+            cmake {
+                // 16 KB page-size ELF alignment: not the default on NDK r27 (default from r28).
+                // Required for Android 16 KB-page devices and Play targetSdk 35+ uploads.
+                arguments("-DANDROID_STL=c++_shared", "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON")
+            }
+        }
+        consumerProguardFiles("consumer-rules.pro")
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    buildFeatures {
+        prefab = true
+    }
+}
+
+dependencies {
+    // Compose graphics type only (ProviderManifestCache caches rendered icons as
+    // ImageBitmap). No compose compiler / @Composable here; both front-ends
+    // (phone + TV) are Compose, so the shared icon type belongs in core.
+    val composeBom = platform("androidx.compose:compose-bom:2025.04.01")
+    api(composeBom)
+    api("androidx.compose.ui:ui-graphics")
+
+    // Exposed to consumers (repositories expose Flow/models; app + atv use these)
+    api("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    api("com.squareup.okhttp3:okhttp:4.12.0")
+    api("androidx.core:core-ktx:1.16.0")
+
+    // Internal to core
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
+    implementation("com.caverock:androidsvg-aar:1.4")
+    implementation("com.google.oboe:oboe:1.10.0")
+
+    // Hilt
+    implementation("com.google.dagger:hilt-android:2.52")
+    kapt("com.google.dagger:hilt-compiler:2.52")
+
+    // Unit Testing
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testImplementation("io.mockk:mockk:1.13.13")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    testImplementation("app.cash.turbine:turbine:1.2.0")
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.room:room-testing:2.6.1")
+}
+
+android.testOptions {
+    unitTests.isReturnDefaultValues = true
+    unitTests.all {
+        it.useJUnitPlatform()
+    }
+}
+
+kapt {
+    correctErrorTypes = true
+}
+
+detekt {
+    config.setFrom("$rootDir/detekt.yml")
+}

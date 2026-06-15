@@ -1,0 +1,942 @@
+package net.asksakis.massdroidv2.ui.screens.settings
+
+import android.util.Log
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import net.asksakis.massdroidv2.data.proximity.BeaconProfile
+import net.asksakis.massdroidv2.data.proximity.CalibrationQuality
+import net.asksakis.massdroidv2.data.proximity.DetectedRoom
+import net.asksakis.massdroidv2.data.proximity.rules
+import net.asksakis.massdroidv2.data.proximity.AnchorType
+import net.asksakis.massdroidv2.data.proximity.ProximityConfig
+import net.asksakis.massdroidv2.data.proximity.ProximityConfigStore
+import net.asksakis.massdroidv2.data.proximity.ProximityScanner
+import net.asksakis.massdroidv2.data.proximity.ProximityTransferMode
+import net.asksakis.massdroidv2.data.proximity.ProximityScanner.Companion.AUTO_FINGERPRINT_CYCLES
+import net.asksakis.massdroidv2.data.proximity.ProximityScanner.Companion.CALIBRATION_SAMPLES_PER_SCAN_SESSION
+import net.asksakis.massdroidv2.data.proximity.rankBeaconProfilesForDetection
+import net.asksakis.massdroidv2.data.proximity.RoomConfig
+import net.asksakis.massdroidv2.data.proximity.RoomDetector
+import net.asksakis.massdroidv2.data.proximity.RoomFingerprint
+import net.asksakis.massdroidv2.data.proximity.ProximitySchedule
+import net.asksakis.massdroidv2.data.proximity.RoomPlaybackConfig
+import net.asksakis.massdroidv2.data.proximity.WifiMatchMode
+import net.asksakis.massdroidv2.domain.model.Player
+import net.asksakis.massdroidv2.domain.model.Playlist
+import net.asksakis.massdroidv2.domain.repository.MusicRepository
+import net.asksakis.massdroidv2.domain.repository.PlayerRepository
+import java.util.UUID
+import javax.inject.Inject
+import kotlin.math.sqrt
+
+private const val TAG = "ProximityVM"
+private const val FINGERPRINTS_PER_ROOM = 8
+private const val MIN_WEIGHT = 0.15
+private const val MAX_WEIGHT = 2.5
+private const val STRONG_LOCAL_RSSI_DBM = -65.0
+private const val GOOD_LOCAL_RSSI_DBM = -72.0
+private const val WEAK_LOCAL_RSSI_DBM = -80.0
+private const val FAR_LOCAL_RSSI_DBM = -88.0
+private const val DOMINANT_ANCHOR_MIN_SCORE = 1.1
+
+// Quality gate thresholds
+
+private const val MIN_AVG_VISIBILITY = 0.3
+private const val MIN_DISCRIMINATIVE_BEACONS = 2
+private const val DISCRIMINATIVE_THRESHOLD = 5.0
+private const val MODERATE_DISCRIMINATIVE_THRESHOLD = 2.0
+private const val MAX_FLOOR_RATIO = 0.8
+
+data class BleInspectionItem(
+    val address: String,
+    val name: String?,
+    val rssi: Int,
+    val category: ProximityScanner.DeviceCategory,
+    val addressType: ProximityScanner.AddressType,
+    val anchorType: AnchorType,
+    val profileWeight: Double? = null,
+    val profileDiscrimination: Double? = null,
+    val profileMeanRssi: Int? = null
+)
+
+data class BleInspectionReport(
+    val roomName: String,
+    val totalDevices: Int,
+    val connectedBssid: String?,
+    val usefulAnchors: List<BleInspectionItem>,
+    val stableCandidates: List<BleInspectionItem>,
+    val privateAddressDevices: List<BleInspectionItem>,
+    val mobileDevices: List<BleInspectionItem>
+)
+
+@HiltViewModel
+class ProximityViewModel @Inject constructor(
+    private val configStore: ProximityConfigStore,
+    private val scanner: ProximityScanner,
+    private val playerRepository: PlayerRepository,
+    private val musicRepository: MusicRepository,
+    private val roomDetector: RoomDetector
+) : ViewModel() {
+
+    val config: StateFlow<ProximityConfig> = configStore.config
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ProximityConfig())
+
+    val players: StateFlow<List<Player>> = playerRepository.players
+    val currentRoom: StateFlow<DetectedRoom?> = roomDetector.currentRoom
+    val lastDetection: StateFlow<RoomDetector.DetectionStatus?> = roomDetector.lastDetection
+    val isAvailable: Boolean = scanner.isAvailable()
+    val bluetoothEnabled: StateFlow<Boolean> = scanner.observeBluetoothState()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), scanner.isBluetoothEnabled())
+
+    private val _playlists = MutableStateFlow<List<Playlist>>(emptyList())
+    val playlists: StateFlow<List<Playlist>> = _playlists.asStateFlow()
+
+    init {
+        viewModelScope.launch { configStore.load() }
+    }
+
+    private val _calibrationError = MutableStateFlow<String?>(null)
+    val calibrationError: StateFlow<String?> = _calibrationError.asStateFlow()
+    fun dismissCalibrationError() { _calibrationError.value = null }
+
+    private val _calibrationSummary = MutableStateFlow<String?>(null)
+    val calibrationSummary: StateFlow<String?> = _calibrationSummary.asStateFlow()
+    fun dismissCalibrationSummary() { _calibrationSummary.value = null }
+
+    private val _bleInspectionInProgress = MutableStateFlow(false)
+    val bleInspectionInProgress: StateFlow<Boolean> = _bleInspectionInProgress.asStateFlow()
+
+    private val _bleInspectionReport = MutableStateFlow<BleInspectionReport?>(null)
+    val bleInspectionReport: StateFlow<BleInspectionReport?> = _bleInspectionReport.asStateFlow()
+
+    private val _bleInspectionError = MutableStateFlow<String?>(null)
+    val bleInspectionError: StateFlow<String?> = _bleInspectionError.asStateFlow()
+
+    fun dismissBleInspection() { _bleInspectionReport.value = null }
+    fun dismissBleInspectionError() { _bleInspectionError.value = null }
+
+    fun startLiveMonitoring() {
+        scanner.uiHighAccuracyRequested = true
+        Log.d(TAG, "Live monitoring: ON")
+    }
+
+    fun stopLiveMonitoring() {
+        scanner.uiHighAccuracyRequested = false
+        Log.d(TAG, "Live monitoring: OFF")
+    }
+
+    fun loadPlaylists() {
+        viewModelScope.launch {
+            try { _playlists.value = musicRepository.getPlaylists() } catch (_: Exception) { }
+        }
+    }
+
+    fun setEnabled(enabled: Boolean) {
+        viewModelScope.launch { configStore.update { it.copy(enabled = enabled) } }
+    }
+
+    fun setTransferMode(mode: ProximityTransferMode) {
+        viewModelScope.launch { configStore.update { it.copy(transferMode = mode) } }
+    }
+
+    fun updateRoomStopOnLeave(roomId: String, enabled: Boolean) {
+        viewModelScope.launch {
+            configStore.update { config ->
+                config.copy(rooms = config.rooms.map { r ->
+                    if (r.id == roomId) r.copy(stopOnLeave = enabled) else r
+                })
+            }
+        }
+    }
+
+    fun updateSchedule(transform: (ProximitySchedule) -> ProximitySchedule) {
+        viewModelScope.launch { configStore.update { it.copy(schedule = transform(it.schedule)) } }
+    }
+
+    fun updateRoomPlayback(roomId: String, playback: RoomPlaybackConfig) {
+        viewModelScope.launch {
+            configStore.update { config ->
+                config.copy(rooms = config.rooms.map { r ->
+                    if (r.id == roomId) r.copy(playbackConfig = playback) else r
+                })
+            }
+        }
+    }
+
+    fun updateRoomPolicy(roomId: String, policy: net.asksakis.massdroidv2.data.proximity.DetectionPolicy) {
+        viewModelScope.launch {
+            configStore.update { config ->
+                config.copy(rooms = config.rooms.map { r ->
+                    if (r.id == roomId) r.copy(detectionPolicy = policy) else r
+                })
+            }
+        }
+    }
+
+    fun updateRoomSensitivity(roomId: String, value: Float) {
+        viewModelScope.launch {
+            configStore.update { config ->
+                config.copy(rooms = config.rooms.map { r ->
+                    if (r.id == roomId) r.copy(sensitivity = value) else r
+                })
+            }
+        }
+    }
+
+    fun updateRoomWifiMatchMode(roomId: String, mode: WifiMatchMode?) {
+        viewModelScope.launch {
+            configStore.update { config ->
+                config.copy(rooms = config.rooms.map { r ->
+                    if (r.id == roomId) r.copy(wifiMatchMode = mode) else r
+                })
+            }
+            roomDetector.reset()
+        }
+    }
+
+    fun deleteRoom(roomId: String) {
+        viewModelScope.launch {
+            configStore.update { c -> c.copy(rooms = c.rooms.filter { it.id != roomId }) }
+            roomDetector.reset()
+        }
+    }
+
+    fun inspectRoomBle(roomId: String) {
+        if (!scanner.isBluetoothEnabled()) {
+            _bleInspectionError.value = "Bluetooth is off. Turn it on to inspect BLE signals."
+            return
+        }
+        viewModelScope.launch {
+            _bleInspectionInProgress.value = true
+            try {
+                val room = configStore.config.value.rooms.find { it.id == roomId }
+                if (room == null) {
+                    _bleInspectionError.value = "Room not found."
+                    return@launch
+                }
+
+                val devices = scanner.scanOnce(lowPower = false)
+                val connectedBssid = scanner.readConnectedWifiInfo()?.bssid
+                val rankedProfiles = rankBeaconProfilesForDetection(
+                    room.beaconProfiles.filter { !it.anchorKey.startsWith("wifi:") }
+                )
+                val usefulProfileMap = rankedProfiles.take(8).associateBy { it.anchorKey }
+                val preferredNameAnchors = room.beaconProfiles
+                    .filter { it.anchorType == AnchorType.NAME }
+                    .map { it.anchorKey }
+                    .toSet()
+
+                val usefulAnchors = mutableListOf<BleInspectionItem>()
+                val stableCandidates = mutableListOf<BleInspectionItem>()
+                val privateAddressDevices = mutableListOf<BleInspectionItem>()
+                val mobileDevices = mutableListOf<BleInspectionItem>()
+
+                devices.sortedByDescending { it.rssi }.forEach { device ->
+                    val identity = scanner.classifyAnchorIdentity(device, preferredNameAnchors)
+                    val item = BleInspectionItem(
+                        address = device.address,
+                        name = device.name,
+                        rssi = device.rssi,
+                        category = device.category,
+                        addressType = device.addressType,
+                        anchorType = identity.type,
+                        profileWeight = usefulProfileMap[identity.key]?.weight,
+                        profileDiscrimination = usefulProfileMap[identity.key]?.discriminationScore,
+                        profileMeanRssi = usefulProfileMap[identity.key]?.meanRssi
+                    )
+
+                    when {
+                        usefulProfileMap.containsKey(identity.key) -> usefulAnchors += item
+                        device.category == ProximityScanner.DeviceCategory.MOBILE -> mobileDevices += item
+                        scanner.isPrivateAddress(device.addressType) -> privateAddressDevices += item
+                        else -> stableCandidates += item
+                    }
+                }
+
+                _bleInspectionReport.value = BleInspectionReport(
+                    roomName = room.name,
+                    totalDevices = devices.size,
+                    connectedBssid = connectedBssid,
+                    usefulAnchors = usefulAnchors,
+                    stableCandidates = stableCandidates.take(10),
+                    privateAddressDevices = privateAddressDevices.take(10),
+                    mobileDevices = mobileDevices.take(10)
+                )
+            } finally {
+                _bleInspectionInProgress.value = false
+            }
+        }
+    }
+
+    fun saveRoom(roomId: String?, name: String, playerId: String, playerName: String) {
+        viewModelScope.launch {
+            val id = roomId ?: UUID.randomUUID().toString()
+            val existing = configStore.config.value.rooms.find { it.id == id }
+            val room = existing?.copy(name = name, playerId = playerId, playerName = playerName)
+                ?: RoomConfig(id = id, name = name, playerId = playerId, playerName = playerName)
+            configStore.update { config ->
+                val updated = config.rooms.toMutableList()
+                val index = updated.indexOfFirst { it.id == room.id }
+                if (index >= 0) updated[index] = room else updated.add(room)
+                config.copy(rooms = updated)
+            }
+            if (existing == null) roomDetector.reset()
+            Log.d(TAG, "Room saved: ${room.name}")
+        }
+    }
+
+    /** Calibrate a single room in-place (scan + compute fingerprints/profiles) */
+    fun calibrateRoom(roomId: String, onDone: () -> Unit) {
+        if (!scanner.isBluetoothEnabled()) {
+            _calibrationError.value = "Bluetooth is off. Turn on Bluetooth to calibrate room detection."
+            onDone()
+            return
+        }
+        viewModelScope.launch {
+            roomDetector.suppress()
+            try {
+                _calibrationSummary.value = null
+                _autoFingerprintProgress.value = 0
+
+                val rawScans = mutableListOf<Map<String, Int>>()
+                val nameMap = mutableMapOf<String, String?>()
+                val categoryMap = mutableMapOf<String, ProximityScanner.DeviceCategory>()
+                val addressTypes = mutableMapOf<String, ProximityScanner.AddressType>()
+                val anchorTypes = mutableMapOf<String, AnchorType>()
+                val preferredNameAnchors = existingNameAnchorsForRoom(roomId)
+                val scanSessions = calibrationScanSessions()
+
+                var progress = 0
+                repeat(scanSessions) {
+                    val windows = scanner.scanCalibrationSamples(lowPower = false)
+                    for (devices in windows) {
+                        if (progress >= AUTO_FINGERPRINT_CYCLES) break
+                        val scanMap = buildAnchorScan(
+                            devices,
+                            nameMap,
+                            categoryMap,
+                            addressTypes,
+                            anchorTypes,
+                            preferredNameAnchors
+                        )
+                        rawScans.add(scanMap)
+                        progress++
+                        _autoFingerprintProgress.value = progress
+                    }
+                }
+                _autoFingerprintProgress.value = null
+
+                val counts = mutableMapOf<String, Int>()
+                for (scan in rawScans) for (addr in scan.keys) counts[addr] = (counts[addr] ?: 0) + 1
+                val wifiCount = counts.keys.count { it.startsWith("wifi:") }
+                Log.d(TAG, "Calibration scan: ${counts.size} unique devices (${wifiCount} WiFi APs) in ${rawScans.size} scans")
+                counts.entries.sortedByDescending { it.value }.take(20).forEach { (addr, seen) ->
+                    val name = nameMap[addr]
+                    val cat = categoryMap[addr] ?: ProximityScanner.DeviceCategory.UNKNOWN
+                    val addrType = addressTypes[addr] ?: ProximityScanner.AddressType.PUBLIC
+                    Log.d(TAG, "  $addr seen=$seen name=${name ?: "(unnamed)"} cat=$cat addr=$addrType")
+                }
+
+                val connectedWifi = scanner.readConnectedWifiInfo()
+                val bssid = connectedWifi?.bssid
+                val ssid = connectedWifi?.ssid
+                if (bssid != null) {
+                    Log.d(TAG, "Connected WiFi BSSID: $bssid${ssid?.let { " ($it)" } ?: ""}")
+                }
+
+                // Accept stable addresses normally, and allow private-address devices
+                // only when they look empirically stable enough for room anchoring.
+                val validAddresses = counts
+                    .filter { (addr, seen) ->
+                        scanner.isUsableRoomAnchorAddress(
+                            category = categoryMap[addr] ?: ProximityScanner.DeviceCategory.UNKNOWN,
+                            addressType = addressTypes[addr] ?: ProximityScanner.AddressType.PUBLIC,
+                            seenCount = seen,
+                            name = nameMap[addr]
+                        )
+                    }
+                    .keys
+                Log.d(TAG, "Valid addresses: ${validAddresses.size} (empirically usable room anchors)")
+
+                val config = configStore.config.value
+                val otherRoomMeans = config.rooms
+                    .filter { it.id != roomId && it.beaconProfiles.isNotEmpty() }
+                    .associate { room -> room.id to room.beaconProfiles.associate { it.anchorKey to it.meanRssi.toDouble() } }
+
+                val totalScans = rawScans.sumOf { it.size }
+                if (validAddresses.isEmpty()) {
+                    Log.w(TAG, "Calibration failed: no stable non-mobile BLE devices found")
+                    if (bssid != null) {
+                        configStore.update { cfg ->
+                            cfg.copy(rooms = cfg.rooms.map { r ->
+                                if (r.id == roomId) {
+                                    r.copy(
+                                        connectedBssid = bssid,
+                                        connectedSsid = ssid ?: r.connectedSsid
+                                    )
+                                } else {
+                                    r
+                                }
+                            })
+                        }
+                    }
+                    val totalDevices = counts.size
+                    val mobileCount = counts.keys.count { categoryMap[it] == ProximityScanner.DeviceCategory.MOBILE }
+                    val privateCount = counts.keys.count {
+                        scanner.isPrivateAddress(addressTypes[it] ?: ProximityScanner.AddressType.PUBLIC)
+                    }
+                    val errorMsg = when {
+                        totalScans == 0 -> "No BLE devices detected. Check that Bluetooth and Location are enabled in system settings."
+                        totalDevices == 0 -> "BLE scan ran but found 0 devices. Make sure Location Services are on and Bluetooth permissions are granted."
+                        totalDevices == mobileCount -> "Found $totalDevices devices but all are mobile (phones, wearables). Need stationary devices like TVs, speakers, or routers."
+                        else -> "Found $totalDevices BLE devices, but none qualified as usable room anchors. $mobileCount looked like mobile devices and $privateCount used private addresses. The rest were too unstable or too weakly seen for reliable room fingerprinting."
+                    }
+                    _calibrationError.value = errorMsg
+                } else {
+                    val warnings = mutableListOf<String>()
+                    val room = config.rooms.find { it.id == roomId }
+                    val allNames = nameMap.mapValues { it.value }
+                    // Fingerprint/profile math is CPU-bound; keep it off the main thread to avoid
+                    // jank during calibration. RoomDetector calls below stay on Main (they assert it).
+                    val (fingerprints, profiles, quality) = withContext(Dispatchers.Default) {
+                        val fp = buildFingerprints(rawScans, validAddresses)
+                        val pr = computeBeaconProfiles(rawScans, validAddresses, allNames, anchorTypes, otherRoomMeans)
+                        val q = assessQuality(
+                            room?.name ?: roomId,
+                            pr,
+                            warnings,
+                            room?.detectionPolicy ?: net.asksakis.massdroidv2.data.proximity.DetectionPolicy.STRICT
+                        )
+                        Triple(fp, pr, q)
+                    }
+
+                    configStore.update { cfg ->
+                        val updated = cfg.rooms.map { r ->
+                            if (r.id != roomId) return@map r
+                            r.copy(
+                                fingerprints = fingerprints,
+                                beaconProfiles = profiles,
+                                calibrationQuality = quality,
+                                connectedBssid = bssid ?: r.connectedBssid,
+                                connectedSsid = ssid ?: r.connectedSsid
+                            )
+                        }
+                        cfg.copy(rooms = updated)
+                    }
+
+                    roomDetector.reset()
+                    val updatedRoom = configStore.config.value.rooms.find { it.id == roomId }
+                    if (updatedRoom != null && quality != CalibrationQuality.UNCALIBRATED) {
+                        val rules = updatedRoom.detectionPolicy.rules()
+                        if (quality == CalibrationQuality.GOOD || rules.allowWeakCalibration) {
+                            roomDetector.seedRoom(DetectedRoom(updatedRoom.id, updatedRoom.name, updatedRoom.playerId, updatedRoom.playerName))
+                        }
+                    }
+
+                    _calibrationSummary.value = buildCalibrationSummary(
+                        roomName = room?.name ?: roomId,
+                        quality = quality,
+                        profiles = profiles,
+                        warnings = warnings
+                    )
+
+                    Log.d(TAG, "Single-room calibration: ${room?.name}, ${fingerprints.size} fp, ${profiles.size} profiles, quality=$quality")
+                    if (warnings.isNotEmpty()) warnings.forEach { Log.w(TAG, "  $it") }
+                }
+                onDone()
+            } finally {
+                _autoFingerprintProgress.value = null
+                roomDetector.resume()
+            }
+        }
+    }
+
+    // region Auto Room Tuning
+
+    data class RoomTrainingData(
+        val roomId: String,
+        val roomName: String,
+        val rawScans: List<Map<String, Int>>,
+        val names: Map<String, String?>,
+        val categories: Map<String, ProximityScanner.DeviceCategory>,
+        val anchorTypes: Map<String, AnchorType> = emptyMap(),
+        val addressTypes: Map<String, ProximityScanner.AddressType> = emptyMap(),
+        val connectedBssid: String? = null,
+        val connectedSsid: String? = null
+    )
+
+    data class TuningResult(
+        val roomResults: Map<String, CalibrationQuality>,
+        val warnings: List<String>
+    )
+
+    private val _autoFingerprintProgress = MutableStateFlow<Int?>(null)
+    val autoFingerprintProgress: StateFlow<Int?> = _autoFingerprintProgress.asStateFlow()
+
+    private val _tuningSnapshots = MutableStateFlow<List<RoomTrainingData>>(emptyList())
+    val tuningSnapshots: StateFlow<List<RoomTrainingData>> = _tuningSnapshots.asStateFlow()
+
+    private val _tuningStep = MutableStateFlow<String?>(null)
+    val tuningStep: StateFlow<String?> = _tuningStep.asStateFlow()
+
+    private val _tuningResult = MutableStateFlow<TuningResult?>(null)
+    val tuningResult: StateFlow<TuningResult?> = _tuningResult.asStateFlow()
+
+    fun collectRoomSnapshot(roomId: String, roomName: String, onDone: () -> Unit) {
+        if (!scanner.isBluetoothEnabled()) {
+            _calibrationError.value = "Bluetooth is off. Turn on Bluetooth to calibrate."
+            onDone()
+            return
+        }
+        viewModelScope.launch {
+            roomDetector.suppress()
+            try {
+                _tuningStep.value = "Scanning $roomName..."
+                val rawScans = mutableListOf<Map<String, Int>>()
+                val nameMap = mutableMapOf<String, String?>()
+                val categoryMap = mutableMapOf<String, ProximityScanner.DeviceCategory>()
+                val anchorTypeMap = mutableMapOf<String, AnchorType>()
+                val addrTypeMap = mutableMapOf<String, ProximityScanner.AddressType>()
+                val preferredNameAnchors = existingNameAnchorsForRoom(roomId)
+                val scanSessions = calibrationScanSessions()
+                _autoFingerprintProgress.value = 0
+
+                var progress = 0
+                repeat(scanSessions) {
+                    val windows = scanner.scanCalibrationSamples(lowPower = false)
+                    for (devices in windows) {
+                        if (progress >= AUTO_FINGERPRINT_CYCLES) break
+                        val scanMap = buildAnchorScan(
+                            devices,
+                            nameMap,
+                            categoryMap,
+                            addrTypeMap,
+                            anchorTypeMap,
+                            preferredNameAnchors
+                        )
+                        rawScans.add(scanMap)
+                        progress++
+                        _autoFingerprintProgress.value = progress
+                    }
+                }
+
+                val connectedWifi = scanner.readConnectedWifiInfo()
+                val training = RoomTrainingData(
+                    roomId = roomId,
+                    roomName = roomName,
+                    rawScans = rawScans,
+                    names = nameMap,
+                    categories = categoryMap,
+                    anchorTypes = anchorTypeMap,
+                    addressTypes = addrTypeMap,
+                    connectedBssid = connectedWifi?.bssid,
+                    connectedSsid = connectedWifi?.ssid
+                )
+                _tuningSnapshots.value = _tuningSnapshots.value + training
+                Log.d(
+                    TAG,
+                    "Training data for $roomName: ${rawScans.size} scans, ${nameMap.size} devices, " +
+                        "wifi=${connectedWifi?.bssid ?: "none"}${connectedWifi?.ssid?.let { " ($it)" } ?: ""}"
+                )
+                onDone()
+            } finally {
+                _autoFingerprintProgress.value = null
+                _tuningStep.value = null
+                roomDetector.resume()
+            }
+        }
+    }
+
+    @Suppress("CyclomaticComplexity")
+    fun applyTuning() {
+        viewModelScope.launch {
+            val allTraining = _tuningSnapshots.value
+            if (allTraining.size < 2) return@launch
+
+            val roomResults = mutableMapOf<String, CalibrationQuality>()
+            val warnings = mutableListOf<String>()
+
+            try {
+                _tuningStep.value = "Computing fingerprints..."
+
+                val allNames = allTraining.flatMap { it.names.entries }.associate { it.key to it.value }
+                val allCategories = allTraining.flatMap { it.categories.entries }.associate { it.key to it.value }
+                val allAnchorTypes = allTraining.flatMap { it.anchorTypes.entries }.associate { it.key to it.value }
+
+                val allAddressTypes = allTraining.flatMap { it.addressTypes.entries }
+                    .associate { it.key to it.value }
+
+                // Per-room valid addresses (avoids leaking beacons between rooms)
+                fun roomValidAddresses(training: RoomTrainingData): Set<String> {
+                    val counts = mutableMapOf<String, Int>()
+                    for (scan in training.rawScans) {
+                        for (addr in scan.keys) counts[addr] = (counts[addr] ?: 0) + 1
+                    }
+                    return counts
+                        .filter { (addr, seen) ->
+                            scanner.isUsableRoomAnchorAddress(
+                                category = allCategories[addr] ?: ProximityScanner.DeviceCategory.UNKNOWN,
+                                addressType = allAddressTypes[addr] ?: ProximityScanner.AddressType.PUBLIC,
+                                seenCount = seen,
+                                name = allNames[addr]
+                            )
+                        }
+                        .keys
+                }
+
+                val baseRooms = configStore.config.value.rooms
+                // Heavy fingerprint/profile math runs off the main thread and OUTSIDE the config
+                // write lock (calibrateRoom already does it this way). Results are re-mapped onto
+                // the latest rooms by id, so a concurrent config change can't be clobbered.
+                val updatedById = withContext(Dispatchers.Default) {
+                    // First pass: per-room means for cross-room discrimination
+                    val roomMeans = allTraining.associate { training ->
+                        training.roomId to computeBeaconMeans(training.rawScans, roomValidAddresses(training))
+                    }
+                    allTraining.mapNotNull { training ->
+                        val room = baseRooms.find { it.id == training.roomId } ?: return@mapNotNull null
+                        val validAddrs = roomValidAddresses(training)
+                        val fingerprints = buildFingerprints(training.rawScans, validAddrs)
+                        val otherRoomMeans = roomMeans.filter { it.key != room.id }
+                        val profiles = computeBeaconProfiles(
+                            training.rawScans, validAddrs, allNames, allAnchorTypes, otherRoomMeans
+                        )
+                        val quality = assessQuality(room.name, profiles, warnings, room.detectionPolicy)
+                        roomResults[room.id] = quality
+
+                        Log.d(TAG, "Tuned ${room.name}: ${fingerprints.size} fp, ${profiles.size} profiles, quality=$quality")
+                        profiles.sortedByDescending { it.weight }.take(6).forEach { p ->
+                            Log.d(TAG, "  ${p.name}: mean=${p.meanRssi}, var=${String.format("%.1f", p.variance)}, " +
+                                "vis=${String.format("%.0f%%", p.visibilityRate * 100)}, " +
+                                "disc=${String.format("%.1f", p.discriminationScore)}, " +
+                                "w=${String.format("%.2f", p.weight)}")
+                        }
+
+                        room.id to room.copy(
+                            fingerprints = fingerprints,
+                            beaconProfiles = profiles,
+                            calibrationQuality = quality,
+                            connectedBssid = training.connectedBssid ?: room.connectedBssid,
+                            connectedSsid = training.connectedSsid ?: room.connectedSsid
+                        )
+                    }.toMap()
+                }
+                configStore.update { config ->
+                    config.copy(rooms = config.rooms.map { updatedById[it.id] ?: it })
+                }
+
+                roomDetector.reset()
+                val lastTraining = allTraining.lastOrNull()
+                if (lastTraining != null) {
+                    val lastRoom = configStore.config.value.rooms.find { it.id == lastTraining.roomId }
+                    if (lastRoom != null) {
+                        val quality = lastRoom.calibrationQuality
+                        val rules = lastRoom.detectionPolicy.rules()
+                        if (quality == CalibrationQuality.GOOD ||
+                            (rules.allowWeakCalibration && quality == CalibrationQuality.WEAK)
+                        ) {
+                            roomDetector.seedRoom(DetectedRoom(lastRoom.id, lastRoom.name, lastRoom.playerId, lastRoom.playerName))
+                        }
+                    }
+                }
+
+                Log.d(TAG, "Calibration complete: ${roomResults.values.groupBy { it }.mapValues { it.value.size }}")
+            } finally {
+                _tuningSnapshots.value = emptyList()
+                _tuningStep.value = null
+                _tuningResult.value = TuningResult(roomResults, warnings)
+                roomDetector.resume()
+            }
+        }
+    }
+
+    private fun assessQuality(
+        roomName: String,
+        profiles: List<BeaconProfile>,
+        warnings: MutableList<String>,
+        policy: net.asksakis.massdroidv2.data.proximity.DetectionPolicy = net.asksakis.massdroidv2.data.proximity.DetectionPolicy.STRICT
+    ): CalibrationQuality {
+        if (profiles.isEmpty()) {
+            warnings.add("$roomName: no usable beacons found")
+            return CalibrationQuality.WEAK
+        }
+
+        // Quality based on BLE beacons only (WiFi is support layer, not primary)
+        val bleProfiles = profiles.filter { !it.anchorKey.startsWith("wifi:") }
+        val usableCount = bleProfiles.count { it.weight > MIN_WEIGHT }
+        val avgVisibility = bleProfiles.map { it.visibilityRate }.average().takeIf { !it.isNaN() } ?: 0.0
+        val discriminativeCount = bleProfiles.count { it.discriminationScore > DISCRIMINATIVE_THRESHOLD }
+        val moderateDiscriminativeCount = bleProfiles.count { it.discriminationScore > MODERATE_DISCRIMINATIVE_THRESHOLD }
+        val floorRatio = if (bleProfiles.isNotEmpty()) bleProfiles.count { it.weight <= MIN_WEIGHT + 0.01 }.toDouble() / bleProfiles.size else 1.0
+        val rules = policy.rules()
+        val dominantAnchor = bleProfiles.maxByOrNull { calibrationDominanceScore(it) }
+        val dominantAnchorScore = dominantAnchor?.let { calibrationDominanceScore(it) } ?: 0.0
+        val hasModeratePatternSupport =
+            moderateDiscriminativeCount >= maxOf(rules.minUsableProfiles, 3)
+        val hasDominantAnchorSupport =
+            usableCount >= maxOf(rules.minUsableProfiles, 4) &&
+                avgVisibility >= 0.6 &&
+                floorRatio <= MAX_FLOOR_RATIO &&
+                dominantAnchorScore >= DOMINANT_ANCHOR_MIN_SCORE
+        val hasStructuredFingerprint =
+            usableCount >= rules.minUsableProfiles &&
+                floorRatio <= MAX_FLOOR_RATIO &&
+                bleProfiles.size >= 4 &&
+                (
+                    discriminativeCount >= MIN_DISCRIMINATIVE_BEACONS ||
+                        hasModeratePatternSupport ||
+                        hasDominantAnchorSupport
+                    )
+
+        var isGood = true
+
+        if (usableCount < rules.minUsableProfiles) {
+            warnings.add("$roomName: only $usableCount usable beacons (need ${rules.minUsableProfiles})")
+            isGood = false
+        }
+        if (avgVisibility < MIN_AVG_VISIBILITY) {
+            warnings.add("$roomName: low beacon visibility (${String.format("%.0f%%", avgVisibility * 100)})")
+            if (!hasStructuredFingerprint) {
+                isGood = false
+            }
+        }
+        if (discriminativeCount < MIN_DISCRIMINATIVE_BEACONS) {
+            if (hasModeratePatternSupport) {
+                warnings.add("$roomName: relying on full RSSI pattern instead of strongly discriminative beacons")
+            } else if (hasDominantAnchorSupport && dominantAnchor != null) {
+                warnings.add(
+                    "$roomName: relying on dominant local anchor ${dominantAnchor.name} " +
+                        "(score=${String.format("%.2f", dominantAnchorScore)}) with support anchors"
+                )
+            } else {
+                warnings.add("$roomName: no strongly discriminative beacons")
+                isGood = false
+            }
+        }
+        if (floorRatio > MAX_FLOOR_RATIO) {
+            warnings.add("$roomName: most beacon weights at minimum")
+            isGood = false
+        }
+
+
+        return if (isGood) CalibrationQuality.GOOD else CalibrationQuality.WEAK
+    }
+
+    private fun buildCalibrationSummary(
+        roomName: String,
+        quality: CalibrationQuality,
+        profiles: List<BeaconProfile>,
+        warnings: List<String>
+    ): String {
+        val bleProfiles = profiles.filter { !it.anchorKey.startsWith("wifi:") }
+        val usableCount = bleProfiles.count { it.weight > MIN_WEIGHT }
+        val discriminativeCount = bleProfiles.count { it.discriminationScore > DISCRIMINATIVE_THRESHOLD }
+        val moderateDiscriminativeCount = bleProfiles.count { it.discriminationScore > MODERATE_DISCRIMINATIVE_THRESHOLD }
+        val visibilityPct = ((bleProfiles.map { it.visibilityRate }.average().takeIf { !it.isNaN() } ?: 0.0) * 100).toInt()
+        val lowVisibility = visibilityPct < (MIN_AVG_VISIBILITY * 100).toInt()
+        val patternDriven = discriminativeCount < MIN_DISCRIMINATIVE_BEACONS && moderateDiscriminativeCount >= 3
+        return if (quality == CalibrationQuality.GOOD) {
+            if (lowVisibility && patternDriven) {
+                "Good calibration: low-signal but structured RSSI fingerprint with $usableCount usable BLE anchors, $moderateDiscriminativeCount moderate-separation anchors, avg visibility ${visibilityPct}%."
+            } else if (lowVisibility) {
+                "Good calibration: low-signal but structured fingerprint with $usableCount usable BLE anchors, $discriminativeCount discriminative, avg visibility ${visibilityPct}%."
+            } else if (patternDriven) {
+                "Good calibration: structured RSSI fingerprint with $usableCount usable BLE anchors and $moderateDiscriminativeCount moderate-separation anchors."
+            } else {
+                "Good calibration: $usableCount usable BLE anchors, $discriminativeCount discriminative, avg visibility ${visibilityPct}%."
+            }
+        } else {
+            val reasons = warnings
+                .filter { it.startsWith("$roomName:") }
+                .map { it.substringAfter(": ").replaceFirstChar(Char::uppercase) }
+                .take(2)
+            if (reasons.isNotEmpty()) {
+                "Weak calibration: ${reasons.joinToString(". ")}."
+            } else {
+                "Weak calibration: only $usableCount usable BLE anchors, $discriminativeCount discriminative, avg visibility ${visibilityPct}%."
+            }
+        }
+    }
+
+    fun clearTuning() {
+        _tuningSnapshots.value = emptyList()
+        _tuningStep.value = null
+        _tuningResult.value = null
+        roomDetector.resume()
+    }
+
+    fun dismissTuningResult() {
+        _tuningResult.value = null
+    }
+
+    // endregion
+
+    // region Fingerprint building
+
+    private fun buildFingerprints(
+        rawScans: List<Map<String, Int>>,
+        validAddresses: Set<String>
+    ): List<RoomFingerprint> {
+        val filtered = rawScans.map { scan -> scan.filterKeys { it in validAddresses } }
+            .filter { it.isNotEmpty() }
+        if (filtered.isEmpty()) return emptyList()
+
+        val groupSize = (filtered.size.toFloat() / FINGERPRINTS_PER_ROOM).coerceAtLeast(1f).toInt()
+        val now = System.currentTimeMillis()
+
+        return filtered.chunked(groupSize).mapIndexed { idx, group ->
+            val merged = mutableMapOf<String, MutableList<Int>>()
+            for (scan in group) {
+                for ((addr, rssi) in scan) {
+                    merged.getOrPut(addr) { mutableListOf() }.add(rssi)
+                }
+            }
+            RoomFingerprint(
+                id = UUID.randomUUID().toString(),
+                label = "scan-${idx + 1}",
+                samples = merged.mapValues { (_, values) -> robustMean(values).toInt() },
+                capturedAtMs = now
+            )
+        }
+    }
+
+    private fun computeBeaconMeans(
+        rawScans: List<Map<String, Int>>,
+        validAddresses: Set<String>
+    ): Map<String, Double> {
+        val accum = mutableMapOf<String, MutableList<Int>>()
+        for (scan in rawScans) {
+            for ((addr, rssi) in scan) {
+                if (addr in validAddresses) accum.getOrPut(addr) { mutableListOf() }.add(rssi)
+            }
+        }
+        return accum.mapValues { (_, values) -> robustMean(values) }
+    }
+
+    private fun computeBeaconProfiles(
+        rawScans: List<Map<String, Int>>,
+        validAddresses: Set<String>,
+        allNames: Map<String, String?>,
+        allAnchorTypes: Map<String, AnchorType>,
+        otherRoomMeans: Map<String, Map<String, Double>>
+    ): List<BeaconProfile> {
+        val totalScans = rawScans.size
+        if (totalScans == 0) return emptyList()
+
+        val accum = mutableMapOf<String, MutableList<Int>>()
+        for (scan in rawScans) {
+            for ((addr, rssi) in scan) {
+                if (addr in validAddresses) accum.getOrPut(addr) { mutableListOf() }.add(rssi)
+            }
+        }
+
+        return accum.map { (addr, rssiValues) ->
+            val mean = robustMean(rssiValues)
+            val variance = if (rssiValues.size > 1) {
+                rssiValues.map { (it - mean) * (it - mean) }.average()
+            } else 0.0
+            val visibilityRate = rssiValues.size.toDouble() / totalScans
+            val bestOtherMean = otherRoomMeans.values.mapNotNull { it[addr] }.maxOrNull() ?: -100.0
+            val discriminationScore = mean - bestOtherMean
+
+            val stability = 1.0 / (1.0 + sqrt(variance) / 4.0)
+            val discriminationBoost = 1.0 + discriminationScore.coerceAtLeast(0.0) / 20.0
+            val localSignalFactor = when {
+                mean >= STRONG_LOCAL_RSSI_DBM -> 1.45
+                mean >= GOOD_LOCAL_RSSI_DBM -> 1.25
+                mean >= WEAK_LOCAL_RSSI_DBM -> 1.0
+                mean >= FAR_LOCAL_RSSI_DBM -> 0.8
+                else -> 0.55
+            }
+            val weight = (visibilityRate * stability * discriminationBoost * localSignalFactor)
+                .coerceIn(MIN_WEIGHT, MAX_WEIGHT)
+
+            BeaconProfile(
+                address = addr,
+                name = allNames[addr] ?: addr,
+                meanRssi = mean.toInt(),
+                variance = variance,
+                visibilityRate = visibilityRate,
+                discriminationScore = discriminationScore,
+                weight = weight,
+                anchorKey = addr,
+                anchorType = allAnchorTypes[addr] ?: AnchorType.MAC
+            )
+        }
+    }
+
+    private fun buildAnchorScan(
+        devices: List<ProximityScanner.ScannedDevice>,
+        nameMap: MutableMap<String, String?>,
+        categoryMap: MutableMap<String, ProximityScanner.DeviceCategory>,
+        addressTypeMap: MutableMap<String, ProximityScanner.AddressType>,
+        anchorTypeMap: MutableMap<String, AnchorType>,
+        preferredNameAnchors: Set<String> = emptySet()
+    ): Map<String, Int> {
+        val scanMap = mutableMapOf<String, Int>()
+        for (device in devices) {
+            val identity = scanner.classifyAnchorIdentity(device, preferredNameAnchors)
+            val current = scanMap[identity.key]
+            if (current == null || device.rssi > current) {
+                scanMap[identity.key] = device.rssi
+            }
+            if (identity.displayName.isNotBlank()) nameMap[identity.key] = identity.displayName
+            if (device.category != ProximityScanner.DeviceCategory.UNKNOWN) categoryMap[identity.key] = device.category
+            addressTypeMap[identity.key] = device.addressType
+            anchorTypeMap[identity.key] = identity.type
+        }
+        return scanMap
+    }
+
+    private fun existingNameAnchorsForRoom(roomId: String): Set<String> =
+        configStore.config.value.rooms
+            .find { it.id == roomId }
+            ?.beaconProfiles
+            ?.filter { it.anchorType == AnchorType.NAME }
+            ?.map { it.anchorKey }
+            ?.toSet()
+            .orEmpty()
+
+    private fun calibrationScanSessions(): Int =
+        (AUTO_FINGERPRINT_CYCLES + CALIBRATION_SAMPLES_PER_SCAN_SESSION - 1) / CALIBRATION_SAMPLES_PER_SCAN_SESSION
+
+    private fun robustMean(values: List<Int>): Double {
+        if (values.isEmpty()) return 0.0
+        if (values.size < 5) return values.average()
+
+        val sorted = values.sorted()
+        val trim = (sorted.size * 0.15).toInt().coerceAtLeast(1)
+        val trimmed = sorted.subList(trim, (sorted.size - trim).coerceAtLeast(trim + 1))
+        return if (trimmed.isEmpty()) sorted.average() else trimmed.average()
+    }
+
+    private fun calibrationDominanceScore(profile: BeaconProfile): Double {
+        val localSignalScore = when {
+            profile.meanRssi >= STRONG_LOCAL_RSSI_DBM -> 1.0
+            profile.meanRssi >= GOOD_LOCAL_RSSI_DBM -> 0.75
+            profile.meanRssi >= WEAK_LOCAL_RSSI_DBM -> 0.45
+            profile.meanRssi >= FAR_LOCAL_RSSI_DBM -> 0.2
+            else -> 0.05
+        }
+        val positiveSeparation = when {
+            profile.discriminationScore <= 0.0 -> 0.0
+            else -> (profile.discriminationScore / 20.0).coerceAtMost(2.0)
+        }
+        return localSignalScore * profile.visibilityRate * positiveSeparation
+    }
+
+    // endregion
+
+    override fun onCleared() {
+        scanner.uiHighAccuracyRequested = false
+    }
+}

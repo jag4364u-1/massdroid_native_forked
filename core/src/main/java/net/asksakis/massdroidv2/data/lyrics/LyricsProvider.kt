@@ -1,0 +1,177 @@
+package net.asksakis.massdroidv2.data.lyrics
+
+import android.util.Log
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import net.asksakis.massdroidv2.data.websocket.MaCommands
+import net.asksakis.massdroidv2.data.websocket.MaWebSocketClient
+import javax.inject.Inject
+import javax.inject.Singleton
+
+private const val TAG = "LyricsProvider"
+private const val DEBUG_TAG = "LyricsDbg"
+private const val LYRICS_REQUEST_TIMEOUT_MS = 6_000L
+
+@Singleton
+class LyricsProvider @Inject constructor(
+    private val wsClient: MaWebSocketClient
+) {
+    data class LrcLine(val timeMs: Long, val text: String)
+    sealed interface LyricsContent {
+        data object None : LyricsContent
+        data class Plain(val text: String) : LyricsContent
+        data class Synced(val rawLrc: String, val parsedLines: List<LrcLine>) : LyricsContent
+    }
+    sealed interface FetchResult {
+        data class Found(val lyrics: LyricsContent) : FetchResult
+        data object NotFound : FetchResult
+        data object Failed : FetchResult
+    }
+
+    private var cachedTrackUri: String? = null
+    private var cachedResult: LyricsContent? = null
+
+    suspend fun getLyrics(itemId: String, provider: String, trackUri: String): LyricsContent {
+        cachedResult?.let { if (trackUri == cachedTrackUri) return it }
+
+        val fallbackResult = fallbackLyricsRequest(
+            itemId = itemId,
+            provider = provider
+        )
+        return (parseLyricsResult(fallbackResult) ?: LyricsContent.None).also { cache(trackUri, it) }
+    }
+
+    suspend fun fetchLyrics(itemId: String, provider: String, trackUri: String): FetchResult {
+        cachedResult?.let {
+            if (trackUri == cachedTrackUri) {
+                Log.d(DEBUG_TAG, "fetch cache uri=$trackUri ${contentDebug(it)}")
+                return if (it != LyricsContent.None) {
+                    FetchResult.Found(it)
+                } else {
+                    FetchResult.NotFound
+                }
+            }
+        }
+
+        val fallbackResult = try {
+            fallbackLyricsRequest(itemId = itemId, provider = provider)
+        } catch (e: Exception) {
+            Log.w(TAG, "fetchLyrics failed: ${e.message}")
+            Log.w(DEBUG_TAG, "fetch failed uri=$trackUri error=${e.message}")
+            return FetchResult.Failed
+        }
+
+        val parsed = parseLyricsResult(fallbackResult) ?: return FetchResult.Failed
+        cache(trackUri, parsed)
+        Log.d(DEBUG_TAG, "fetch result uri=$trackUri ${contentDebug(parsed)}")
+        return if (parsed != LyricsContent.None) {
+            FetchResult.Found(parsed)
+        } else {
+            FetchResult.NotFound
+        }
+    }
+
+    fun clearCache() {
+        cachedTrackUri = null
+        cachedResult = null
+    }
+
+    private fun cache(uri: String, result: LyricsContent) {
+        cachedTrackUri = uri
+        cachedResult = result
+    }
+
+    private suspend fun fallbackLyricsRequest(
+        itemId: String,
+        provider: String
+    ): JsonElement? {
+        Log.d(DEBUG_TAG, "request track item=$itemId provider=$provider")
+        val trackJson = wsClient.sendCommand(
+            MaCommands.Music.TRACKS_GET,
+            buildJsonObject {
+                put("item_id", itemId)
+                put("provider_instance_id_or_domain", provider)
+            },
+            timeoutMs = LYRICS_REQUEST_TIMEOUT_MS
+        ) ?: return null
+
+        Log.d(DEBUG_TAG, "request lyrics item=$itemId provider=$provider")
+        return try {
+            wsClient.sendCommand(
+                MaCommands.Metadata.GET_TRACK_LYRICS,
+                buildJsonObject { put("track", trackJson) },
+                timeoutMs = LYRICS_REQUEST_TIMEOUT_MS
+            )
+        } catch (e: Exception) {
+            Log.w(DEBUG_TAG, "request lyrics failed item=$itemId error=${e.message}")
+            null
+        }
+    }
+
+    private fun parseLyricsResult(result: JsonElement?): LyricsContent? {
+        val arr = try {
+            result?.jsonArray
+        } catch (e: Exception) {
+            Log.w(TAG, "Unexpected lyrics response format: ${e.message}")
+            null
+        } ?: return null
+
+        return normalizeLyricsResult(
+            plain = arr.getOrNull(0)?.takeIf { it.jsonPrimitive.isString }?.jsonPrimitive?.content,
+            lrc = arr.getOrNull(1)?.takeIf { it.jsonPrimitive.isString }?.jsonPrimitive?.content
+        )
+    }
+
+    companion object {
+        private val LRC_LINE_PATTERN = Regex("""\[\d+:\d+[.:]\d+]""")
+
+        fun normalizeLyricsResult(plain: String?, lrc: String?): LyricsContent {
+            var normalizedPlain = plain?.takeIf { it.isNotBlank() }
+            var normalizedLrc = lrc?.takeIf { it.isNotBlank() }
+
+            if (normalizedLrc != null && !looksLikeLrc(normalizedLrc)) {
+                if (normalizedPlain == null) normalizedPlain = normalizedLrc
+                normalizedLrc = null
+            } else if (normalizedLrc == null && normalizedPlain != null && looksLikeLrc(normalizedPlain)) {
+                normalizedLrc = normalizedPlain
+                normalizedPlain = null
+            }
+
+            return when {
+                normalizedLrc != null -> {
+                    val parsed = parseLrc(normalizedLrc)
+                    if (parsed.isNotEmpty()) LyricsContent.Synced(normalizedLrc, parsed)
+                    else normalizedPlain?.let { LyricsContent.Plain(it) } ?: LyricsContent.None
+                }
+                normalizedPlain != null -> LyricsContent.Plain(normalizedPlain)
+                else -> LyricsContent.None
+            }
+        }
+
+        fun looksLikeLrc(text: String): Boolean {
+            val firstLines = text.lineSequence().take(5).toList()
+            return firstLines.count { LRC_LINE_PATTERN.containsMatchIn(it) } >= 2
+        }
+
+        fun parseLrc(lrc: String): List<LrcLine> {
+            val regex = Regex("""\[(\d+):(\d+)[.:](\d+)](.*)""")
+            return lrc.lines().mapNotNull { line ->
+                regex.find(line)?.let { match ->
+                    val min = match.groupValues[1].toLong()
+                    val sec = match.groupValues[2].toLong()
+                    val ms = match.groupValues[3].padEnd(3, '0').take(3).toLong()
+                    LrcLine((min * 60 + sec) * 1000 + ms, match.groupValues[4].trim())
+                }
+            }.sortedBy { it.timeMs }
+        }
+
+        private fun contentDebug(content: LyricsContent): String = when (content) {
+            LyricsContent.None -> "plain=false synced=false"
+            is LyricsContent.Plain -> "plain=true synced=false"
+            is LyricsContent.Synced -> "plain=false synced=true"
+        }
+    }
+}
