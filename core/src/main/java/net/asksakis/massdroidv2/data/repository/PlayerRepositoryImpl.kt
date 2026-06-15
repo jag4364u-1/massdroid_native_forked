@@ -58,7 +58,6 @@ class PlayerRepositoryImpl @Inject constructor(
         // forward jumps the position ahead by the paused seconds (and can shoot
         // past the track end, e.g. 4:04 on a 3:31 track). Beyond this cap the
         // capture is treated as stale and the elapsed value is anchored as-is.
-        private const val MAX_POSITION_PROJECTION_S = 2.0
         // Bounded wait for the saved player to (re)appear after a reconnect/reboot
         // before selecting it. players/all can return empty/partial while the
         // server is still registering players, which then arrive later (via a
@@ -552,7 +551,15 @@ class PlayerRepositoryImpl @Inject constructor(
                         updatePosition(
                             serverElapsed = resolved,
                             serverElapsedAtMs = if (currentItemChanged) System.currentTimeMillis() else capturedAtMs,
-                            startTicker = !currentItemChanged
+                            // Always (re)start the local ticker — startPositionTicker
+                            // no-ops when not playing. MA 2.9 emits position updates
+                            // very sparsely (no frequent queue_time_updated; verified
+                            // none in 12 s of playback), so the ticker is the primary
+                            // position driver. On a track change the new item starts at
+                            // 0, so ticking from the reset 0 is correct; leaving it
+                            // stopped (the old behaviour) froze the position until the
+                            // next sparse QUEUE_UPDATED, which can be a minute away.
+                            startTicker = true
                         )
                     }
                 }
@@ -1080,24 +1087,18 @@ class PlayerRepositoryImpl @Inject constructor(
         serverElapsedAtMs: Long = System.currentTimeMillis(),
         startTicker: Boolean = true,
     ) {
-        val now = System.currentTimeMillis()
-        // Project the server-captured elapsed forward to "now", but only across a
-        // sane window — a stale capture (post-pause/background) must not add its
-        // gap (see MAX_POSITION_PROJECTION_S).
-        val projected = if (serverElapsedAtMs <= 0L) {
-            serverElapsed
-        } else {
-            val deltaS = (now - serverElapsedAtMs) / 1000.0
-            serverElapsed + deltaS.coerceIn(0.0, MAX_POSITION_PROJECTION_S)
-        }
-        val current = (if (trackDuration > 0) projected.coerceAtMost(trackDuration) else projected)
-            .coerceAtLeast(0.0)
-        // Anchor the local ticker to NOW (not the server capture time) so every
-        // subsequent tick advances from the resolved current position instead of
-        // re-deriving it from a possibly-stale capture and over-counting.
-        positionBaseTime = current
-        positionBaseTimestamp = now
-        publishPosition(current)
+        // Mirror MA's web UI (helpers/elapsed.ts): the displayed position is a
+        // continuous function of (elapsed_time, elapsed_time_last_updated, now)
+        // while PLAYING, and frozen at elapsed_time otherwise. We therefore anchor
+        // the base to the SERVER CAPTURE time (not "now"), so the ticker re-derives
+        // the same value every event arrives — no backward/forward jump when sparse
+        // QUEUE_UPDATEDs land. Projecting only while playing means we never advance
+        // over paused/stopped time (no over-count past the track end). The
+        // paused->play boundary re-anchors the timestamp to "now" (see the
+        // PLAYER_UPDATED resume branch) so a stale capture can't jump the position.
+        positionBaseTime = serverElapsed
+        positionBaseTimestamp = serverElapsedAtMs.takeIf { it > 0L } ?: System.currentTimeMillis()
+        publishPosition(interpolatedPosition())
         // Emit a server-confirmed position event distinct from the 500ms
         // interpolation ticker. AndroidAutoController subscribes to this to
         // invalidate the AA host's state on every authoritative update,
@@ -1105,6 +1106,21 @@ class PlayerRepositoryImpl @Inject constructor(
         // spamming AA with re-queries that risk the gearhead queue rebuild.
         _playbackPosition.value?.let { _serverPositionUpdates.tryEmit(it) }
         if (startTicker) startPositionTicker() else stopPositionTicker()
+    }
+
+    /**
+     * The current position derived from the server anchor: advance from the
+     * captured elapsed by the wall-clock delta ONLY while playing (frozen
+     * otherwise), clamped to the track duration. Single source of truth for both
+     * the immediate publish and the ticker, so they never disagree (no jumps).
+     */
+    private fun interpolatedPosition(): Double {
+        val advanced = if (isPlaying) {
+            positionBaseTime + ((System.currentTimeMillis() - positionBaseTimestamp) / 1000.0).coerceAtLeast(0.0)
+        } else {
+            positionBaseTime
+        }
+        return (if (trackDuration > 0) advanced.coerceAtMost(trackDuration) else advanced).coerceAtLeast(0.0)
     }
 
     private fun publishPosition(position: Double) {
@@ -1177,8 +1193,7 @@ class PlayerRepositoryImpl @Inject constructor(
         positionTickJob = scope.launch {
             while (isActive) {
                 delay(500)
-                val elapsed = positionBaseTime + (System.currentTimeMillis() - positionBaseTimestamp) / 1000.0
-                publishPosition(if (trackDuration > 0) elapsed.coerceAtMost(trackDuration) else elapsed)
+                publishPosition(interpolatedPosition())
             }
         }
     }
@@ -1215,6 +1230,14 @@ class PlayerRepositoryImpl @Inject constructor(
                 val refreshedSelected = _players.value.find { it.playerId == selectedPlayerId }
                 if (refreshedSelected != null) {
                     _selectedPlayer.value = refreshedSelected
+                    // Re-sync the playing flag from the authoritative snapshot and
+                    // (re)start the ticker. Closes the launch race where selectPlayer
+                    // ran against a stale not-playing state, leaving isPlaying false
+                    // and the position frozen until the next sparse event.
+                    val wasPlaying = isPlaying
+                    isPlaying = refreshedSelected.state == PlaybackState.PLAYING
+                    if (isPlaying && !wasPlaying) startPositionTicker()
+                    else if (!isPlaying && wasPlaying) stopPositionTicker()
                     if (pendingRestoredPlayerId == refreshedSelected.playerId) {
                         pendingRestoredPlayerId = null
                     }
@@ -1315,6 +1338,11 @@ class PlayerRepositoryImpl @Inject constructor(
         }
     }
 
+    override suspend fun refreshActiveQueue() {
+        val id = effectiveQueueId() ?: return
+        refreshQueueForPlayerWithRetry(id)
+    }
+
     private suspend fun refreshQueueForPlayer(playerId: String) {
         try {
             val result = wsClient.sendCommand(
@@ -1325,7 +1353,21 @@ class PlayerRepositoryImpl @Inject constructor(
             _queueState.value = serverQueue?.toDomain(wsClient)
             if (serverQueue != null) {
                 trackDuration = serverQueue.currentItem?.duration ?: 0.0
-                updatePosition(serverQueue.elapsedTime)
+                // Re-sync the playing flag from the freshly-known player state so the
+                // ticker actually runs on open/select. The isPlaying snapshot can be
+                // stale (e.g. captured as not-playing at restore while the player is
+                // really playing), which left the ticker doing "skip start (not
+                // playing)" and the position frozen until the next sparse event.
+                _players.value.find { it.playerId == selectedPlayerId }?.let {
+                    isPlaying = it.state == PlaybackState.PLAYING
+                }
+                // Anchor to the server capture time (not "now") so the fetched
+                // position lands continuous with the running ticker — no jump when
+                // the full player opens / a player is (re)selected.
+                val capturedAtMs = serverQueue.elapsedTimeLastUpdated
+                    ?.let { wsClient.serverWallSecondsToLocalMs(it) }
+                    ?: System.currentTimeMillis()
+                updatePosition(serverQueue.elapsedTime, capturedAtMs)
             } else {
                 resetPosition()
                 trackDuration = 0.0

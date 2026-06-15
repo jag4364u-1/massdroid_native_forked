@@ -502,6 +502,21 @@ class NowPlayingViewModel @Inject constructor(
         )
     }
 
+    /**
+     * Pull fresh active-queue state from the server. Called when the full player
+     * opens: MA pushes position/queue events sparsely, so a freshly-opened player
+     * must fetch rather than wait for the next event (which can be a minute away).
+     */
+    fun refreshNowPlaying() {
+        viewModelScope.launch {
+            try {
+                playerRepository.refreshActiveQueue()
+            } catch (e: Exception) {
+                Log.w(TAG, "refreshNowPlaying failed: ${e.message}")
+            }
+        }
+    }
+
     fun next() {
         val player = selectedPlayer.value ?: return
         viewModelScope.launch {

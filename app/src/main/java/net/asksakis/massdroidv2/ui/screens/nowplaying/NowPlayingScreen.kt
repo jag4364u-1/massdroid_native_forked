@@ -197,7 +197,12 @@ fun NowPlayingScreen(
     var showSleepTimerDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(isForeground) {
-        if (!isForeground) {
+        if (isForeground) {
+            // Pull fresh active-queue state on open. MA pushes position/queue
+            // events sparsely, so a freshly-opened player must fetch rather than
+            // show stale/empty state until the next (possibly far-off) event.
+            viewModel.refreshNowPlaying()
+        } else {
             showQueueSheet = false
             showPlayerMenu = false
             showTransferSheet = false

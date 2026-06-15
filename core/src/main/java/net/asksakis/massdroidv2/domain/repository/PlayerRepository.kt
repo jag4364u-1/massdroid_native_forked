@@ -86,6 +86,14 @@ interface PlayerRepository {
      */
     suspend fun refreshQueueItems(queueId: String)
 
+    /**
+     * Pull the authoritative active-queue state (current item + position) for the
+     * selected player from the server. Used so a surface like the full player can
+     * fetch fresh state on open instead of waiting for the next (sparse) push
+     * event. No-op when no player is selected.
+     */
+    suspend fun refreshActiveQueue()
+
     /** Emits explicit discontinuities like next/previous/seek so buffered local playback can reset policy. */
     val discontinuityCommands: SharedFlow<PlayerDiscontinuityCommand>
 
