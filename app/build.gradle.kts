@@ -193,6 +193,18 @@ dependencies {
     // Modules
     implementation(project(":core"))
     implementation(project(":auto"))
+
+    // Unit Testing
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testImplementation("io.mockk:mockk:1.13.13")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+}
+
+android.testOptions {
+    unitTests.all {
+        it.useJUnitPlatform()
+    }
 }
 
 kapt {
